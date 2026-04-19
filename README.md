@@ -37,3 +37,4 @@ docker compose -f infra/docker-compose.full.yml up --build
 
 - This repo is a starting point with production-minded structure: queues, idempotency hooks, audit logging scaffolding, rate limiting, and an AI service boundary.
 
+# softec
