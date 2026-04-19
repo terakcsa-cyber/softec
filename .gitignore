@@ -3,6 +3,7 @@ node_modules
 .dev.lock
 .env
 .env.*
+!.env.example
 dist
 .next
 coverage
