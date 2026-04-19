@@ -1,0 +1,32 @@
+{
+  "name": "vuln-intel-platform",
+  "private": true,
+  "packageManager": "pnpm@10.0.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "node --env-file=.env scripts/dev.mjs",
+    "dlq:replay:score": "node scripts/replay-dlq-score.mjs",
+    "rescore:all": "node scripts/rescore-all.mjs",
+    "nvd:backfill": "node --env-file=.env scripts/nvd-backfill.mjs",
+    "ai:bulk-enrich": "node --env-file=.env scripts/ai-bulk-enrich.mjs",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "format": "prettier -w .",
+    "infra:up": "docker compose -f infra/docker-compose.yml up -d",
+    "infra:down": "docker compose -f infra/docker-compose.yml down -v"
+  },
+  "devDependencies": {
+    "amqplib": "^0.10.9",
+    "pg": "^8.16.3",
+    "prettier": "^3.6.2",
+    "turbo": "^2.5.6",
+    "uuid": "^11.1.0"
+  }
+}

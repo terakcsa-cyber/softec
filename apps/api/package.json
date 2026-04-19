@@ -1,0 +1,38 @@
+{
+  "name": "@vuln-intel/api",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm run build && concurrently -k -n tsc,node -c yellow,cyan \"tsc -p tsconfig.json -w --preserveWatchOutput\" \"nodemon --watch dist --delay 350ms --exec 'node --enable-source-maps dist/main.js'\"",
+    "build": "tsc -p tsconfig.json",
+    "start": "node --enable-source-maps dist/main.js",
+    "lint": "echo \"(lint placeholder)\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.6",
+    "@nestjs/core": "^11.1.6",
+    "@nestjs/platform-express": "^11.1.6",
+    "@nestjs/throttler": "^6.5.0",
+    "@vuln-intel/shared": "workspace:*",
+    "amqplib": "^0.10.9",
+    "helmet": "^8.1.0",
+    "ioredis": "^5.7.0",
+    "pg": "^8.16.3",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "uuid": "^11.1.0",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.7",
+    "@types/node": "^24.3.0",
+    "@types/pg": "^8.15.5",
+    "concurrently": "^9.2.1",
+    "nodemon": "^3.1.10",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
+

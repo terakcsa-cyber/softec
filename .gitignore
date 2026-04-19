@@ -1,0 +1,14 @@
+node_modules
+.DS_Store
+.dev.lock
+.env
+.env.*
+dist
+.next
+coverage
+.turbo
+*.log
+
+# local data drops
+data/
+

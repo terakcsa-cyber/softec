@@ -1,0 +1,66 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "ui": "stream",
+  "globalEnv": [
+    "PORT",
+    "WEB_PORT",
+    "UPSTREAM_API_BASE",
+    "API_HOST",
+    "WEB_HOST",
+    "API_PORT_BASE",
+    "WEB_PORT_BASE",
+    "DEV_RETRIES",
+    "DATABASE_URL",
+    "RABBITMQ_URL",
+    "REDIS_URL",
+    "API_REDIS_ENRICH_INVALIDATE",
+    "LLM_ENDPOINT",
+    "LLM_API_KEY",
+    "XAI_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "LLM_MODEL",
+    "LLM_PROMPT_VERSION",
+    "LLM_TIMEOUT_MS",
+    "LLM_OLLAMA_MAX_TOKENS",
+    "LLM_RAW_MAX_CHARS",
+    "LLM_HTTP_RETRIES",
+    "PG_POOL_MAX",
+    "AI_SCORE_PREFETCH",
+    "AI_ENRICH_PREFETCH",
+    "AI_ENRICH_REDIS_CACHE",
+    "AI_LOG_ENRICH_CACHE",
+    "AI_LOG_ENRICH_OK",
+    "LLM_LOG_REQUESTS",
+    "NVD_FANOUT_ENRICH",
+    "HOT24_AI_SWEEP",
+    "HOT24_AI_SWEEP_LIMIT",
+    "HOT24_AI_SWEEP_ON_START_MS",
+    "HOT24_AI_SWEEP_INTERVAL_MS",
+    "AI_ENRICH_QUEUE_PUBLISHED_MAX_AGE_HOURS",
+    "BACKLOG_AI_SWEEP",
+    "BACKLOG_AI_SWEEP_LIMIT",
+    "BACKLOG_AI_SWEEP_INTERVAL_MS",
+    "BACKLOG_AI_SWEEP_ON_START_MS",
+    "FSTEC_TG_RSS_URL",
+    "FSTEC_RSS_USER_AGENT",
+    "FSTEC_FEED_SOURCE",
+    "FSTEC_TG_CHANNEL"
+  ],
+  "tasks": {
+    "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "build": {
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**", ".next/**"]
+    },
+    "lint": {
+      "dependsOn": ["^lint"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"]
+    }
+  }
+}
+

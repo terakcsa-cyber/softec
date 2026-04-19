@@ -1,0 +1,155 @@
+"use client";
+
+import { useMemo, useState } from "react";
+import ReactFlow, { Background, Controls, Edge, MiniMap, Node, ReactFlowProvider, useReactFlow } from "reactflow";
+import "reactflow/dist/style.css";
+
+type Graph = {
+  nodes?: { id: string; label?: string; type?: string }[];
+  edges?: { from: string; to: string; label?: string }[];
+};
+
+function graphFromAttackFlow(steps: string[]): Graph | null {
+  const clean = steps.map((s) => s.trim()).filter(Boolean);
+  if (clean.length === 0) return null;
+  const nodes = clean.map((_, idx) => ({
+    id: `step_${idx + 1}`,
+    label: `Шаг ${idx + 1}`,
+    type: "vector"
+  }));
+  const edges = clean.slice(0, -1).map((s, idx) => ({
+    from: `step_${idx + 1}`,
+    to: `step_${idx + 2}`,
+    label: s.length > 120 ? `${s.slice(0, 120)}…` : s
+  }));
+  return { nodes, edges };
+}
+
+function toNodes(graph: Graph | null): Node[] {
+  const nodes = graph?.nodes ?? [];
+  return nodes.map((n, idx) => ({
+    id: n.id,
+    data: { label: n.label ?? n.id, type: n.type ?? "asset" },
+    position: { x: (idx % 5) * 220, y: Math.floor(idx / 5) * 120 },
+    style: {
+      borderRadius: 12,
+      border: "1px solid rgba(255,255,255,0.12)",
+      background:
+        n.type === "attacker"
+          ? "rgba(255,80,120,0.14)"
+          : n.type === "vector"
+            ? "rgba(179,136,255,0.14)"
+            : n.type === "service"
+              ? "rgba(80,200,255,0.14)"
+              : n.type === "impact"
+                ? "rgba(255,190,80,0.14)"
+                : "rgba(0,0,0,0.35)",
+      color: "rgba(255,255,255,0.92)",
+      padding: 10,
+      minWidth: 160
+    }
+  }));
+}
+
+function toEdges(graph: Graph | null): Edge[] {
+  const edges = graph?.edges ?? [];
+  return edges.map((e, idx) => ({
+    id: `${e.from}->${e.to}:${idx}`,
+    source: e.from,
+    target: e.to,
+    label: e.label,
+    animated: true,
+    style: { stroke: "rgba(179, 136, 255, 0.9)", strokeWidth: 2 }
+  }));
+}
+
+function Inner({
+  graph,
+  attackFlow
+}: {
+  graph: Graph | null;
+  attackFlow: string[];
+}) {
+  const [useDerived, setUseDerived] = useState(false);
+  const derived = graph ?? (useDerived ? graphFromAttackFlow(attackFlow) : null);
+  const nodes = useMemo(() => toNodes(derived), [derived]);
+  const edges = useMemo(() => toEdges(derived), [derived]);
+  const rf = useReactFlow();
+  const [hover, setHover] = useState<{ title: string; subtitle?: string } | null>(null);
+
+  return (
+    <div className="glass overflow-hidden rounded-2xl">
+      <div className="flex items-center justify-between px-5 py-4">
+        <div>
+          <div className="text-sm font-medium">Схема атаки</div>
+          <div className="text-xs text-muted">
+            {graph ? "Из LLM-графа" : attackFlow.length > 0 ? "Можно построить из Attack flow" : "Выберите CVE"}
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          {graph == null && attackFlow.length > 0 ? (
+            <button
+              onClick={() => {
+                setUseDerived(true);
+                setTimeout(() => rf.fitView({ padding: 0.2, duration: 250 }), 50);
+              }}
+              className="rounded-lg border border-border bg-black/20 px-2 py-1 text-xs text-fg/90"
+            >
+              Построить схему
+            </button>
+          ) : null}
+          <button
+            onClick={() => rf.fitView({ padding: 0.2, duration: 250 })}
+            className="rounded-lg border border-border bg-black/20 px-2 py-1 text-xs text-fg/90"
+          >
+            Сбросить вид
+          </button>
+          <div className="text-xs text-muted">
+            {derived ? `${nodes.length} узлов` : "—"}
+          </div>
+        </div>
+      </div>
+      <div className="h-[520px] bg-black/30">
+        <div className="relative h-full">
+          {hover && (
+            <div className="pointer-events-none absolute left-4 top-4 z-10 max-w-[420px] rounded-xl border border-white/10 bg-black/60 px-3 py-2 text-xs text-fg/90 backdrop-blur">
+              <div className="font-medium">{hover.title}</div>
+              {hover.subtitle ? <div className="mt-0.5 text-[11px] text-muted">{hover.subtitle}</div> : null}
+            </div>
+          )}
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            fitView
+            onNodeMouseEnter={(_, n) => {
+              const d = (n.data ?? null) as null | { label?: unknown; type?: unknown };
+              setHover({ title: String(d?.label ?? n.id), subtitle: String(d?.type ?? "") });
+            }}
+            onNodeMouseLeave={() => setHover(null)}
+            onEdgeMouseEnter={(_, e) => setHover({ title: String(e.label ?? "Step"), subtitle: `${e.source} → ${e.target}` })}
+            onEdgeMouseLeave={() => setHover(null)}
+          >
+          <Background gap={18} size={1} color="rgba(255,255,255,0.06)" />
+          <MiniMap zoomable pannable />
+          <Controls />
+          </ReactFlow>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function AttackGraphPanel({
+  graph,
+  attackFlow
+}: {
+  graph: Graph | null;
+  attackFlow: string[];
+}) {
+  return (
+    <ReactFlowProvider>
+      <Inner graph={graph} attackFlow={attackFlow} />
+    </ReactFlowProvider>
+  );
+}
+
