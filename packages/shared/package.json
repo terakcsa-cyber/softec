@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "undici": "^6.21.2",
     "zod": "^4.1.5"
   },
   "devDependencies": {

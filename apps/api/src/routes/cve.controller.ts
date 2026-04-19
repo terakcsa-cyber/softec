@@ -36,10 +36,17 @@ function normalizeEnrichmentOutputJson<T extends { output_json: unknown }>(row: 
 
 const ENRICHMENT_AI_RECENT_LIMIT = 20;
 
-/** Для GET: свежая строка-заглушка от фонового воркера не должна скрывать успешный ответ API с более ранним created_at. */
+/**
+ * Для GET: не показывать свежую строку ошибки (_enrich_error), если среди последних строк
+ * уже есть успешное обогащение (ручной API мог записать фейл после парсинга, воркер — успех с 200).
+ */
 function pickAiPayloadForGet(rows: EnrichmentAiQueryRow[]): EnrichmentAiQueryRow | null {
   if (!rows.length) return null;
   const normalized = rows.map(normalizeEnrichmentOutputJson);
+  const successes = normalized.filter(
+    (r) => !isLlmNotConfiguredEnrichment(r) && !isLlmEnrichFailureRow(r)
+  );
+  if (successes.length > 0) return successes[0] ?? null;
   const hit = normalized.find((r) => !isLlmNotConfiguredEnrichment(r));
   return hit ?? null;
 }

@@ -1,3 +1,4 @@
+import { Agent, fetch as undiciFetch } from "undici";
 import {
   LLM_NOT_CONFIGURED_OUTPUT_TEXT,
   LLM_NOT_CONFIGURED_SUMMARY_PREFIX
@@ -50,14 +51,8 @@ type LlmGraph = {
   edges: { from: string; to: string; label: string }[];
 };
 
-function extractAssistantContent(data: unknown): string | null {
-  const choice = (data as { choices?: unknown[] })?.choices?.[0] as
-    | { message?: Record<string, unknown>; delta?: Record<string, unknown> }
-    | undefined;
-  if (!choice) return null;
-  const msg = (choice.message ?? choice.delta) as Record<string, unknown> | undefined;
+function contentFromMessage(msg: Record<string, unknown> | undefined): string | null {
   if (!msg) return null;
-
   const c = msg.content;
   if (typeof c === "string") {
     const t = c.trim();
@@ -78,10 +73,29 @@ function extractAssistantContent(data: unknown): string | null {
     const joined = parts.join("\n").trim();
     return joined.length > 0 ? joined : null;
   }
-
   const reasoning = msg.reasoning_content;
   if (typeof reasoning === "string" && reasoning.trim().length > 0) return reasoning.trim();
+  return null;
+}
 
+function extractAssistantContent(data: unknown): string | null {
+  const choices = (data as { choices?: unknown[] })?.choices;
+  if (!Array.isArray(choices) || choices.length === 0) return null;
+
+  for (const raw of choices) {
+    if (!raw || typeof raw !== "object") continue;
+    const choice = raw as {
+      message?: Record<string, unknown>;
+      delta?: Record<string, unknown>;
+      text?: string;
+    };
+    if (typeof choice.text === "string" && choice.text.trim().length > 0) {
+      return choice.text.trim();
+    }
+    const msg = (choice.message ?? choice.delta) as Record<string, unknown> | undefined;
+    const fromMsg = contentFromMessage(msg);
+    if (fromMsg) return fromMsg;
+  }
   return null;
 }
 
@@ -245,6 +259,78 @@ function readTokenUsage(usage: unknown): { inTok?: number; outTok?: number } {
     inTok: typeof inTok === "number" ? inTok : undefined,
     outTok: typeof outTok === "number" ? outTok : undefined
   };
+}
+
+/** Разворачивает цепочку Error.cause и errno — иначе Node даёт голое «fetch failed». */
+function formatLlmTransportError(err: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<string>();
+  let cur: unknown = err;
+  for (let depth = 0; depth < 10 && cur != null; depth++) {
+    if (cur instanceof Error) {
+      const line = cur.message.trim();
+      if (line.length > 0 && !seen.has(line)) {
+        seen.add(line);
+        parts.push(line);
+      }
+      const ne = cur as NodeJS.ErrnoException & {
+        code?: string;
+        syscall?: string;
+        address?: string;
+        port?: number;
+      };
+      const meta = [
+        ne.code ? `code=${ne.code}` : "",
+        ne.syscall ? `syscall=${ne.syscall}` : "",
+        ne.address != null ? `address=${ne.address}` : "",
+        ne.port != null ? `port=${ne.port}` : ""
+      ]
+        .filter(Boolean)
+        .join(" ");
+      if (meta.length > 0 && !seen.has(meta)) {
+        seen.add(meta);
+        parts.push(meta);
+      }
+      cur = cur.cause;
+    } else {
+      const s = String(cur).trim();
+      if (s.length > 0 && !seen.has(s)) parts.push(s);
+      break;
+    }
+  }
+  return parts.length > 0 ? parts.join(" · ") : "unknown error";
+}
+
+function hintForLlmTransportFailure(detail: string): string {
+  const d = detail.toLowerCase();
+  if (d.includes("econnrefused") || d.includes("econnreset") || d.includes("enotfound")) {
+    return " Подсказка: до хоста с Ollama нет TCP (firewall, другой IP, Ollama слушает только 127.0.0.1 на той машине — нужен 0.0.0.0:11434). Проверьте ping и curl с машины, где запущен API.";
+  }
+  if (d.includes("etimedout") || d.includes("timeout")) {
+    return " Подсказка: таймаут сети или долгий ответ GPU — проверьте Wi‑Fi/VPN, LLM_TIMEOUT_MS и очередь на Ollama.";
+  }
+  if (d.includes("enetunreach") || d.includes("ehostunreach")) {
+    return " Подсказка: маршрут до 192.168.x недоступен (VPN, другая подсеть, отключённый интерфейс).";
+  }
+  return "";
+}
+
+let ollamaUndiciAgent: Agent | undefined;
+
+function getOllamaUndiciAgent(overallTimeoutMs: number): Agent {
+  if (ollamaUndiciAgent) return ollamaUndiciAgent;
+  const connectMs = Math.max(
+    15_000,
+    Math.min(600_000, Number(process.env.LLM_OLLAMA_CONNECT_TIMEOUT_MS ?? 120_000))
+  );
+  const useIpv4 = process.env.LLM_OLLAMA_FORCE_IPV4 !== "false";
+  ollamaUndiciAgent = new Agent({
+    connect: useIpv4 ? { family: 4, timeout: connectMs } : { timeout: connectMs },
+    connectTimeout: connectMs,
+    headersTimeout: Math.min(600_000, overallTimeoutMs + 30_000),
+    bodyTimeout: Math.min(600_000, overallTimeoutMs + 30_000)
+  });
+  return ollamaUndiciAgent;
 }
 
 function isPrivateNetworkHost(hostname: string): boolean {
@@ -551,59 +637,74 @@ export async function runVulnContextLlm(
 
   let res: Response | undefined;
   let lastErr: Error | null = null;
+  const useOllamaUndici =
+    ollama && process.env.LLM_OLLAMA_UNDICI !== "false";
+
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const t0 = Date.now();
     try {
-      res = await fetch(config.endpoint, {
-        method: "POST",
+      const init = {
+        method: "POST" as const,
         headers,
         body: JSON.stringify(requestBody),
         signal: AbortSignal.timeout(timeoutMs)
-      });
+      };
+      const fetched: Response = useOllamaUndici
+        ? ((await undiciFetch(config.endpoint, {
+            ...init,
+            dispatcher: getOllamaUndiciAgent(timeoutMs)
+          })) as unknown as Response)
+        : await fetch(config.endpoint, init);
+      res = fetched;
+
+      if (fetched.ok) {
+        if (logLlm) {
+          const ms = Date.now() - t0;
+          // Ollama access logs show 200 per request — mirror status here so ai worker logs match server traffic.
+          // eslint-disable-next-line no-console
+          console.log(`[llm] HTTP ${fetched.status} cve=${cveId} attempt=${attempt} ms=${ms}`);
+        }
+        break;
+      }
+
+      const text = await fetched.text().catch(() => "");
+      const errSnippet = text.length > 2500 ? `${text.slice(0, 2500)}…` : text;
+      lastErr = new Error(`LLM request failed: ${fetched.status} ${fetched.statusText} ${errSnippet}`);
+
+      const retryable =
+        fetched.status === 500 ||
+        fetched.status === 502 ||
+        fetched.status === 503 ||
+        fetched.status === 504 ||
+        fetched.status === 429;
+      if (!retryable || attempt === maxAttempts) {
+        throw lastErr;
+      }
+      const backoff = 2000 + Math.floor(Math.random() * 1000);
+      if (logLlm) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[llm] retry ${attempt}/${maxAttempts} after HTTP ${fetched.status} in ${backoff}ms cve=${cveId}`
+        );
+      }
+      await new Promise((r) => setTimeout(r, backoff));
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      lastErr = new Error(`LLM fetch failed (endpoint=${config.endpoint} timeoutMs=${timeoutMs}): ${msg}`);
+      const detail = formatLlmTransportError(err);
+      const hint = hintForLlmTransportFailure(detail);
+      lastErr = new Error(
+        `LLM fetch failed (endpoint=${config.endpoint} timeoutMs=${timeoutMs}): ${detail}${hint}`
+      );
       if (attempt === maxAttempts) throw lastErr;
       const backoff = 1500 + Math.floor(Math.random() * 800);
       if (logLlm) {
         // eslint-disable-next-line no-console
-        console.warn(`[llm] retry ${attempt}/${maxAttempts} after transport error in ${backoff}ms: ${msg}`);
+        console.warn(
+          `[llm] retry ${attempt}/${maxAttempts} after transport error in ${backoff}ms: ${formatLlmTransportError(err)}`
+        );
       }
       await new Promise((r) => setTimeout(r, backoff));
       continue;
     }
-
-    if (res.ok) {
-      if (logLlm) {
-        const ms = Date.now() - t0;
-        // Ollama access logs show 200 per request — mirror status here so ai worker logs match server traffic.
-        // eslint-disable-next-line no-console
-        console.log(`[llm] HTTP ${res.status} cve=${cveId} attempt=${attempt} ms=${ms}`);
-      }
-      break;
-    }
-
-    const text = await res.text().catch(() => "");
-    const errSnippet = text.length > 2500 ? `${text.slice(0, 2500)}…` : text;
-    lastErr = new Error(`LLM request failed: ${res.status} ${res.statusText} ${errSnippet}`);
-
-    const retryable =
-      res.status === 500 ||
-      res.status === 502 ||
-      res.status === 503 ||
-      res.status === 504 ||
-      res.status === 429;
-    if (!retryable || attempt === maxAttempts) {
-      throw lastErr;
-    }
-    const backoff = 2000 + Math.floor(Math.random() * 1000);
-    if (logLlm) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[llm] retry ${attempt}/${maxAttempts} after HTTP ${res.status} in ${backoff}ms cve=${cveId}`
-      );
-    }
-    await new Promise((r) => setTimeout(r, backoff));
   }
 
   if (!res?.ok) {
