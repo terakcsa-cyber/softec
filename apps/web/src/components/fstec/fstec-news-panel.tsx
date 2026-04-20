@@ -2,10 +2,11 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { ArrowRight, ExternalLink, Globe, Newspaper, RefreshCw, Rss, Sparkles } from "lucide-react";
+import { ArrowRight, ExternalLink, Globe, Loader2, Newspaper, RefreshCw, Rss, Sparkles, Volume2 } from "lucide-react";
 import { apiFetch } from "@/lib/api-fetch";
 import type { FstecFeedItem } from "@/lib/fstec-rss";
 import type { LocalBduEnrichmentStatus } from "@/lib/fstec-feed-enrich";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../ui/cn";
 
 export type FstecNewsPanelProps = {
@@ -39,6 +40,12 @@ function fmtPubDate(isoOrRfc: string | null): string {
 }
 
 export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
+  const [toast, setToast] = useState<{ title: string; body?: string } | null>(null);
+  const toastTimer = useRef<number | null>(null);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+
+  const storageKey = "vip:fstec:lastSeenId";
+
   const q = useQuery({
     queryKey: ["fstec", "feed"],
     queryFn: async () => {
@@ -49,8 +56,81 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
       }
       return body;
     },
-    staleTime: 60_000
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: true
   });
+
+  const newest = useMemo(() => {
+    const items = (q.data?.items ?? []) as FstecFeedItem[];
+    return items.length > 0 ? items[0] : null;
+  }, [q.data?.items]);
+
+  useEffect(() => {
+    if (!newest?.id) return;
+    let last = "";
+    try {
+      last = localStorage.getItem(storageKey) ?? "";
+    } catch {
+      last = "";
+    }
+    // First load: don't notify, just mark.
+    if (!last) {
+      try {
+        localStorage.setItem(storageKey, newest.id);
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    if (last === newest.id) return;
+
+    try {
+      localStorage.setItem(storageKey, newest.id);
+    } catch {
+      // ignore
+    }
+
+    // Show toast + optional beep.
+    setToast({
+      title: "ФСТЭК: новая публикация",
+      body: newest.title || "Новая запись в ленте БДУ"
+    });
+
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 7000);
+
+    if (soundEnabled) {
+      try {
+        const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext | undefined;
+        if (Ctx) {
+          const ctx = new Ctx();
+          const o = ctx.createOscillator();
+          const g = ctx.createGain();
+          o.type = "sine";
+          o.frequency.value = 880;
+          g.gain.value = 0.0001;
+          o.connect(g);
+          g.connect(ctx.destination);
+          o.start();
+          const now = ctx.currentTime;
+          g.gain.setValueAtTime(0.0001, now);
+          g.gain.linearRampToValueAtTime(0.08, now + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+          o.stop(now + 0.18);
+          o.onended = () => void ctx.close().catch(() => undefined);
+        }
+      } catch {
+        // ignore audio errors
+      }
+    }
+  }, [newest?.id, newest?.title, soundEnabled]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    };
+  }, []);
 
   const enrich = q.data?.source.localBduEnrichment;
 
@@ -70,18 +150,36 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
             по кнопке откроется та же плавающая карточка CVE, что на дашборде для «за 24 часа».
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void q.refetch()}
-          disabled={q.isFetching}
-          className={cn(
-            "inline-flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-fg/90 shadow-sm",
-            "hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25 dark:shadow-none dark:hover:bg-black/35"
-          )}
-        >
-          <RefreshCw className={cn("h-3.5 w-3.5", q.isFetching && "animate-spin")} aria-hidden />
-          Обновить
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            title={soundEnabled ? "Звук: включён" : "Звук: выключен"}
+            onClick={() => setSoundEnabled((v) => !v)}
+            className={cn(
+              "inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-fg/90 shadow-sm",
+              "hover:bg-slate-50 dark:border-border dark:bg-black/25 dark:shadow-none dark:hover:bg-black/35"
+            )}
+          >
+            <Volume2 className={cn("h-3.5 w-3.5", !soundEnabled && "opacity-40")} aria-hidden />
+            {soundEnabled ? "Звук" : "Без звука"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void q.refetch()}
+            disabled={q.isFetching}
+            className={cn(
+              "inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-fg/90 shadow-sm",
+              "hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25 dark:shadow-none dark:hover:bg-black/35"
+            )}
+          >
+            {q.isFetching ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+            )}
+            Обновить
+          </button>
+        </div>
       </div>
 
       {enrich === "unavailable" ? (
@@ -222,6 +320,28 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
           ))
         )}
       </div>
+
+      {toast ? (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-[60] w-[min(420px,calc(100vw-2rem))]">
+          <div className="pointer-events-auto rounded-2xl border border-slate-200/80 bg-white/95 p-4 shadow-2xl backdrop-blur dark:border-white/[0.08] dark:bg-black/70">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-fg/95">{toast.title}</div>
+                {toast.body ? (
+                  <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-muted">{toast.body}</div>
+                ) : null}
+              </div>
+              <button
+                type="button"
+                onClick={() => setToast(null)}
+                className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-fg/80 hover:bg-slate-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/35"
+              >
+                Ок
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

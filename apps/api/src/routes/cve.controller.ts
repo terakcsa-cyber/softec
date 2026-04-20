@@ -162,10 +162,14 @@ export class CveController {
     }
 
     if (q && q.trim().length > 0) {
+      const qTrim = q.trim();
+      const qLower = qTrim.toLowerCase();
+      const isExactCveQuery = /^cve-\d{4}-\d{4,}$/i.test(qTrim);
       /** Подстрока: `LIKE` + ESCAPE, чтобы работали GIN (pg_trgm); литералы как у `strpos`. */
-      const needleLike = escapePgLikePattern(q.trim().toLowerCase());
+      const needleLike = escapePgLikePattern(qLower);
       params.push(needleLike);
       const needleIdx = params.length;
+      const exactCond = `lower(c.cve_id) = $${needleIdx}::text`;
       const likeSuffix = `LIKE '%' || $${needleIdx}::text || '%' ESCAPE E'\\\\'`;
       const contextMatch = `(
         lower(c.cve_id) ${likeSuffix}
@@ -189,11 +193,21 @@ export class CveController {
             )
         )
       )`;
-      const where = [contextMatch, ...filters].join(" AND ");
+      const whereFiltered = [contextMatch, ...filters].join(" AND ");
+
+      // Search ordering: exact CVE hit first, then similarity to CVE id, then fallback order.
+      const searchOrderBy =
+        `ORDER BY exact_match DESC,\n` +
+        `         cve_sim DESC NULLS LAST,\n` +
+        `         (exploit_known) DESC,\n` +
+        `         ${rankExpr} DESC,\n` +
+        `         published_at DESC NULLS LAST,\n` +
+        `         cve_id ASC`;
+
       params.push(limit);
       const limitIdx = params.length;
-      const r = await this.db.query(
-        `SELECT c.cve_id, c.published_at, c.modified_at,
+
+      const baseSelect = `SELECT c.cve_id, c.published_at, c.modified_at,
                 rs.score AS risk_score,
                 es.score AS epss,
                 c.cvss_base AS cvss_base,
@@ -213,17 +227,38 @@ export class CveController {
                   CASE WHEN es.score IS NOT NULL AND es.score >= 0.2 AND es.score < 0.5 THEN 'EPSS>=0.20' ELSE NULL END,
                   CASE WHEN c.cvss_base IS NOT NULL AND c.cvss_base >= 9.0 THEN 'CVSS>=9.0' ELSE NULL END,
                   CASE WHEN c.cvss_base IS NOT NULL AND c.cvss_base >= 8.0 AND c.cvss_base < 9.0 THEN 'CVSS>=8.0' ELSE NULL END
-                ], NULL) AS critical_reasons
+                ], NULL) AS critical_reasons,
+                (${exactCond}) AS exact_match,
+                similarity(lower(c.cve_id), $${needleIdx}::text) AS cve_sim
            FROM cve c
       ${vendorJoin}
       LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
       LEFT JOIN epss_score es ON es.cve_id = c.cve_id
-      LEFT JOIN kev k ON k.cve_id = c.cve_id
-          WHERE ${where}
-       ${(view === "critical_v2" || view === "critical-v2" || view === "criticalv2") ? criticalV2OrderBy : orderBy}
-          LIMIT $${limitIdx}`,
-        params
-      );
+      LEFT JOIN kev k ON k.cve_id = c.cve_id`;
+
+      const useUnionExact =
+        isExactCveQuery &&
+        // only needed when view filters could hide old records; harmless even without filters, but keeps query simpler
+        (filters.length > 0 || view === "last24h" || view === "last_24h" || view === "last-24h");
+
+      const sql = useUnionExact
+        ? `WITH hits AS (
+            ${baseSelect}
+            WHERE ${exactCond}
+            UNION ALL
+            ${baseSelect}
+            WHERE NOT (${exactCond}) AND ${whereFiltered}
+          )
+          SELECT cve_id, published_at, modified_at, risk_score, epss, cvss_base, exploit_known, ai_ready, critical_reasons
+            FROM hits
+           ${searchOrderBy}
+           LIMIT $${limitIdx}`
+        : `${baseSelect}
+           WHERE ${whereFiltered}
+           ${searchOrderBy}
+           LIMIT $${limitIdx}`;
+
+      const r = await this.db.query(sql, params);
       return { items: r.rows };
     }
 
