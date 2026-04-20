@@ -93,14 +93,14 @@ function Inner({
                 setUseDerived(true);
                 setTimeout(() => rf.fitView({ padding: 0.2, duration: 250 }), 50);
               }}
-              className="rounded-lg border border-border bg-black/20 px-2 py-1 text-xs text-fg/90"
+              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-fg/90 shadow-sm dark:border-border dark:bg-black/20 dark:shadow-none"
             >
               Построить схему
             </button>
           ) : null}
           <button
             onClick={() => rf.fitView({ padding: 0.2, duration: 250 })}
-            className="rounded-lg border border-border bg-black/20 px-2 py-1 text-xs text-fg/90"
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-fg/90 shadow-sm dark:border-border dark:bg-black/20 dark:shadow-none"
           >
             Сбросить вид
           </button>
@@ -109,10 +109,10 @@ function Inner({
           </div>
         </div>
       </div>
-      <div className="h-[520px] bg-black/30">
+      <div className="h-[520px] rounded-xl bg-slate-100 ring-1 ring-slate-200/80 dark:bg-black/30 dark:ring-white/10">
         <div className="relative h-full">
           {hover && (
-            <div className="pointer-events-none absolute left-4 top-4 z-10 max-w-[420px] rounded-xl border border-white/10 bg-black/60 px-3 py-2 text-xs text-fg/90 backdrop-blur">
+            <div className="pointer-events-none absolute left-4 top-4 z-10 max-w-[420px] rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-fg/90 shadow-lg backdrop-blur dark:border-white/10 dark:bg-black/60">
               <div className="font-medium">{hover.title}</div>
               {hover.subtitle ? <div className="mt-0.5 text-[11px] text-muted">{hover.subtitle}</div> : null}
             </div>

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { forwardAuthHeaders } from "../../../../../lib/upstream-proxy";
 import { getUpstreamApiBase } from "../../../../../lib/upstream-api";
 
 export async function POST(req: Request, ctx: { params: Promise<{ cveId: string }> }) {
@@ -9,7 +10,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ cveId: string 
   const target = `${getUpstreamApiBase()}/cves/${encodeURIComponent(cveId)}/enrich${qs}`;
   const res = await fetch(target, {
     method: "POST",
-    headers: { accept: "application/json" },
+    headers: { accept: "application/json", ...forwardAuthHeaders(req) },
     cache: "no-store"
   });
   const body = await res.text();

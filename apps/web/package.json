@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "WATCHPACK_POLLING=true CHOKIDAR_USEPOLLING=1 next dev -p ${WEB_PORT:-3001} -H ${WEB_HOST:-127.0.0.1}",
+    "clean:next": "node ../../scripts/clean-web-next-cache.mjs",
+    "dev": "node ../../scripts/clean-web-next-cache.mjs && WATCHPACK_POLLING=true CHOKIDAR_USEPOLLING=1 next dev -p ${WEB_PORT:-3001} -H ${WEB_HOST:-127.0.0.1}",
     "build": "next build",
     "start": "next start -p ${WEB_PORT:-3001} -H ${WEB_HOST:-127.0.0.1}",
     "lint": "next lint",
@@ -39,6 +40,7 @@
     "@types/react": "^18.3.24",
     "@types/react-dom": "^18.3.7",
     "autoprefixer": "^10.4.21",
+    "dotenv": "^17.4.2",
     "eslint": "^9.35.0",
     "eslint-config-next": "^15.5.2",
     "postcss": "^8.5.6",

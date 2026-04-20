@@ -11,6 +11,32 @@ const DEFAULT_FSTEC_RSS_URL = "https://rsshub.app/telegram/channel/bdufstecru";
 
 type FeedSourceMode = "telegram" | "rss";
 
+function extractFetchErrorMessage(e: unknown): string {
+  // Node's fetch() часто бросает TypeError("fetch failed") с cause (DNS/TLS/etc).
+  const anyErr = e as any;
+  const msg = e instanceof Error ? e.message : "Failed to load feed";
+  const cause = anyErr?.cause;
+  const code: string | undefined = cause?.code || anyErr?.code;
+  const hostname: string | undefined = cause?.hostname || anyErr?.hostname;
+
+  if (code === "ENOTFOUND") {
+    return `Нет доступа к интернету/DNS: не удалось разрешить домен${hostname ? ` (${hostname})` : ""}.`;
+  }
+  if (code === "EAI_AGAIN") {
+    return `Проблема с DNS (EAI_AGAIN)${hostname ? ` для ${hostname}` : ""} — попробуйте позже.`;
+  }
+  if (code === "ECONNREFUSED") {
+    return "Соединение отклонено (ECONNREFUSED) — проверьте прокси/сеть.";
+  }
+  if (code === "ETIMEDOUT") {
+    return "Таймаут соединения (ETIMEDOUT) — проверьте сеть или попробуйте позже.";
+  }
+
+  const causeMsg = typeof cause?.message === "string" ? cause.message : "";
+  if (causeMsg) return `${msg}: ${causeMsg}`;
+  return msg;
+}
+
 function resolveFeedMode(): FeedSourceMode {
   const m = process.env.FSTEC_FEED_SOURCE?.trim().toLowerCase();
   if (m === "rss") return "rss";
@@ -91,7 +117,7 @@ function rssUpstreamErrorMessage(status: number): string {
   return base;
 }
 
-async function getFeedFromTelegramPreview() {
+async function getFeedFromTelegramPreview(req: Request) {
   const channel = resolveChannel();
   const url = `https://t.me/s/${encodeURIComponent(channel)}`;
   const res = await fetch(url, {
@@ -117,7 +143,9 @@ async function getFeedFromTelegramPreview() {
     );
   }
   const items = parseTelegramChannelPreviewHtml(html);
-  const localBduEnrichment = await enrichFeedItemsWithLocalBdu(items);
+  const localBduEnrichment = await enrichFeedItemsWithLocalBdu(items, {
+    authorization: req.headers.get("authorization")
+  });
   return NextResponse.json({
     items,
     source: {
@@ -130,7 +158,7 @@ async function getFeedFromTelegramPreview() {
   });
 }
 
-async function getFeedFromRss() {
+async function getFeedFromRss(req: Request) {
   const url = resolveFeedUrl();
   try {
     assertHttpUrl(url);
@@ -158,7 +186,9 @@ async function getFeedFromRss() {
     );
   }
   const items = parseRssOrAtom(xml);
-  const localBduEnrichment = await enrichFeedItemsWithLocalBdu(items);
+  const localBduEnrichment = await enrichFeedItemsWithLocalBdu(items, {
+    authorization: req.headers.get("authorization")
+  });
   return NextResponse.json({
     items,
     source: {
@@ -170,19 +200,19 @@ async function getFeedFromRss() {
   });
 }
 
-export async function GET() {
+export async function GET(req: Request) {
   const mode = resolveFeedMode();
 
   try {
     if (mode === "rss") {
-      return await getFeedFromRss();
+      return await getFeedFromRss(req);
     }
-    return await getFeedFromTelegramPreview();
+    return await getFeedFromTelegramPreview(req);
   } catch (e) {
     if (e instanceof Error && e.message.includes("FSTEC_TG_CHANNEL")) {
       return NextResponse.json({ error: e.message }, { status: 500 });
     }
-    const msg = e instanceof Error ? e.message : "Failed to load feed";
+    const msg = extractFetchErrorMessage(e);
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 }

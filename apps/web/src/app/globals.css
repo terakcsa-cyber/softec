@@ -2,8 +2,32 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
+/* Тёмная тема (по умолчанию до гидрации) */
+html.dark {
   color-scheme: dark;
+  --color-bg: 222 47% 5%;
+  --color-fg: 210 40% 98%;
+  --color-muted: 215 20% 65%;
+  --color-card: 222 47% 8%;
+  --color-border: 217 20% 18%;
+  --color-accent: 252 95% 70%;
+  --color-danger: 0 84% 60%;
+  --color-warn: 38 92% 55%;
+  --color-ok: 142 76% 45%;
+}
+
+/* Светлая тема: нейтральный enterprise (slate), без «грязного» чёрного на белом */
+html.light {
+  color-scheme: light;
+  --color-bg: 220 14% 96%;
+  --color-fg: 222 47% 11%;
+  --color-muted: 220 9% 46%;
+  --color-card: 0 0% 100%;
+  --color-border: 220 13% 91%;
+  --color-accent: 262 83% 48%;
+  --color-danger: 0 72% 51%;
+  --color-warn: 32 95% 44%;
+  --color-ok: 142 71% 36%;
 }
 
 html,
@@ -16,6 +40,16 @@ body {
 }
 
 .glass {
-  @apply bg-white/5 border border-white/10 shadow-glass backdrop-blur-glass;
+  @apply border shadow-glass backdrop-blur-glass;
+  background-color: hsl(0 0% 100% / 0.05);
+  border-color: hsl(0 0% 100% / 0.1);
 }
 
+html.light .glass {
+  background-color: hsl(0 0% 100% / 0.92);
+  border-color: hsl(220 13% 90%);
+  box-shadow:
+    0 0 0 1px hsl(220 14% 10% / 0.04),
+    0 4px 6px hsl(220 14% 10% / 0.03),
+    0 12px 32px hsl(220 14% 10% / 0.06);
+}

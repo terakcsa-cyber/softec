@@ -1,20 +1,38 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import { AppearanceSettings } from "@/components/auth/appearance-settings";
+import { SecuritySettings } from "@/components/auth/security-settings";
+import { apiFetch } from "@/lib/api-fetch";
 import { needsOnDemandEnrich, parseAiOutputJson, shouldAutoEnrichOnOpen } from "@/lib/cve-enrich-ui";
 import { CVE_POLL_BACKGROUND_ONLY_MS, CVE_POLL_WHILE_ENRICH_MS, ENRICH_UI_WAIT_MS } from "@/lib/enrich-ui-wait";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { BarChart3, Search, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Bandage, BarChart3, Loader2, RefreshCw, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
 import * as Tabs from "@radix-ui/react-tabs";
 import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "../ui/cn";
 import { CveCard } from "./cve-card";
 import { AiSummaryPanel } from "./ai-summary-panel";
 import { RiskBreakdownPanel } from "./risk-breakdown-panel";
-import { AttackGraphPanel } from "./attack-graph-panel";
 import { OverviewDashboardPanel } from "./overview-dashboard-panel";
-import { DraggableCveModals, type DashboardModalFrame } from "./draggable-cve-modals";
+
+/** reactflow ломает SSR/Webpack в Next 15 — только клиент. */
+const AttackGraphPanel = dynamic(
+  () => import("./attack-graph-panel").then((m) => m.AttackGraphPanel),
+  {
+    ssr: false,
+    loading: () => <div className="py-10 text-center text-sm text-muted">Загрузка схемы атаки…</div>
+  }
+);
+import {
+  DASHBOARD_CVE_MODAL_BASE_WIDTH_PX,
+  DraggableCveModals,
+  type DashboardModalFrame
+} from "./draggable-cve-modals";
 import { FstecNewsPanel } from "../fstec/fstec-news-panel";
+import { PatchManagementPanel } from "./patch-management-panel";
+import { VulnSearchBar } from "./vuln-search-bar";
 
 type CveListItem = {
   cve_id: string;
@@ -35,7 +53,7 @@ type CveDetails = {
 };
 
 async function fetchCveDetail(cveId: string): Promise<CveDetails> {
-  const res = await fetch(`/api/cves/${encodeURIComponent(cveId)}`, { cache: "no-store" });
+  const res = await apiFetch(`/api/cves/${encodeURIComponent(cveId)}`, { cache: "no-store" });
   if (!res.ok) throw new Error("Failed to fetch CVE");
   return (await res.json()) as CveDetails;
 }
@@ -57,12 +75,14 @@ type SavedView = {
 };
 
 type TriageStatus = "new" | "review" | "done";
-type ModuleKey = "dashboard" | "vulns" | "fstec" | "settings";
+type ModuleKey = "dashboard" | "vulns" | "fstec" | "patches" | "settings";
 
 export function Dashboard() {
   const queryClient = useQueryClient();
   const [moduleKey, setModuleKey] = useState<ModuleKey>("dashboard");
   const [q, setQ] = useState("");
+  /** Задержка запроса к API при наборе текста полнотекстового поиска */
+  const [qDebounced, setQDebounced] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [view, setView] = useState<"critical_v2" | "critical" | "latest" | "last24h" | "kev" | "all">("critical_v2");
   const [limit, setLimit] = useState<15 | 20>(20);
@@ -102,6 +122,11 @@ export function Dashboard() {
   }, [savedViews]);
 
   useEffect(() => {
+    const id = window.setTimeout(() => setQDebounced(q.trim()), 400);
+    return () => window.clearTimeout(id);
+  }, [q]);
+
+  useEffect(() => {
     try {
       localStorage.setItem("vip:triageStatus", JSON.stringify(triage));
     } catch {
@@ -113,7 +138,7 @@ export function Dashboard() {
   const queueHealthQuery = useQuery({
     queryKey: ["stats", "queue"],
     queryFn: async () => {
-      const res = await fetch(`/api/stats/queue`, { cache: "no-store" });
+      const res = await apiFetch(`/api/stats/queue`, { cache: "no-store" });
       if (!res.ok) throw new Error(`Failed to fetch queue (${res.status})`);
       return (await res.json()) as unknown;
     },
@@ -126,7 +151,7 @@ export function Dashboard() {
     queryKey: ["stats", "dlq", "sample", dlqQueue],
     enabled: dlqOpen,
     queryFn: async () => {
-      const res = await fetch(`/api/stats/dlq/sample?queue=${encodeURIComponent(dlqQueue)}&limit=8`, {
+      const res = await apiFetch(`/api/stats/dlq/sample?queue=${encodeURIComponent(dlqQueue)}&limit=8`, {
         cache: "no-store"
       });
       if (!res.ok) throw new Error(`Failed to fetch DLQ sample (${res.status})`);
@@ -135,13 +160,17 @@ export function Dashboard() {
   });
 
   const dlqRetry = async () => {
-    await fetch(`/api/stats/dlq/retry?queue=${encodeURIComponent(dlqQueue)}&limit=1000`, { method: "POST" });
+    await apiFetch(`/api/stats/dlq/retry?queue=${encodeURIComponent(dlqQueue)}&limit=1000`, {
+      method: "POST"
+    });
     await queueHealthQuery.refetch();
     await dlqSampleQuery.refetch();
   };
 
   const dlqClear = async () => {
-    await fetch(`/api/stats/dlq/clear?queue=${encodeURIComponent(dlqQueue)}&limit=1000`, { method: "POST" });
+    await apiFetch(`/api/stats/dlq/clear?queue=${encodeURIComponent(dlqQueue)}&limit=1000`, {
+      method: "POST"
+    });
     await queueHealthQuery.refetch();
     await dlqSampleQuery.refetch();
   };
@@ -162,7 +191,7 @@ export function Dashboard() {
   const summaryQuery = useQuery({
     queryKey: ["stats", "summary"],
     queryFn: async () => {
-      const res = await fetch(`/api/stats/summary`, { cache: "no-store" });
+      const res = await apiFetch(`/api/stats/summary`, { cache: "no-store" });
       if (!res.ok) throw new Error(`Failed to fetch summary (${res.status})`);
       return (await res.json()) as {
         totalCves: number;
@@ -189,9 +218,10 @@ export function Dashboard() {
   const manualEnrichAllowed = summaryQuery.data?.manualEnrichAllowed !== false;
 
   const vendorsQuery = useQuery({
-    queryKey: ["stats", "vendors", 24],
+    queryKey: ["stats", "vendors", 24, 50],
+    enabled: moduleKey === "dashboard" || moduleKey === "vulns",
     queryFn: async () => {
-      const res = await fetch(`/api/stats/vendors?windowHours=24&limit=10`, { cache: "no-store" });
+      const res = await apiFetch(`/api/stats/vendors?windowHours=24&limit=50`, { cache: "no-store" });
       if (!res.ok) throw new Error(`Failed to fetch vendors (${res.status})`);
       return (await res.json()) as {
         windowHours: number;
@@ -207,16 +237,16 @@ export function Dashboard() {
   });
 
   const hotCvesQuery = useQuery({
-    queryKey: ["cves", "dashboard", "last24h", "risk", 24],
+    queryKey: ["cves", "dashboard", "last24h", "fresh", 24],
     enabled: moduleKey === "dashboard",
     staleTime: 45_000,
     refetchInterval: moduleKey === "dashboard" ? 90_000 : false,
     queryFn: async () => {
       const url = new URL(`/api/cves`, window.location.origin);
       url.searchParams.set("view", "last24h");
-      url.searchParams.set("sort", "risk");
+      url.searchParams.set("sort", "fresh");
       url.searchParams.set("limit", "24");
-      const res = await fetch(url.toString(), { cache: "no-store" });
+      const res = await apiFetch(url.toString(), { cache: "no-store" });
       if (!res.ok) throw new Error(`Failed to fetch hot CVEs (${res.status})`);
       const data = (await res.json()) as { items: CveListItem[] };
       return data.items;
@@ -224,7 +254,7 @@ export function Dashboard() {
   });
 
   const listQuery = useQuery({
-    queryKey: ["cves", view, limit, sort, kevOnly, minCvss, minEpss, vendorFilter, productFilter, q],
+    queryKey: ["cves", view, limit, sort, kevOnly, minCvss, minEpss, vendorFilter, productFilter, qDebounced],
     enabled: moduleKey === "vulns",
     queryFn: async () => {
       const url = new URL(`/api/cves`, window.location.origin);
@@ -239,8 +269,8 @@ export function Dashboard() {
       if (minEpss != null) url.searchParams.set("minEpss", String(minEpss));
       if (vendorFilter) url.searchParams.set("vendor", vendorFilter);
       if (productFilter) url.searchParams.set("product", productFilter);
-      if (q.trim()) url.searchParams.set("q", q.trim());
-      const res = await fetch(url.toString(), { cache: "no-store" });
+      if (qDebounced) url.searchParams.set("q", qDebounced);
+      const res = await apiFetch(url.toString(), { cache: "no-store" });
       if (!res.ok) throw new Error(`Failed to fetch list (${res.status})`);
       const data = (await res.json()) as { items: CveListItem[] };
       return data.items;
@@ -364,6 +394,27 @@ export function Dashboard() {
     return () => clearInterval(id);
   }, [enrichPosted, enrichTargetCveId]);
 
+  const refreshOverview = useCallback(async () => {
+    await Promise.all([
+      summaryQuery.refetch(),
+      hotCvesQuery.refetch(),
+      vendorsQuery.refetch(),
+      queueHealthQuery.refetch()
+    ]);
+  }, [summaryQuery, hotCvesQuery, vendorsQuery, queueHealthQuery]);
+
+  const overviewRefreshing =
+    summaryQuery.isFetching || hotCvesQuery.isFetching || vendorsQuery.isFetching || queueHealthQuery.isFetching;
+
+  const refreshVulns = useCallback(async () => {
+    const tasks: Promise<unknown>[] = [listQuery.refetch(), vendorsQuery.refetch()];
+    if (selected) tasks.push(detailsQuery.refetch());
+    await Promise.all(tasks);
+  }, [listQuery, vendorsQuery, selected, detailsQuery]);
+
+  const vulnsRefreshing =
+    listQuery.isFetching || vendorsQuery.isFetching || (selected != null && detailsQuery.isFetching);
+
   const requestEnrich = useCallback(async (cveId: string, force = false) => {
     enrichKickoffForCveRef.current = cveId;
     setEnrichTargetCveId(cveId);
@@ -372,7 +423,7 @@ export function Dashboard() {
     enrichPollDeadlineRef.current = Date.now() + ENRICH_UI_WAIT_MS;
     try {
       const q = force ? "?force=1" : "";
-      const res = await fetch(`/api/cves/${encodeURIComponent(cveId)}/enrich${q}`, { method: "POST" });
+      const res = await apiFetch(`/api/cves/${encodeURIComponent(cveId)}/enrich${q}`, { method: "POST" });
       if (!res.ok) throw new Error("enrich request failed");
       await queryClient.invalidateQueries({ queryKey: ["cve", cveId] });
     } catch {
@@ -436,7 +487,8 @@ export function Dashboard() {
       const maxZ = prev.length === 0 ? 1999 : Math.max(...prev.map((m) => m.z));
       const i = prev.length;
       const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
-      const x = Math.min(32 + (i % 5) * 36, Math.max(16, vw - 540));
+      const pad = 24;
+      const x = Math.min(32 + (i % 5) * 36, Math.max(16, vw - DASHBOARD_CVE_MODAL_BASE_WIDTH_PX - pad));
       const y = 48 + (i % 5) * 32;
       return [
         ...prev,
@@ -483,8 +535,11 @@ export function Dashboard() {
               switchModule("dashboard");
             }}
             className={cn(
-              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85 hover:bg-black/25",
-              moduleKey === "dashboard" ? "border-accent/30 bg-accent/10" : "border-border bg-black/10"
+              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+              "hover:bg-slate-100 dark:hover:bg-black/25",
+              moduleKey === "dashboard"
+                ? "border-accent/30 bg-accent/10"
+                : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
             )}
             title="Дашборды"
           >
@@ -493,8 +548,11 @@ export function Dashboard() {
           <button
             onClick={() => switchModule("vulns")}
             className={cn(
-              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85 hover:bg-black/25",
-              moduleKey === "vulns" ? "border-accent/30 bg-accent/10" : "border-border bg-black/10"
+              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+              "hover:bg-slate-100 dark:hover:bg-black/25",
+              moduleKey === "vulns"
+                ? "border-accent/30 bg-accent/10"
+                : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
             )}
             title="Уязвимости"
           >
@@ -503,18 +561,37 @@ export function Dashboard() {
           <button
             onClick={() => switchModule("fstec")}
             className={cn(
-              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85 hover:bg-black/25",
-              moduleKey === "fstec" ? "border-accent/30 bg-accent/10" : "border-border bg-black/10"
+              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+              "hover:bg-slate-100 dark:hover:bg-black/25",
+              moduleKey === "fstec"
+                ? "border-accent/30 bg-accent/10"
+                : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
             )}
             title="ФСТЭК"
           >
             <ShieldCheck className="h-5 w-5" />
           </button>
           <button
+            onClick={() => switchModule("patches")}
+            className={cn(
+              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+              "hover:bg-slate-100 dark:hover:bg-black/25",
+              moduleKey === "patches"
+                ? "border-accent/30 bg-accent/10"
+                : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
+            )}
+            title="Патч‑менеджмент"
+          >
+            <Bandage className="h-5 w-5" />
+          </button>
+          <button
             onClick={() => switchModule("settings")}
             className={cn(
-              "mt-auto flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85 hover:bg-black/25",
-              moduleKey === "settings" ? "border-accent/30 bg-accent/10" : "border-border bg-black/10"
+              "mt-auto flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+              "hover:bg-slate-100 dark:hover:bg-black/25",
+              moduleKey === "settings"
+                ? "border-accent/30 bg-accent/10"
+                : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
             )}
             title="Настройки"
           >
@@ -551,62 +628,92 @@ export function Dashboard() {
                 }}
                 queueHealth={queueHealthQuery.data}
                 onOpenDlq={() => setDlqOpen(true)}
+                onRefresh={() => void refreshOverview()}
+                refreshing={overviewRefreshing}
               />
             </div>
           ) : moduleKey === "vulns" ? (
             <div className="mt-0 grid grid-cols-12 gap-6">
               <section className="col-span-12 lg:col-span-4">
-                <div className="glass rounded-2xl p-4">
-                  <div className="mb-3 flex items-center justify-between gap-3">
-                    <div className="space-y-0.5">
+                <div className="glass overflow-visible rounded-2xl p-4">
+                  <div className="mb-1 flex items-start justify-between gap-2">
+                    <div className="min-w-0 space-y-0.5">
                       <div className="text-sm font-medium">Уязвимости</div>
-                      <div className="text-[11px] text-muted">Поиск, фильтры, разбор и карточки CVE.</div>
+                      <div className="text-[11px] text-muted">
+                        Список, фильтры и карточки CVE. Основной сценарий — полнотекстовый поиск ниже.
+                      </div>
                     </div>
-                    <div className="glass flex w-[260px] items-center gap-2 rounded-xl px-3 py-2">
-                      <Search className="h-4 w-4 text-muted" />
-                      <input
-                        value={q}
-                        onChange={(e) => setQ(e.target.value)}
-                        placeholder="Поиск по CVE…"
-                        className="w-full bg-transparent text-sm outline-none placeholder:text-muted"
-                      />
-                    </div>
+                    <button
+                      type="button"
+                      title="Обновить список и подсказки"
+                      onClick={() => void refreshVulns()}
+                      disabled={vulnsRefreshing}
+                      className={cn(
+                        "inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-fg/90",
+                        "hover:bg-slate-100 dark:border-border dark:bg-black/20 dark:hover:bg-black/35",
+                        vulnsRefreshing && "cursor-wait opacity-80"
+                      )}
+                    >
+                      {vulnsRefreshing ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      )}
+                      Обновить
+                    </button>
                   </div>
-                  <div className="mb-3 flex items-center gap-2">
+                  <VulnSearchBar
+                    value={q}
+                    onChange={setQ}
+                    hints={
+                      vendorsQuery.data
+                        ? { vendors: vendorsQuery.data.vendors, products: vendorsQuery.data.products }
+                        : null
+                    }
+                    hintsLoading={vendorsQuery.isLoading}
+                    listLoading={listQuery.isFetching}
+                    onClearFilters={() => {
+                      setVendorFilter(null);
+                      setProductFilter(null);
+                    }}
+                  />
+                  <div className="mb-3 flex flex-wrap items-center gap-2">
                     <button
                       onClick={() => {
                         setBulkMode((b) => !b);
                         setSelectedIds({});
                       }}
                       className={cn(
-                        "rounded-lg border px-2 py-1 text-xs hover:bg-black/30",
-                        bulkMode ? "border-accent/30 bg-accent/10 text-fg/90" : "border-border bg-black/20 text-fg/90"
+                        "rounded-lg border px-2 py-1 text-xs hover:bg-slate-200/80 dark:hover:bg-black/30",
+                        bulkMode
+                          ? "border-accent/30 bg-accent/10 text-fg/90"
+                          : "border-slate-200 bg-slate-50 text-fg/90 dark:border-border dark:bg-black/20"
                       )}
                     >
                       Массово
                     </button>
                     <button
                       onClick={exportCsv}
-                      className="rounded-lg border border-border bg-black/20 px-2 py-1 text-xs text-fg/90 hover:bg-black/30"
+                      className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
                     >
                       Экспорт CSV
                     </button>
                     <button
                       onClick={() => setSavedViewsOpen(true)}
-                      className="rounded-lg border border-border bg-black/20 px-2 py-1 text-xs text-fg/90 hover:bg-black/30"
+                      className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
                     >
                       Виды
                     </button>
                   </div>
 
-                  <div className="mb-3 rounded-xl border border-white/[0.06] bg-black/15 p-3">
+                  <div className="mb-3 rounded-xl border border-slate-200/90 bg-slate-50/90 p-3 dark:border-white/[0.06] dark:bg-black/15">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="text-[11px] font-medium text-fg/85">Фильтры</div>
                       <div className="flex items-center gap-2">
                         <select
                           value={sort}
                           onChange={(e) => setSort(e.target.value as "rank" | "fresh" | "risk" | "epss" | "cvss")}
-                          className="rounded-lg border border-border bg-black/20 px-2 py-1 text-xs text-fg/90"
+                          className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-fg/90 dark:border-border dark:bg-black/20"
                           title="Сортировка"
                         >
                           <option value="rank">Ранг</option>
@@ -622,7 +729,9 @@ export function Dashboard() {
                           }}
                           className={cn(
                             "rounded-full border px-2 py-0.5 text-[11px]",
-                            kevOnly ? "border-danger/30 bg-danger/15 text-danger" : "border-border bg-black/20 text-muted"
+                            kevOnly
+                              ? "border-danger/30 bg-danger/15 text-danger"
+                              : "border-slate-200 bg-slate-50 text-muted dark:border-border dark:bg-black/20"
                           )}
                           title="Только KEV"
                         >
@@ -643,7 +752,7 @@ export function Dashboard() {
                           <Tabs.Trigger
                             key={k}
                             value={k as typeof view}
-                            className="rounded-lg border border-border bg-black/20 px-2 py-1 text-[11px] data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10"
+                            className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
                           >
                             {label}
                           </Tabs.Trigger>
@@ -652,45 +761,67 @@ export function Dashboard() {
                     </Tabs.Root>
 
                     <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                      <div className="flex items-center gap-1 rounded-full border border-border bg-black/20 px-2 py-1">
+                      <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 dark:border-border dark:bg-black/20">
                         <span className="text-muted">CVSS</span>
                         <button
                           onClick={() => setMinCvss(null)}
-                          className={cn("rounded-full px-2 py-0.5", minCvss == null ? "bg-white/10 text-fg/90" : "hover:bg-white/5")}
+                          className={cn(
+                            "rounded-full px-2 py-0.5",
+                            minCvss == null
+                              ? "bg-white text-fg/90 shadow-sm dark:bg-white/10"
+                              : "hover:bg-slate-200/80 dark:hover:bg-white/5"
+                          )}
                         >
                           выкл
                         </button>
                         <button
                           onClick={() => setMinCvss(8)}
-                          className={cn("rounded-full px-2 py-0.5", minCvss === 8 ? "bg-accent/15 text-fg/90" : "hover:bg-white/5")}
+                          className={cn(
+                            "rounded-full px-2 py-0.5",
+                            minCvss === 8 ? "bg-accent/15 text-fg/90" : "hover:bg-slate-200/80 dark:hover:bg-white/5"
+                          )}
                         >
                           ≥8
                         </button>
                         <button
                           onClick={() => setMinCvss(9)}
-                          className={cn("rounded-full px-2 py-0.5", minCvss === 9 ? "bg-accent/15 text-fg/90" : "hover:bg-white/5")}
+                          className={cn(
+                            "rounded-full px-2 py-0.5",
+                            minCvss === 9 ? "bg-accent/15 text-fg/90" : "hover:bg-slate-200/80 dark:hover:bg-white/5"
+                          )}
                         >
                           ≥9
                         </button>
                       </div>
 
-                      <div className="flex items-center gap-1 rounded-full border border-border bg-black/20 px-2 py-1">
+                      <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 dark:border-border dark:bg-black/20">
                         <span className="text-muted">EPSS</span>
                         <button
                           onClick={() => setMinEpss(null)}
-                          className={cn("rounded-full px-2 py-0.5", minEpss == null ? "bg-white/10 text-fg/90" : "hover:bg-white/5")}
+                          className={cn(
+                            "rounded-full px-2 py-0.5",
+                            minEpss == null
+                              ? "bg-white text-fg/90 shadow-sm dark:bg-white/10"
+                              : "hover:bg-slate-200/80 dark:hover:bg-white/5"
+                          )}
                         >
                           выкл
                         </button>
                         <button
                           onClick={() => setMinEpss(0.2)}
-                          className={cn("rounded-full px-2 py-0.5", minEpss === 0.2 ? "bg-accent/15 text-fg/90" : "hover:bg-white/5")}
+                          className={cn(
+                            "rounded-full px-2 py-0.5",
+                            minEpss === 0.2 ? "bg-accent/15 text-fg/90" : "hover:bg-slate-200/80 dark:hover:bg-white/5"
+                          )}
                         >
                           ≥0.20
                         </button>
                         <button
                           onClick={() => setMinEpss(0.5)}
-                          className={cn("rounded-full px-2 py-0.5", minEpss === 0.5 ? "bg-accent/15 text-fg/90" : "hover:bg-white/5")}
+                          className={cn(
+                            "rounded-full px-2 py-0.5",
+                            minEpss === 0.5 ? "bg-accent/15 text-fg/90" : "hover:bg-slate-200/80 dark:hover:bg-white/5"
+                          )}
                         >
                           ≥0.50
                         </button>
@@ -699,17 +830,17 @@ export function Dashboard() {
                       {(vendorFilter || productFilter) && (
                         <div className="flex flex-wrap items-center gap-2">
                           {vendorFilter ? (
-                            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-fg/85">
+                            <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-fg/85 shadow-sm dark:border-white/10 dark:bg-white/5">
                               вендор <span className="font-medium text-fg/90">{vendorFilter}</span>
                             </span>
                           ) : null}
                           {productFilter ? (
-                            <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-fg/85">
+                            <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-fg/85 shadow-sm dark:border-white/10 dark:bg-white/5">
                               продукт <span className="font-medium text-fg/90">{productFilter}</span>
                             </span>
                           ) : null}
                           <button
-                            className="rounded-full border border-white/10 bg-black/20 px-2 py-0.5 text-fg/80 hover:bg-black/30"
+                            className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-fg/80 hover:bg-slate-200/80 dark:border-white/10 dark:bg-black/20 dark:hover:bg-black/30"
                             onClick={() => {
                               setVendorFilter(null);
                               setProductFilter(null);
@@ -756,29 +887,29 @@ export function Dashboard() {
                       <Tabs.List className="mb-4 flex flex-wrap gap-2">
                         <Tabs.Trigger
                           value="ai"
-                          className="rounded-lg border border-border bg-black/20 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10"
+                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
                         >
                           ИИ‑сводка
                         </Tabs.Trigger>
                         <Tabs.Trigger
                           value="risk"
-                          className="rounded-lg border border-border bg-black/20 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10"
+                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
                         >
                           Риск
                         </Tabs.Trigger>
                         <Tabs.Trigger
                           value="attack"
-                          className="rounded-lg border border-border bg-black/20 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10"
+                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
                         >
                           Граф атаки
                         </Tabs.Trigger>
                         <div className="ml-auto flex items-center gap-2 text-[11px] text-muted">
-                          <span className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 font-mono text-fg/85">
+                          <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 font-mono text-fg/85 shadow-sm dark:border-white/10 dark:bg-white/5">
                             {selected}
                           </span>
                           <button
                             onClick={() => setSelected(null)}
-                            className="rounded-lg border border-border bg-black/20 px-2 py-1 text-[11px] text-fg/85 hover:bg-black/30"
+                            className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-fg/85 hover:bg-slate-200/80 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
                           >
                             Закрыть
                           </button>
@@ -811,11 +942,11 @@ export function Dashboard() {
                         Выбери CVE слева — здесь появятся ИИ‑сводка, risk‑разбор и схема атаки.
                       </div>
                       <div className="mt-4 grid grid-cols-2 gap-3 text-[11px]">
-                        <div className="rounded-xl border border-white/[0.06] bg-black/20 p-3">
+                        <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
                           <div className="text-muted">Сводка</div>
                           <div className="mt-1 text-fg/85">Русский текст + remediation/последствия</div>
                         </div>
-                        <div className="rounded-xl border border-white/[0.06] bg-black/20 p-3">
+                        <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
                           <div className="text-muted">Attack graph</div>
                           <div className="mt-1 text-fg/85">Схема attacker → vector → asset → impact</div>
                         </div>
@@ -827,12 +958,16 @@ export function Dashboard() {
             </div>
           ) : moduleKey === "fstec" ? (
             <FstecNewsPanel onOpenCve={openDashboardModal} />
+          ) : moduleKey === "patches" ? (
+            <div className="glass rounded-2xl p-5 sm:p-6">
+              <PatchManagementPanel onOpenCve={openDashboardModal} />
+            </div>
           ) : (
             <div className="glass rounded-2xl p-6">
               <div className="text-sm font-medium">Настройки</div>
-              <div className="mt-2 text-sm text-muted">
-                Профиль интерфейса, уведомления и ключи API — позже. Сейчас всё задаётся через переменные окружения на
-                сервере.
+              <div className="mt-4 space-y-6">
+                <AppearanceSettings />
+                <SecuritySettings />
               </div>
             </div>
           )}
@@ -845,12 +980,12 @@ export function Dashboard() {
           <Dialog.Content
             className={cn(
               "fixed left-1/2 top-1/2 z-50 w-[min(900px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2",
-              "rounded-2xl border border-border bg-black/60 shadow-2xl",
+              "rounded-2xl border border-border bg-white shadow-2xl backdrop-blur-xl dark:bg-black/60",
               "outline-none"
             )}
           >
             <div className="glass rounded-2xl">
-              <div className="sticky top-0 z-10 rounded-t-2xl border-b border-border bg-black/60 px-5 py-4 backdrop-blur">
+              <div className="sticky top-0 z-10 rounded-t-2xl border-b border-slate-200 bg-white/95 px-5 py-4 backdrop-blur-xl dark:border-border dark:bg-black/60">
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <Dialog.Title className="truncate text-sm font-semibold tracking-tight">Очередь DLQ</Dialog.Title>
@@ -859,7 +994,7 @@ export function Dashboard() {
                     </Dialog.Description>
                   </div>
                   <Dialog.Close asChild>
-                    <button className="rounded-lg border border-border bg-black/30 px-3 py-1.5 text-xs text-fg/90 hover:bg-black/40">
+                    <button className="rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/30 dark:hover:bg-black/40">
                       Закрыть
                     </button>
                   </Dialog.Close>
@@ -872,14 +1007,14 @@ export function Dashboard() {
                     <select
                       value={dlqQueue}
                       onChange={(e) => setDlqQueue(e.target.value as "dlq.ai.enrich" | "dlq.ai.score")}
-                      className="rounded-lg border border-border bg-black/20 px-2 py-1 text-xs text-fg/90"
+                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-fg/90 dark:border-border dark:bg-black/20"
                     >
                       <option value="dlq.ai.enrich">dlq.ai.enrich</option>
                       <option value="dlq.ai.score">dlq.ai.score</option>
                     </select>
                     <button
                       onClick={() => void dlqSampleQuery.refetch()}
-                      className="rounded-lg border border-border bg-black/20 px-2 py-1 text-xs text-fg/90 hover:bg-black/30"
+                      className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
                     >
                       Обновить
                     </button>
@@ -920,7 +1055,7 @@ export function Dashboard() {
                           | { messages?: Array<{ body: string; headers?: Record<string, unknown>; redelivered?: boolean }> }
                           | undefined)?.messages ?? []
                       ).map((m, idx) => (
-                        <div key={idx} className="rounded-xl border border-white/[0.06] bg-black/25 p-3">
+                        <div key={idx} className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/25">
                           <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-muted">
                             <div>повторная доставка: {String(Boolean(m.redelivered))}</div>
                             <div className="truncate">
@@ -930,7 +1065,7 @@ export function Dashboard() {
                               </span>
                             </div>
                           </div>
-                          <pre className="max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-white/10 bg-black/30 p-3 text-[11px] text-fg/85">
+                          <pre className="max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-[11px] text-fg/85 dark:border-white/10 dark:bg-black/30">
                             {String(m.body ?? "").slice(0, 6000)}
                           </pre>
                         </div>
@@ -954,12 +1089,12 @@ export function Dashboard() {
           <Dialog.Content
             className={cn(
               "fixed left-1/2 top-1/2 z-50 w-[min(700px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2",
-              "rounded-2xl border border-border bg-black/60 shadow-2xl",
+              "rounded-2xl border border-border bg-white shadow-2xl backdrop-blur-xl dark:bg-black/60",
               "outline-none"
             )}
           >
             <div className="glass rounded-2xl">
-              <div className="sticky top-0 z-10 rounded-t-2xl border-b border-border bg-black/60 px-5 py-4 backdrop-blur">
+              <div className="sticky top-0 z-10 rounded-t-2xl border-b border-slate-200 bg-white/95 px-5 py-4 backdrop-blur-xl dark:border-border dark:bg-black/60">
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <Dialog.Title className="truncate text-sm font-semibold tracking-tight">Сохранённые виды</Dialog.Title>
@@ -968,7 +1103,7 @@ export function Dashboard() {
                     </Dialog.Description>
                   </div>
                   <Dialog.Close asChild>
-                    <button className="rounded-lg border border-border bg-black/30 px-3 py-1.5 text-xs text-fg/90 hover:bg-black/40">
+                    <button className="rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/30 dark:hover:bg-black/40">
                       Закрыть
                     </button>
                   </Dialog.Close>
@@ -981,7 +1116,7 @@ export function Dashboard() {
                     {savedViews.map((v) => (
                       <div
                         key={v.id}
-                        className="flex items-center justify-between gap-2 rounded-xl border border-white/[0.06] bg-black/25 px-3 py-2 text-[11px]"
+                        className="flex items-center justify-between gap-2 rounded-xl border border-slate-200/90 bg-slate-50 px-3 py-2 text-[11px] dark:border-white/[0.06] dark:bg-black/25"
                       >
                         <button
                           className="min-w-0 truncate text-left text-fg/90 hover:underline"
@@ -1002,7 +1137,7 @@ export function Dashboard() {
                         </button>
                         <div className="flex items-center gap-2">
                           <button
-                            className="rounded-lg border border-white/10 bg-black/20 px-2 py-1 text-[11px] text-fg/85 hover:bg-black/30"
+                            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] text-fg/85 hover:bg-slate-100 dark:border-white/10 dark:bg-black/20 dark:hover:bg-black/30"
                             onClick={() => {
                               const name = window.prompt("Новое имя вида", v.name);
                               if (!name) return;

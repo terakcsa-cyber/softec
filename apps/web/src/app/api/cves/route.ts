@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { forwardAuthHeaders } from "../../../lib/upstream-proxy";
 import { getUpstreamApiBase } from "../../../lib/upstream-api";
 
 export async function GET(req: Request) {
@@ -7,7 +8,7 @@ export async function GET(req: Request) {
   url.searchParams.forEach((v, k) => target.searchParams.set(k, v));
 
   const res = await fetch(target.toString(), {
-    headers: { accept: "application/json" },
+    headers: { accept: "application/json", ...forwardAuthHeaders(req) },
     cache: "no-store"
   });
 

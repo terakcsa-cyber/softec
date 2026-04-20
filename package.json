@@ -11,6 +11,8 @@
   ],
   "scripts": {
     "dev": "node --env-file=.env scripts/dev.mjs",
+    "dev:fast": "DEV_SKIP_NEXT_CLEAN=1 node --env-file=.env scripts/dev.mjs",
+    "clean:web": "node scripts/clean-web-next-cache.mjs",
     "dlq:replay:score": "node scripts/replay-dlq-score.mjs",
     "rescore:all": "node scripts/rescore-all.mjs",
     "nvd:backfill": "node --env-file=.env scripts/nvd-backfill.mjs",
@@ -21,6 +23,15 @@
     "format": "prettier -w .",
     "infra:up": "docker compose -f infra/docker-compose.yml up -d",
     "infra:down": "docker compose -f infra/docker-compose.yml down -v"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@nestjs/core",
+      "argon2",
+      "esbuild",
+      "sharp",
+      "unrs-resolver"
+    ]
   },
   "devDependencies": {
     "amqplib": "^0.10.9",

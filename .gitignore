@@ -9,6 +9,8 @@ dist
 coverage
 .turbo
 *.log
+.pnpm-store
+*.tsbuildinfo
 
 # local data drops
 data/

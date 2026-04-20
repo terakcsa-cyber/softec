@@ -114,7 +114,7 @@ function VendorDonut({
         {rows.length === 0 ? (
           <li className="text-muted">Нет данных по вендорам за окно.</li>
         ) : (
-          rows.map((r, i) => (
+          rows.map((r) => (
             <li key={r.label} className="flex items-center justify-between gap-2">
               <span className="flex min-w-0 items-center gap-2">
                 <span className="h-2 w-2 shrink-0 rounded-sm" style={{ background: r.color }} />
@@ -180,7 +180,7 @@ function ProductCards({ products }: { products: ProductRow[] }) {
           initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.03 * i }}
-          className="rounded-xl border border-white/[0.07] bg-black/30 px-3 py-2.5 ring-1 ring-white/[0.04]"
+          className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 shadow-sm ring-1 ring-slate-200/60 dark:border-white/[0.07] dark:bg-black/30 dark:shadow-none dark:ring-white/[0.04]"
         >
           <div className="text-[10px] text-muted">{p.vendor}</div>
           <div className="truncate text-[12px] font-medium text-fg/90">{p.product}</div>
@@ -239,23 +239,23 @@ export function VendorLandscape({
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <div className="rounded-2xl border border-border bg-gradient-to-br from-black/50 via-black/30 to-indigo-950/15 p-5 ring-1 ring-white/[0.06]">
+        <div className="rounded-2xl border border-slate-200/90 bg-gradient-to-br from-white via-slate-50 to-indigo-100/35 p-5 shadow-sm ring-1 ring-slate-200/70 dark:border-border dark:from-black/50 dark:via-black/30 dark:to-indigo-950/15 dark:shadow-none dark:ring-white/[0.06]">
           <div className="mb-4 text-xs font-medium text-fg/90">Доля по вендорам</div>
           <VendorDonut donut={donut} />
-          <div className="mt-6 space-y-2 border-t border-white/[0.06] pt-4">
+          <div className="mt-6 space-y-2 border-t border-slate-200/90 pt-4 dark:border-white/[0.06]">
             <div className="text-[10px] font-medium uppercase tracking-wider text-muted">Топ по объёму</div>
             <VendorBars vendors={vendors} />
           </div>
           {vendors.length ? (
-            <div className="mt-4 flex flex-wrap gap-2 border-t border-white/[0.06] pt-4">
+            <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200/90 pt-4 dark:border-white/[0.06]">
               {vendors.slice(0, 6).map((v) => (
                 <button
                   key={v.vendor}
                   type="button"
                   onClick={() => onVendorSelect?.(v.vendor)}
                   className={cn(
-                    "rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[11px] text-fg/85 transition hover:border-accent/35 hover:bg-accent/10",
-                    !onVendorSelect && "cursor-default hover:border-white/10 hover:bg-white/[0.04]"
+                    "rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] text-fg/85 shadow-sm transition hover:border-accent/35 hover:bg-accent/10 dark:border-white/10 dark:bg-white/[0.04] dark:shadow-none",
+                    !onVendorSelect && "cursor-default hover:border-slate-200 hover:bg-white dark:hover:border-white/10 dark:hover:bg-white/[0.04]"
                   )}
                 >
                   {v.vendor}
@@ -265,22 +265,22 @@ export function VendorLandscape({
           ) : null}
         </div>
 
-        <div className="rounded-2xl border border-border bg-black/20 p-5 ring-1 ring-white/[0.05]">
+        <div className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm ring-1 ring-slate-200/60 dark:border-border dark:bg-black/20 dark:shadow-none dark:ring-white/[0.05]">
           <div className="mb-3 flex items-center gap-2 text-xs font-medium text-fg/90">
             <Layers className="h-3.5 w-3.5 text-muted" />
             Топ продуктов
           </div>
           <ProductCards products={products} />
           {products.length ? (
-            <div className="mt-4 flex flex-wrap gap-2 border-t border-white/[0.06] pt-4">
+            <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200/90 pt-4 dark:border-white/[0.06]">
               {products.slice(0, 6).map((p) => (
                 <button
                   key={`${p.vendor}|${p.product}`}
                   type="button"
                   onClick={() => onProductSelect?.(p.vendor, p.product)}
                   className={cn(
-                    "max-w-full truncate rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-left text-[11px] text-fg/85 transition hover:border-accent/35 hover:bg-accent/10",
-                    !onProductSelect && "cursor-default hover:border-white/10 hover:bg-white/[0.04]"
+                    "max-w-full truncate rounded-full border border-slate-200 bg-white px-3 py-1 text-left text-[11px] text-fg/85 shadow-sm transition hover:border-accent/35 hover:bg-accent/10 dark:border-white/10 dark:bg-white/[0.04] dark:shadow-none",
+                    !onProductSelect && "cursor-default hover:border-slate-200 hover:bg-white dark:hover:border-white/10 dark:hover:bg-white/[0.04]"
                   )}
                 >
                   {p.vendor} / {p.product}

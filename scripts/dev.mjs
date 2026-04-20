@@ -2,6 +2,7 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { cleanWebNextCache } from "./clean-web-next-cache.mjs";
 
 const API_HOST = process.env.API_HOST ?? "127.0.0.1";
 const WEB_HOST = process.env.WEB_HOST ?? "127.0.0.1";
@@ -80,6 +81,8 @@ const webBasePort = Number(process.env.WEB_PORT_BASE ?? 3001);
 
 const maxDevRetries = Number(process.env.DEV_RETRIES ?? 25);
 
+cleanWebNextCache();
+
 for (let attempt = 1; attempt <= maxDevRetries; attempt++) {
   const apiPort = await findFreePort(apiBasePort + (attempt - 1) * 2, API_HOST);
   const webPort = await findFreePort(webBasePort + (attempt - 1) * 2, WEB_HOST);
@@ -95,13 +98,23 @@ for (let attempt = 1; attempt <= maxDevRetries; attempt++) {
     ].join("\n")
   );
 
+  const jwtSecret =
+    process.env.JWT_SECRET?.trim() ||
+    "dev-only-change-me-min-32-chars-for-jwt-secret!!";
+
   const env = {
     ...process.env,
     API_HOST,
     WEB_HOST,
     PORT: String(apiPort),
     WEB_PORT: String(webPort),
-    UPSTREAM_API_BASE: apiBase
+    UPSTREAM_API_BASE: apiBase,
+    JWT_SECRET: jwtSecret,
+    /**
+     * Всегда как у поднятого API (`apiBase`). Не брать из `.env`: там часто зашит 4001,
+     * а `findFreePort` мог выбрать другой порт — иначе BFF и браузер расходятся с Nest.
+     */
+    NEXT_PUBLIC_API_BASE: apiBase
   };
 
   // AI/ingest resolve @vuln-intel/shared from dist; build once so Zod/schemas match source.
