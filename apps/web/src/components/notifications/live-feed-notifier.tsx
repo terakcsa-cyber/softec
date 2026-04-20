@@ -11,11 +11,8 @@ type Toast = {
   href?: string;
 };
 
-function beep(freq = 880) {
+function beepWithCtx(ctx: AudioContext, freq = 880) {
   try {
-    const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext | undefined;
-    if (!Ctx) return;
-    const ctx = new Ctx();
     const o = ctx.createOscillator();
     const g = ctx.createGain();
     o.type = "sine";
@@ -26,10 +23,9 @@ function beep(freq = 880) {
     o.start();
     const now = ctx.currentTime;
     g.gain.setValueAtTime(0.0001, now);
-    g.gain.linearRampToValueAtTime(0.08, now + 0.02);
+    g.gain.linearRampToValueAtTime(0.12, now + 0.02);
     g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
     o.stop(now + 0.18);
-    o.onended = () => void ctx.close().catch(() => undefined);
   } catch {
     // ignore
   }
@@ -65,6 +61,8 @@ export function LiveFeedNotifier() {
   const [toast, setToast] = useState<Toast | null>(null);
   const [busy, setBusy] = useState(false);
   const timer = useRef<number | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
 
   const soundKey = "vip:live:sound";
   const [soundEnabled, setSoundEnabled] = useState(() => safeGet(soundKey) !== "0");
@@ -77,6 +75,29 @@ export function LiveFeedNotifier() {
       } catch {
         // ignore
       }
+    };
+  }, []);
+
+  // Browsers block sound until a user gesture. Unlock once on first interaction.
+  useEffect(() => {
+    const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext | undefined;
+    if (!Ctx) return;
+
+    const unlock = async () => {
+      try {
+        if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
+        if (audioCtxRef.current.state === "suspended") await audioCtxRef.current.resume();
+        setAudioUnlocked(true);
+      } catch {
+        // ignore
+      }
+    };
+
+    window.addEventListener("pointerdown", unlock, { once: true, passive: true });
+    window.addEventListener("keydown", unlock, { once: true, passive: true });
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
     };
   }, []);
 
@@ -117,7 +138,7 @@ export function LiveFeedNotifier() {
                 body: fstecNewest.title || "Новая запись в ленте",
                 href: fstecNewest.link
               });
-              if (soundEnabled) beep(880);
+              if (soundEnabled && audioCtxRef.current && audioUnlocked) beepWithCtx(audioCtxRef.current, 880);
             }
           } else {
             safeSet(key, fstecNewest.id);
@@ -138,7 +159,7 @@ export function LiveFeedNotifier() {
                 body: patchNewest.title || (patchNewest.channel?.slug ? `@${patchNewest.channel.slug}` : "Новая запись"),
                 href: patchNewest.link
               });
-              if (soundEnabled) beep(740);
+              if (soundEnabled && audioCtxRef.current && audioUnlocked) beepWithCtx(audioCtxRef.current, 740);
             }
           } else {
             safeSet(key, patchNewest.id);
@@ -159,7 +180,27 @@ export function LiveFeedNotifier() {
 
   return (
     <div className="fixed bottom-4 right-4 z-[70]">
-      <div className="mb-2 flex justify-end">
+      <div className="mb-2 flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={() => {
+            if (!audioCtxRef.current) return;
+            if (!audioUnlocked) return;
+            beepWithCtx(audioCtxRef.current, 880);
+          }}
+          disabled={!audioUnlocked}
+          className={cn(
+            "inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white/90 px-2.5 py-1.5 text-[11px] text-fg/85 shadow-sm backdrop-blur",
+            "hover:bg-white disabled:opacity-50 dark:border-white/[0.08] dark:bg-black/50 dark:hover:bg-black/65"
+          )}
+          title={
+            audioUnlocked
+              ? "Тест звука"
+              : "Браузер блокирует звук до первого клика/нажатия клавиши в странице"
+          }
+        >
+          Тест
+        </button>
         <button
           type="button"
           onClick={() => setSoundEnabled((v) => !v)}
