@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import * as Dialog from "@radix-ui/react-dialog";
 import { Bandage, ExternalLink, Loader2, RefreshCw, Search, Volume2 } from "lucide-react";
 import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "../ui/cn";
@@ -81,6 +82,7 @@ export function PatchManagementPanel({
   const [toast, setToast] = useState<{ title: string; body?: string } | null>(null);
   const toastTimer = useRef<number | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [detailId, setDetailId] = useState<string | null>(null);
 
   const storageKey = "vip:patch:lastSeenId";
 
@@ -104,6 +106,11 @@ export function PatchManagementPanel({
 
   const itemsRaw = feedQuery.data?.items ?? [];
   const channels = feedQuery.data?.source.channels ?? [];
+
+  const detail = useMemo(() => {
+    if (!detailId) return null;
+    return itemsRaw.find((x) => x.id === detailId) ?? null;
+  }, [detailId, itemsRaw]);
 
   const items = useMemo(() => {
     return itemsRaw
@@ -248,7 +255,16 @@ export function PatchManagementPanel({
         {items.map((it) => (
           <article
             key={it.id}
-            className="group rounded-2xl border border-slate-200/90 bg-white/90 p-4 text-left shadow-sm outline-none transition-colors hover:border-accent/25 hover:bg-slate-50/90 dark:border-white/[0.08] dark:bg-black/25 dark:hover:bg-black/35"
+            role="button"
+            tabIndex={0}
+            onClick={() => setDetailId(it.id)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setDetailId(it.id);
+              }
+            }}
+            className="group cursor-pointer rounded-2xl border border-slate-200/90 bg-white/90 p-4 text-left shadow-sm outline-none transition-colors hover:border-accent/25 hover:bg-slate-50/90 focus-visible:ring-2 focus-visible:ring-accent/30 dark:border-white/[0.08] dark:bg-black/25 dark:hover:bg-black/35"
           >
             <div className="flex flex-wrap items-start justify-between gap-2">
               <div className="min-w-0 flex-1">
@@ -269,6 +285,7 @@ export function PatchManagementPanel({
                 href={it.link}
                 target="_blank"
                 rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
                 className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] text-fg/90 hover:bg-slate-100 dark:border-border dark:bg-black/30 dark:hover:bg-black/45"
               >
                 Telegram
@@ -322,6 +339,111 @@ export function PatchManagementPanel({
           </div>
         </div>
       ) : null}
+
+      <Dialog.Root
+        open={detailId != null}
+        onOpenChange={(open) => {
+          if (!open) setDetailId(null);
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-sm" />
+          <Dialog.Content
+            className={cn(
+              "fixed left-1/2 top-1/2 z-[101] max-h-[min(85vh,880px)] w-[min(760px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2",
+              "flex flex-col overflow-hidden rounded-2xl border border-border bg-white shadow-2xl outline-none dark:bg-zinc-950"
+            )}
+            onOpenAutoFocus={(e) => e.preventDefault()}
+          >
+            <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-200 px-5 py-4 dark:border-white/[0.08]">
+              <div className="min-w-0">
+                <Dialog.Title className="text-sm font-semibold leading-snug text-fg/95">
+                  {detail?.channel.title ?? "Запись канала"}
+                  {detail?.channel.slug ? <span className="text-muted"> · @{detail.channel.slug}</span> : null}
+                </Dialog.Title>
+                <Dialog.Description className="mt-1 text-[11px] text-muted">
+                  {detail?.pubDate ? `Опубликовано: ${fmtPubDate(detail.pubDate)}` : "Дата публикации не указана"}
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  className="rounded-lg border border-slate-200 px-2 py-1.5 text-[11px] text-fg/80 hover:bg-slate-100 dark:border-border dark:hover:bg-black/40"
+                >
+                  Закрыть
+                </button>
+              </Dialog.Close>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+              {detail ? (
+                <div className="space-y-4">
+                  <h2 className="text-base font-semibold leading-snug text-fg/95">{detail.title}</h2>
+
+                  {detail.descriptionText ? (
+                    <div className="rounded-xl border border-slate-200/90 bg-slate-50/80 px-4 py-3 text-[13px] leading-relaxed text-fg/85 dark:border-white/[0.08] dark:bg-black/25">
+                      <div className="whitespace-pre-wrap">{detail.descriptionText}</div>
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-slate-200/90 bg-slate-50/80 px-4 py-3 text-sm text-muted dark:border-white/[0.08] dark:bg-black/25">
+                      Текст сообщения отсутствует.
+                    </div>
+                  )}
+
+                  {detail.cveIds.length > 0 ? (
+                    <div>
+                      <div className="text-[10px] font-medium uppercase tracking-wide text-muted">CVE</div>
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {detail.cveIds.map((id) => (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() => onOpenCve?.(id)}
+                            className={cn(
+                              "rounded-full border px-2 py-0.5 font-mono text-[11px] tabular-nums",
+                              "border-slate-200/90 bg-slate-100 text-slate-900",
+                              "dark:border-white/[0.12] dark:bg-zinc-900/85 dark:text-zinc-200",
+                              onOpenCve && "cursor-pointer hover:border-accent/40 hover:bg-accent/10 dark:hover:bg-accent/15",
+                              !onOpenCve && "cursor-default opacity-80"
+                            )}
+                          >
+                            {id}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <a
+                      href={detail.link}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-fg/90 hover:bg-slate-50 dark:border-border dark:bg-black/25 dark:hover:bg-black/40"
+                    >
+                      Открыть в Telegram
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                    <Dialog.Close asChild>
+                      <button
+                        type="button"
+                        className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-xs text-fg/90 hover:bg-slate-100 dark:border-border dark:bg-black/20 dark:hover:bg-black/35"
+                      >
+                        Закрыть
+                      </button>
+                    </Dialog.Close>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted">
+                  <Loader2 className="h-6 w-6 animate-spin" />
+                  Загрузка…
+                </div>
+              )}
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 }
