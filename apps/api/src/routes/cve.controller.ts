@@ -62,6 +62,11 @@ function pickRowForEnrichCacheHit(rows: EnrichmentAiQueryRow[]): EnrichmentAiQue
   );
 }
 
+/** Экранирование для `LIKE ... ESCAPE '\\'` (совпадает с литеральным `strpos` по `%`, `_`, `\`). */
+function escapePgLikePattern(s: string): string {
+  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
 @Controller("cves")
 export class CveController {
   constructor(
@@ -157,10 +162,34 @@ export class CveController {
     }
 
     if (q && q.trim().length > 0) {
-      const like = `%${q.trim()}%`;
-      params.push(like);
-      const qIdx = params.length;
-      const where = [`c.cve_id ILIKE $${qIdx}`, ...filters].join(" AND ");
+      /** Подстрока: `LIKE` + ESCAPE, чтобы работали GIN (pg_trgm); литералы как у `strpos`. */
+      const needleLike = escapePgLikePattern(q.trim().toLowerCase());
+      params.push(needleLike);
+      const needleIdx = params.length;
+      const likeSuffix = `LIKE '%' || $${needleIdx}::text || '%' ESCAPE E'\\\\'`;
+      const contextMatch = `(
+        lower(c.cve_id) ${likeSuffix}
+        OR lower(c.raw::text) ${likeSuffix}
+        OR EXISTS (
+          SELECT 1 FROM cve_vendor_product vp_q
+          WHERE vp_q.cve_id = c.cve_id
+            AND (
+              lower(vp_q.vendor) ${likeSuffix}
+              OR lower(COALESCE(vp_q.product, '')) ${likeSuffix}
+              OR lower(vp_q.vendor_key) ${likeSuffix}
+              OR lower(vp_q.product_key_norm) ${likeSuffix}
+            )
+        )
+        OR EXISTS (
+          SELECT 1 FROM enrichment_ai ea_q
+          WHERE ea_q.cve_id = c.cve_id
+            AND (
+              lower(COALESCE(ea_q.output_text, '')) ${likeSuffix}
+              OR lower(ea_q.output_json::text) ${likeSuffix}
+            )
+        )
+      )`;
+      const where = [contextMatch, ...filters].join(" AND ");
       params.push(limit);
       const limitIdx = params.length;
       const r = await this.db.query(

@@ -17,6 +17,8 @@ function loadRootEnv(): void {
     if (eq <= 0) continue;
     const key = line.slice(0, eq).trim();
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    /** Уже задано оркестратором (`pnpm dev`) или оболочкой — не затираем (PORT, UPSTREAM и т.д.). */
+    if (process.env[key] !== undefined) continue;
     let val = line.slice(eq + 1).trim();
     if (
       (val.startsWith('"') && val.endsWith('"') && val.length >= 2) ||

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { forwardAuthHeaders } from "../../../../lib/upstream-proxy";
 import { getUpstreamApiBase } from "../../../../lib/upstream-api";
 
 export async function POST(req: Request) {
@@ -8,7 +9,8 @@ export async function POST(req: Request) {
     method: "POST",
     headers: {
       accept: "application/json",
-      "content-type": "application/json"
+      "content-type": "application/json",
+      ...forwardAuthHeaders(req)
     },
     body,
     cache: "no-store"

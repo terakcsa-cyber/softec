@@ -16,12 +16,20 @@ function dedupeLinks(links: FstecLocalBduLink[]): FstecLocalBduLink[] {
   return out;
 }
 
-async function lookupCvesPresent(cveIds: string[]): Promise<Set<string> | null> {
+async function lookupCvesPresent(
+  cveIds: string[],
+  authorization?: string | null
+): Promise<Set<string> | null> {
   if (cveIds.length === 0) return new Set();
   const base = getUpstreamApiBase();
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json"
+  };
+  if (authorization) headers.authorization = authorization;
   const res = await fetch(`${base}/cves/lookup`, {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/json" },
+    headers,
     body: JSON.stringify({ cveIds }),
     cache: "no-store"
   });
@@ -31,7 +39,10 @@ async function lookupCvesPresent(cveIds: string[]): Promise<Set<string> | null> 
 }
 
 /** Дополняет элементы ленты связками BDU↔CVE, если CVE есть в таблице `cve`. */
-export async function enrichFeedItemsWithLocalBdu(items: FstecFeedItem[]): Promise<LocalBduEnrichmentStatus> {
+export async function enrichFeedItemsWithLocalBdu(
+  items: FstecFeedItem[],
+  opts?: { authorization?: string | null }
+): Promise<LocalBduEnrichmentStatus> {
   const perItem = new Map<FstecFeedItem, { bduId: string; cveId: string }[]>();
   const allCves = new Set<string>();
 
@@ -46,7 +57,7 @@ export async function enrichFeedItemsWithLocalBdu(items: FstecFeedItem[]): Promi
 
   let present: Set<string> | null;
   try {
-    present = await lookupCvesPresent([...allCves]);
+    present = await lookupCvesPresent([...allCves], opts?.authorization);
   } catch {
     return "unavailable";
   }

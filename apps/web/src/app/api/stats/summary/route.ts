@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server";
+import { forwardAuthHeaders } from "../../../../lib/upstream-proxy";
 import { getUpstreamApiBase } from "../../../../lib/upstream-api";
 
-export async function GET() {
+export async function GET(req: Request) {
   const target = `${getUpstreamApiBase()}/stats/summary`;
-  const res = await fetch(target, { headers: { accept: "application/json" }, cache: "no-store" });
+  const res = await fetch(target, {
+    headers: { accept: "application/json", ...forwardAuthHeaders(req) },
+    cache: "no-store"
+  });
   const body = await res.text();
   return new NextResponse(body, {
     status: res.status,

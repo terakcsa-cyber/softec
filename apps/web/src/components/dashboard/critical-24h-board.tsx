@@ -18,11 +18,11 @@ export type HotCveRow = {
 };
 
 function riskAccent(score: number | null | undefined): { border: string; glow: string; label: string } {
-  if (score == null) return { border: "border-white/10", glow: "", label: "нет оценки" };
+  if (score == null) return { border: "border-slate-300 dark:border-white/10", glow: "", label: "нет оценки" };
   if (score >= 85) return { border: "border-danger/50", glow: "shadow-[0_0_24px_rgba(239,68,68,0.12)]", label: "критично" };
   if (score >= 70) return { border: "border-warn/45", glow: "shadow-[0_0_20px_rgba(245,158,11,0.1)]", label: "высокий" };
   if (score >= 40) return { border: "border-accent/35", glow: "", label: "средний" };
-  return { border: "border-white/12", glow: "", label: "низкий" };
+  return { border: "border-slate-300 dark:border-white/12", glow: "", label: "низкий" };
 }
 
 export function Critical24hBoard({
@@ -50,12 +50,12 @@ export function Critical24hBoard({
       <div className="space-y-4">
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-24 animate-pulse rounded-2xl bg-white/[0.06]" />
+            <div key={i} className="h-24 animate-pulse rounded-2xl bg-slate-200/70 dark:bg-white/[0.06]" />
           ))}
         </div>
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="h-36 animate-pulse rounded-2xl bg-white/[0.05]" />
+            <div key={i} className="h-36 animate-pulse rounded-2xl bg-slate-200/50 dark:bg-white/[0.05]" />
           ))}
         </div>
       </div>
@@ -70,7 +70,7 @@ export function Critical24hBoard({
         <div>
           <div className="text-base font-semibold tracking-tight text-fg/95">Угрозы за последние 24 часа</div>
           <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-muted">
-            CVE с датой публикации в окне 24ч, отсортированы по risk score. Клик открывает отдельное окно поверх (несколько
+            CVE с датой публикации в окне 24ч, от новых к старым по времени публикации. Клик открывает отдельное окно поверх (несколько
             окон можно открыть и перетаскивать за заголовок).
           </p>
         </div>
@@ -113,7 +113,8 @@ export function Critical24hBoard({
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.04 * i }}
             className={cn(
-              "relative overflow-hidden rounded-2xl border border-white/[0.08] bg-gradient-to-br p-4 ring-1 ring-white/[0.04]",
+              "relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-br p-4 ring-1 ring-slate-200/60",
+              "dark:border-white/[0.08] dark:ring-white/[0.04]",
               c.tone
             )}
           >
@@ -128,7 +129,7 @@ export function Critical24hBoard({
       </div>
 
       {stats.total === 0 ? (
-        <div className="rounded-2xl border border-dashed border-white/10 bg-black/20 px-4 py-8 text-center text-sm text-muted">
+        <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center text-sm text-muted dark:border-border dark:bg-black/10">
           За последние 24 часа нет опубликованных CVE в базе — проверьте ingest NVD или расширьте окно во вкладке
           «Уязвимости».
         </div>
@@ -157,8 +158,10 @@ export function Critical24hBoard({
                     onCveClick(it.cve_id);
                   }}
                   className={cn(
-                    "group relative z-[1] w-full cursor-pointer rounded-2xl border bg-gradient-to-br from-white/[0.07] to-black/30 p-4 text-left",
-                    "pointer-events-auto transition hover:border-accent/35 hover:from-white/[0.09] active:scale-[0.99]",
+                    "group relative z-[1] w-full cursor-pointer rounded-2xl border bg-gradient-to-br p-4 text-left",
+                    "from-slate-100 to-slate-200/70 hover:from-slate-50 hover:to-slate-100",
+                    "dark:from-white/[0.07] dark:to-black/30 dark:hover:from-white/[0.09] dark:hover:to-black/25",
+                    "pointer-events-auto transition hover:border-accent/35 active:scale-[0.99]",
                     isOpen && "border-accent/50 ring-2 ring-accent/25",
                     ra.border,
                     !isOpen && ra.glow
@@ -182,7 +185,7 @@ export function Critical24hBoard({
                       "shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium",
                       it.risk_score != null && it.risk_score >= 70
                         ? "border-danger/35 bg-danger/10 text-danger"
-                        : "border-white/10 bg-white/5 text-fg/80"
+                        : "border-slate-200 bg-white text-fg/80 shadow-sm dark:border-white/10 dark:bg-white/5 dark:shadow-none"
                     )}
                   >
                     {it.risk_score != null ? `${it.risk_score}` : "—"}
@@ -195,13 +198,15 @@ export function Critical24hBoard({
                       KEV
                     </span>
                   ) : null}
-                  <span className="rounded-full border border-white/10 bg-black/30 px-2 py-0.5 text-[10px] tabular-nums text-fg/85">
+                  <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] tabular-nums text-fg/85 dark:border-white/10 dark:bg-black/30">
                     EPSS {epssPct}
                   </span>
-                  <span className="rounded-full border border-white/10 bg-black/30 px-2 py-0.5 text-[10px] tabular-nums text-fg/85">
+                  <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] tabular-nums text-fg/85 dark:border-white/10 dark:bg-black/30">
                     CVSS {cvss}
                   </span>
-                  <span className="rounded-full border border-white/8 px-2 py-0.5 text-[10px] text-muted">{ra.label}</span>
+                  <span className="rounded-full border border-slate-200/90 px-2 py-0.5 text-[10px] text-muted dark:border-white/8">
+                    {ra.label}
+                  </span>
                 </div>
 
                 {reasons.length > 0 ? (

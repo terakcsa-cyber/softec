@@ -2,7 +2,7 @@
 
 import { useId, useMemo } from "react";
 import { motion } from "framer-motion";
-import { Activity, Clock, Database, Shield, Sparkles, TrendingUp } from "lucide-react";
+import { Activity, Clock, Database, Loader2, RefreshCw, Shield, Sparkles, TrendingUp } from "lucide-react";
 import { cn } from "../ui/cn";
 import { Critical24hBoard, type HotCveRow } from "./critical-24h-board";
 import { VendorLandscape } from "./vendor-landscape";
@@ -237,7 +237,9 @@ export function OverviewDashboardPanel({
   hotLoading,
   onHotCveClick,
   vendorsLoading,
-  dashboardHighlightCveIds
+  dashboardHighlightCveIds,
+  onRefresh,
+  refreshing
 }: {
   data: SummaryStats | undefined;
   loading: boolean;
@@ -261,6 +263,8 @@ export function OverviewDashboardPanel({
   vendorsLoading?: boolean;
   /** Подсветка карточек, для которых открыто модальное окно. */
   dashboardHighlightCveIds?: ReadonlySet<string> | null;
+  onRefresh?: () => void;
+  refreshing?: boolean;
 }) {
   const qh = (queueHealth ?? null) as null | {
     ok?: boolean;
@@ -322,12 +326,34 @@ export function OverviewDashboardPanel({
             Заполнение scoring, EPSS, CVSS и ИИ по корпусу CVE — плюс актуальность источников.
           </div>
         </div>
-        <div className="flex items-center gap-1.5 rounded-full border border-border bg-black/35 px-2.5 py-1 text-[11px] text-muted shadow-inner">
-          <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-ok/70 opacity-60" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-ok" />
-          </span>
-          Онлайн
+        <div className="flex shrink-0 items-center gap-2">
+          {onRefresh ? (
+            <button
+              type="button"
+              title="Обновить сводку и горячие CVE"
+              onClick={() => onRefresh()}
+              disabled={refreshing}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-fg/90",
+                "hover:bg-slate-100 dark:border-border dark:bg-black/20 dark:hover:bg-black/35",
+                refreshing && "cursor-wait opacity-80"
+              )}
+            >
+              {refreshing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              Обновить
+            </button>
+          ) : null}
+          <div className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-muted shadow-inner dark:border-border dark:bg-black/35">
+            <span className="relative flex h-2 w-2">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-ok/70 opacity-60" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-ok" />
+            </span>
+            Онлайн
+          </div>
         </div>
       </div>
 
@@ -343,7 +369,7 @@ export function OverviewDashboardPanel({
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.04 * i }}
-            className="rounded-xl border border-border bg-gradient-to-br from-white/[0.07] to-white/[0.02] p-3 ring-1 ring-white/[0.04]"
+            className="rounded-xl border border-slate-200/90 bg-gradient-to-br from-white to-slate-50 p-3 ring-1 ring-slate-200/60 dark:border-border dark:from-white/[0.07] dark:to-white/[0.02] dark:ring-white/[0.05]"
           >
             <div className="flex items-center gap-2 text-[11px] text-muted">
               <c.icon className="h-3.5 w-3.5 opacity-90" />
@@ -357,7 +383,7 @@ export function OverviewDashboardPanel({
         ))}
       </div>
 
-      <section className="rounded-2xl border border-border bg-black/20 p-5 ring-1 ring-white/[0.05]">
+      <section className="rounded-2xl border border-slate-200/90 bg-slate-50/80 p-5 ring-1 ring-slate-200/60 dark:border-border dark:bg-black/20 dark:ring-white/[0.05]">
         <Critical24hBoard
           items={hotCves}
           loading={Boolean(hotLoading)}
@@ -366,9 +392,16 @@ export function OverviewDashboardPanel({
         />
       </section>
 
-      <div className="relative overflow-hidden rounded-2xl border border-border bg-gradient-to-br from-black/40 via-black/25 to-indigo-950/20 p-4 ring-1 ring-white/[0.06]">
+      <div className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-br from-white via-slate-50 to-indigo-100/40 p-4 ring-1 ring-slate-200/70 dark:border-border dark:from-black/40 dark:via-black/25 dark:to-indigo-950/20 dark:ring-white/[0.06]">
         <div
-          className="pointer-events-none absolute inset-0 opacity-[0.35]"
+          className="pointer-events-none absolute inset-0 opacity-[0.35] dark:hidden"
+          style={{
+            backgroundImage: `radial-gradient(circle at 1px 1px, rgba(15,23,42,0.06) 1px, transparent 0)`,
+            backgroundSize: "18px 18px"
+          }}
+        />
+        <div
+          className="pointer-events-none absolute inset-0 hidden opacity-[0.35] dark:block"
           style={{
             backgroundImage: `radial-gradient(circle at 1px 1px, rgba(255,255,255,0.07) 1px, transparent 0)`,
             backgroundSize: "18px 18px"
@@ -384,11 +417,11 @@ export function OverviewDashboardPanel({
               Сводный индекс по заполнению risk score, EPSS, CVSS и ИИ. Столбцы — доля CVE, где поле есть, относительно
               всей базы.
             </p>
-            <div className="rounded-xl border border-white/[0.06] bg-black/25 p-3 backdrop-blur-sm">
+            <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm backdrop-blur-sm dark:border-white/[0.06] dark:bg-black/25 dark:shadow-none">
               <CoverageBarsChart data={bars} />
             </div>
           </div>
-          <div className="flex flex-col items-center justify-center border-t border-white/[0.06] pt-4 lg:border-l lg:border-t-0 lg:pt-0 lg:pl-4">
+          <div className="flex flex-col items-center justify-center border-t border-slate-200/90 pt-4 lg:border-l lg:border-t-0 lg:pt-0 lg:pl-4 dark:border-white/[0.06]">
             <div className="text-[10px] font-medium uppercase tracking-wider text-muted">Индекс покрытия</div>
             <HealthRing score={health} />
             <div className="mt-1 text-center text-[10px] text-muted">
@@ -397,7 +430,7 @@ export function OverviewDashboardPanel({
           </div>
         </div>
 
-        <div className="relative mt-4 space-y-3.5 border-t border-white/[0.06] pt-4">
+        <div className="relative mt-4 space-y-3.5 border-t border-slate-200/90 pt-4 dark:border-white/[0.06]">
           <AnimatedMetricBar
             label="Risk score посчитан"
             value={data.scoredCount}
@@ -429,7 +462,7 @@ export function OverviewDashboardPanel({
         </div>
       </div>
 
-      <div className="rounded-2xl border border-border bg-black/15 p-4">
+      <div className="rounded-2xl border border-border bg-white p-4 shadow-sm dark:bg-black/15 dark:shadow-none">
         <div className="mb-3 flex items-center gap-2 text-xs font-medium text-fg/90">
           <Clock className="h-3.5 w-3.5 text-muted" />
           Актуальность данных
@@ -445,7 +478,7 @@ export function OverviewDashboardPanel({
           ).map(([k, v]) => (
             <div
               key={k}
-              className="flex justify-between gap-2 rounded-lg border border-white/[0.04] bg-black/25 px-2.5 py-2"
+              className="flex justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 dark:border-white/[0.04] dark:bg-black/25"
             >
               <dt className="text-muted">{k}</dt>
               <dd className="text-right font-mono text-[10px] text-fg/85">{fmtTs(v)}</dd>
@@ -454,14 +487,14 @@ export function OverviewDashboardPanel({
         </dl>
       </div>
 
-      <div className="rounded-2xl border border-border bg-black/15 p-4">
+      <div className="rounded-2xl border border-border bg-white p-4 shadow-sm dark:bg-black/15 dark:shadow-none">
         <div className="mb-3 flex items-center gap-2 text-xs font-medium text-fg/90">
           <Activity className="h-3.5 w-3.5 text-muted" />
           Очереди
           {onOpenDlq ? (
             <button
               onClick={onOpenDlq}
-              className="ml-auto rounded-lg border border-border bg-black/20 px-2 py-1 text-[11px] text-fg/85 hover:bg-black/30"
+              className="ml-auto rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-fg/85 hover:bg-slate-100 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
               title="Открыть DLQ"
             >
               DLQ
@@ -478,7 +511,7 @@ export function OverviewDashboardPanel({
             ].map(([k, v]) => (
               <div
                 key={k}
-                className="flex justify-between gap-2 rounded-lg border border-white/[0.04] bg-black/25 px-2.5 py-2"
+                className="flex justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 dark:border-white/[0.04] dark:bg-black/25"
               >
                 <div className="text-muted">{k}</div>
                 <div className="tabular-nums text-fg/85">{typeof v === "number" ? v.toLocaleString() : "—"}</div>
@@ -494,8 +527,8 @@ export function OverviewDashboardPanel({
 
       {vendorsLoading ? (
         <div className="space-y-3">
-          <div className="h-5 w-48 animate-pulse rounded bg-white/10" />
-          <div className="h-64 animate-pulse rounded-2xl bg-white/[0.05]" />
+          <div className="h-5 w-48 animate-pulse rounded bg-slate-200/80 dark:bg-white/10" />
+          <div className="h-64 animate-pulse rounded-2xl bg-slate-200/50 dark:bg-white/[0.05]" />
         </div>
       ) : (
         <VendorLandscape
@@ -511,7 +544,7 @@ export function OverviewDashboardPanel({
         />
       )}
 
-      <div className="rounded-2xl border border-border border-dashed border-white/10 bg-black/10 p-4 text-xs text-muted">
+      <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-4 text-xs text-muted dark:border-white/10 dark:bg-black/10">
         <span className="font-medium text-fg/80">Подсказка:</span>             клик по CVE в блоке за 24ч открывает плавающее окно с разбором (можно открыть несколько и двигать).
         В модуле «Уязвимости» список слева и панель справа.
       </div>

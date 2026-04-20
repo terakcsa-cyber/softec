@@ -187,20 +187,25 @@ export function RiskBreakdownPanel({ data }: { data: unknown | null }) {
       else if (cvss >= 8)
         out.push({ title: "CVSS≥8.0", detail: fmtNum(cvss, 1), cls: "border-accent/30 bg-accent/10 text-fg/80" });
     }
-    if (aiReady) out.push({ title: "AI", detail: "Enriched", cls: "border-white/10 bg-white/5 text-fg/80" });
+    if (aiReady)
+      out.push({
+        title: "AI",
+        detail: "Enriched",
+        cls: "border-slate-200 bg-slate-50 text-fg/80 dark:border-white/10 dark:bg-white/5"
+      });
 
     if (f) {
       if (typeof f.freshnessDays === "number")
         out.push({
           title: "Freshness",
           detail: `${Math.round(f.freshnessDays)}d`,
-          cls: "border-white/10 bg-white/5 text-fg/80"
+          cls: "border-slate-200 bg-slate-50 text-fg/80 dark:border-white/10 dark:bg-white/5"
         });
       if (typeof f.mentions === "number" && f.mentions > 0)
         out.push({
           title: "Mentions",
           detail: String(Math.round(f.mentions)),
-          cls: "border-white/10 bg-white/5 text-fg/80"
+          cls: "border-slate-200 bg-slate-50 text-fg/80 dark:border-white/10 dark:bg-white/5"
         });
     }
     return out;
@@ -215,7 +220,12 @@ export function RiskBreakdownPanel({ data }: { data: unknown | null }) {
 
       <div className="mt-4 grid grid-cols-12 gap-4">
         <div className="col-span-12 xl:col-span-7">
-          <div className={cn("rounded-xl border border-border bg-black/20 p-4", score == null && "opacity-70")}>
+          <div
+            className={cn(
+              "rounded-xl border border-border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none",
+              score == null && "opacity-70"
+            )}
+          >
             <div className="text-xs text-muted">Unified risk score (0–100)</div>
             <div className="mt-2 flex items-end justify-between gap-4">
               <div className="text-3xl font-semibold tracking-tight">{score ?? "—"}</div>
@@ -224,21 +234,21 @@ export function RiskBreakdownPanel({ data }: { data: unknown | null }) {
               </div>
             </div>
             <div className="mt-4 grid grid-cols-3 gap-2 text-xs">
-              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 dark:border-white/10 dark:bg-white/5">
                 <div className="text-[11px] text-muted">CVSS</div>
                 <div className="mt-0.5 font-medium text-fg/90">{fmtNum(cvss, 1)}</div>
               </div>
-              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 dark:border-white/10 dark:bg-white/5">
                 <div className="text-[11px] text-muted">EPSS</div>
                 <div className="mt-0.5 font-medium text-fg/90">{fmtPct(epss)}</div>
               </div>
-              <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+              <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 dark:border-white/10 dark:bg-white/5">
                 <div className="text-[11px] text-muted">KEV</div>
                 <div className="mt-0.5 font-medium text-fg/90">{kev ? "Known exploited" : "—"}</div>
               </div>
             </div>
 
-            <div className="mt-4 rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+            <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 dark:border-white/10 dark:bg-black/20">
               <div className="text-[11px] text-muted">Why this score</div>
               <div className="mt-2 flex flex-wrap gap-2">
                 {explain.length ? (
@@ -254,7 +264,7 @@ export function RiskBreakdownPanel({ data }: { data: unknown | null }) {
               </div>
             </div>
 
-            <div className="mt-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+            <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 dark:border-white/10 dark:bg-black/20">
               <div className="flex items-center justify-between gap-2">
                 <div className="text-[11px] text-muted">Factor contributions (approx)</div>
                 <div className="text-[11px] text-muted">
@@ -270,14 +280,14 @@ export function RiskBreakdownPanel({ data }: { data: unknown | null }) {
                 {contrib.items.map((it) => {
                   const pct = Math.round((it.value01 / contrib.max) * 100);
                   return (
-                    <div key={it.key} className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-2">
+                    <div key={it.key} className="rounded-lg border border-slate-200 bg-white px-2.5 py-2 dark:border-white/10 dark:bg-black/20">
                       <button
                         className="grid w-full grid-cols-[70px_1fr_74px] items-center gap-2 text-left text-[11px]"
                         onClick={() => setOpenKey((k) => (k === it.key ? null : it.key))}
                         title="Click to expand calculation details"
                       >
                         <div className="text-muted">{it.key}</div>
-                        <div className="h-2.5 overflow-hidden rounded-full bg-white/[0.06] ring-1 ring-white/[0.06]">
+                        <div className="h-2.5 overflow-hidden rounded-full bg-slate-200/80 ring-1 ring-slate-200 dark:bg-white/[0.06] dark:ring-white/[0.06]">
                           <div className={cn("h-full rounded-full", it.cls)} style={{ width: `${pct}%` }} />
                         </div>
                         <div className="truncate text-right font-mono text-[10px] text-fg/80" title={it.label}>
@@ -308,9 +318,9 @@ export function RiskBreakdownPanel({ data }: { data: unknown | null }) {
         </div>
 
         <div className="col-span-12 xl:col-span-5">
-          <div className={cn("rounded-xl border border-border bg-black/20 p-4", !factors && "opacity-70")}>
+          <div className={cn("rounded-xl border border-border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none", !factors && "opacity-70")}>
             <div className="text-xs text-muted">Factors (as stored)</div>
-            <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-white/10 bg-black/30 p-3 text-[11px] text-fg/85">
+            <pre className="mt-2 max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-slate-50 p-3 text-[11px] text-fg/85 dark:border-white/10 dark:bg-black/30">
               {factors ? JSON.stringify(factors, null, 2) : "—"}
             </pre>
           </div>

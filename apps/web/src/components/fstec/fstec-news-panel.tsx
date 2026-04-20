@@ -2,7 +2,8 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { ArrowRight, Database, ExternalLink, Globe, Newspaper, RefreshCw, Rss, Sparkles } from "lucide-react";
+import { ArrowRight, ExternalLink, Globe, Newspaper, RefreshCw, Rss, Sparkles } from "lucide-react";
+import { apiFetch } from "@/lib/api-fetch";
 import type { FstecFeedItem } from "@/lib/fstec-rss";
 import type { LocalBduEnrichmentStatus } from "@/lib/fstec-feed-enrich";
 import { cn } from "../ui/cn";
@@ -41,7 +42,7 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
   const q = useQuery({
     queryKey: ["fstec", "feed"],
     queryFn: async () => {
-      const res = await fetch("/api/fstec/feed", { cache: "no-store" });
+      const res = await apiFetch("/api/fstec/feed", { cache: "no-store" });
       const body = (await res.json()) as FeedResponse;
       if (!res.ok) {
         throw new Error(body.error ?? `Ошибка загрузки (${res.status})`);
@@ -74,8 +75,8 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
           onClick={() => void q.refetch()}
           disabled={q.isFetching}
           className={cn(
-            "inline-flex shrink-0 items-center gap-2 rounded-xl border border-border bg-black/25 px-3 py-2 text-xs font-medium text-fg/90",
-            "hover:bg-black/35 disabled:opacity-50"
+            "inline-flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium text-fg/90 shadow-sm",
+            "hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25 dark:shadow-none dark:hover:bg-black/35"
           )}
         >
           <RefreshCw className={cn("h-3.5 w-3.5", q.isFetching && "animate-spin")} aria-hidden />
@@ -86,13 +87,13 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
       {enrich === "unavailable" ? (
         <div className="mt-4 rounded-xl border border-warn/35 bg-warn/10 px-3 py-2.5 text-[11px] leading-snug text-warn">
           Связка с локальной базой недоступна: API не ответил. Убедитесь, что backend запущен и для web заданы{" "}
-          <code className="rounded bg-black/30 px-1 font-mono text-[10px]">UPSTREAM_API_BASE</code> или{" "}
-          <code className="rounded bg-black/30 px-1 font-mono text-[10px]">NEXT_PUBLIC_API_BASE</code>
+          <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-black/30">UPSTREAM_API_BASE</code> или{" "}
+          <code className="rounded bg-slate-100 px-1 font-mono text-[10px] dark:bg-black/30">NEXT_PUBLIC_API_BASE</code>
           (в dev по умолчанию пробуем <span className="font-mono">127.0.0.1:4001/api</span>).
         </div>
       ) : null}
 
-      <div className="mt-5 flex items-center gap-2 border-t border-white/[0.06] pt-4 text-[11px] text-muted">
+      <div className="mt-5 flex items-center gap-2 border-t border-slate-200/90 pt-4 text-[11px] text-muted dark:border-white/[0.06]">
         {q.data?.source.kind === "rss" ? (
           <Rss className="h-3.5 w-3.5 shrink-0" aria-hidden />
         ) : (
@@ -129,11 +130,11 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
             {Array.from({ length: 5 }).map((_, i) => (
               <div
                 key={i}
-                className="animate-pulse rounded-xl border border-white/[0.06] bg-black/20 p-4"
+                className="animate-pulse rounded-xl border border-slate-200 bg-slate-50 p-4 dark:border-white/[0.06] dark:bg-black/20"
               >
-                <div className="h-3 w-2/3 rounded bg-white/10" />
-                <div className="mt-3 h-2 w-full rounded bg-white/[0.06]" />
-                <div className="mt-2 h-2 w-4/5 rounded bg-white/[0.06]" />
+                <div className="h-3 w-2/3 rounded bg-slate-200/80 dark:bg-white/10" />
+                <div className="mt-3 h-2 w-full rounded bg-slate-200/60 dark:bg-white/[0.06]" />
+                <div className="mt-2 h-2 w-4/5 rounded bg-slate-200/60 dark:bg-white/[0.06]" />
               </div>
             ))}
           </div>
@@ -142,7 +143,7 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
             {q.error instanceof Error ? q.error.message : "Не удалось загрузить ленту"}
           </div>
         ) : !q.data?.items?.length ? (
-          <div className="rounded-xl border border-border bg-black/20 p-6 text-center text-sm text-muted">
+          <div className="rounded-xl border border-border bg-slate-50 p-6 text-center text-sm text-muted dark:bg-black/20">
             Записей пока нет — проверьте доступность t.me или настройки FSTEC_TG_CHANNEL / RSS.
           </div>
         ) : (
@@ -154,7 +155,7 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.22, delay: Math.min(idx * 0.04, 0.4) }}
               className={cn(
-                "rounded-xl border border-white/[0.07] bg-gradient-to-br from-black/35 to-black/20 p-4 shadow-sm",
+                "rounded-xl border border-slate-200/90 bg-gradient-to-br from-white to-slate-50 p-4 shadow-sm dark:border-white/[0.07] dark:from-black/35 dark:to-black/20",
                 "transition-[box-shadow,border-color] duration-200 hover:border-accent/30 hover:shadow-md",
                 item.localBduLinks?.length ? "ring-1 ring-accent/20" : ""
               )}
@@ -194,7 +195,7 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
                           type="button"
                           onClick={() => onOpenCve(l.cveId)}
                           className={cn(
-                            "inline-flex w-full shrink-0 items-center justify-center gap-1 rounded-lg border border-accent/40 bg-black/25 px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-wide text-accent sm:w-auto",
+                            "inline-flex w-full shrink-0 items-center justify-center gap-1 rounded-lg border border-accent/40 bg-white px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-wide text-accent shadow-sm sm:w-auto dark:bg-black/25 dark:shadow-none",
                             "hover:bg-accent/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                           )}
                         >
