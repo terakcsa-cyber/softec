@@ -33,6 +33,9 @@ async function lookupCvesPresent(
     body: JSON.stringify({ cveIds }),
     cache: "no-store"
   });
+  // If user is not authenticated (or token expired), do not treat as "API down".
+  // Linking is an optional enhancement; the base feed must still work.
+  if (res.status === 401 || res.status === 403) return new Set();
   if (!res.ok) return null;
   const data = (await res.json()) as { present?: string[] };
   return new Set(data.present ?? []);
@@ -62,6 +65,8 @@ export async function enrichFeedItemsWithLocalBdu(
     return "unavailable";
   }
   if (present === null) return "unavailable";
+  // Auth missing/denied → "noop" instead of a scary "unavailable" warning.
+  if (present.size === 0) return "noop";
 
   for (const [item, pairs] of perItem) {
     const links = dedupeLinks(

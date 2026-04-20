@@ -122,6 +122,12 @@ export function PatchManagementPanel({
 
   useEffect(() => {
     if (!newest?.id) return;
+    // Global notifier handles notifications across modules.
+    try {
+      if (localStorage.getItem("vip:live:global") === "1") return;
+    } catch {
+      // ignore
+    }
     let last = "";
     try {
       last = localStorage.getItem(storageKey) ?? "";
