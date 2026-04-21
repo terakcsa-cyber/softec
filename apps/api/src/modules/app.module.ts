@@ -7,6 +7,7 @@ import { HealthController } from "../routes/health.controller.js";
 import { CveController } from "../routes/cve.controller.js";
 import { StatsController } from "../routes/stats.controller.js";
 import { VendorAdvisoryController } from "../routes/vendor-advisory.controller.js";
+import { AsvController } from "../routes/asv.controller.js";
 import { DbModule } from "./db.module.js";
 import { QueueModule } from "./queue.module.js";
 import { CveEnrichRunnerService } from "../services/cve-enrich-runner.service.js";
@@ -27,7 +28,7 @@ import { CveVendorIndexService } from "../services/cve-vendor-index.service.js";
       }
     ])
   ],
-  controllers: [HealthController, CveController, StatsController, VendorAdvisoryController],
+  controllers: [HealthController, CveController, StatsController, VendorAdvisoryController, AsvController],
   providers: [
     SchemaService,
     RedisEnrichCacheService,

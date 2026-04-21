@@ -66,7 +66,7 @@ export async function GET(req: Request) {
     })
   );
 
-  const ok = checks.every((c) => c.ok || c.status === 401);
+  const ok = checks.every((c) => c.ok || c.status === 401 || c.status === 403);
 
   return NextResponse.json(
     {

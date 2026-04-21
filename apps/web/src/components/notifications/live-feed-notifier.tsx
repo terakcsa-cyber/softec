@@ -80,7 +80,10 @@ export function LiveFeedNotifier() {
 
   // Browsers block sound until a user gesture. Unlock once on first interaction.
   useEffect(() => {
-    const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext | undefined;
+    const Ctx = (window.AudioContext ||
+      (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) as
+      | typeof AudioContext
+      | undefined;
     if (!Ctx) return;
 
     const unlock = async () => {
@@ -103,7 +106,7 @@ export function LiveFeedNotifier() {
 
   useEffect(() => {
     safeSet(soundKey, soundEnabled ? "1" : "0");
-  }, [soundEnabled]);
+  }, [soundEnabled, audioUnlocked]);
 
   const showToast = (t: Toast) => {
     setToast(t);
@@ -176,7 +179,7 @@ export function LiveFeedNotifier() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [soundEnabled]);
+  }, [soundEnabled, audioUnlocked]);
 
   return (
     <div className="fixed bottom-4 right-4 z-[70]">

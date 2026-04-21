@@ -135,6 +135,268 @@ export class SchemaService implements OnModuleInit {
 
     await this.seedVendorAdvisoryDemoRows();
 
+    // --- ASV / External attack surface management (assets + scan runs + findings) ---
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_asset (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_type TEXT NOT NULL CHECK (asset_type IN ('domain','ip','cidr','url')),
+        key_norm TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        scope_policy JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (asset_type, key_norm)
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_asset_type_idx ON asv_asset (asset_type)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_asset_updated_idx ON asv_asset (updated_at DESC)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_scan_profile (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL UNIQUE,
+        mode TEXT NOT NULL DEFAULT 'safe' CHECK (mode IN ('safe','standard')),
+        config JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+
+    // Default profiles (idempotent).
+    await this.db.query(
+      `INSERT INTO asv_scan_profile (name, mode, config)
+       VALUES
+        (
+          'safe',
+          'safe',
+          '{
+            "ports": [80,443,8080,8443,22,3389,445],
+            "httpPaths": ["/"],
+            "nuclei": { "enabled": true, "tags": ["misconfiguration","misconfig","exposed-panels","panel","technologies","tech","exposure","default-login","osint","takeovers"], "excludeTags": ["intrusive","dos","fuzz"], "severity": ["critical","high","medium","low","info"], "rateLimitPerMin": 240, "maxMs": 240000 },
+            "tcpTimeoutMs": 800,
+            "httpTimeoutMs": 2500,
+            "maxPortConcurrency": 24,
+            "maxHttpConcurrency": 8
+          }'::jsonb
+        ),
+        (
+          'standard',
+          'standard',
+          '{
+            "ports": [21,22,23,25,53,80,81,88,110,111,135,139,143,389,443,445,465,587,993,995,1433,1521,2049,2375,27017,3000,3306,3389,4000,5000,5432,5601,5900,6379,8000,8080,8443,9000,9200,9300,11211],
+            "httpPaths": ["/","/robots.txt","/.well-known/security.txt","/sitemap.xml","/favicon.ico"],
+            "nuclei": { "enabled": true, "tags": ["cve","misconfiguration","misconfig","exposed-panels","panel","technologies","tech","exposure","takeovers","default-login","osint","vuln","kubernetes","k8s","cloud","devops","config","authentication","microsoft","azure","aws","gcp","firebase","jwt","oauth","graphql","swagger","api"], "excludeTags": ["intrusive","dos","fuzz"], "severity": ["critical","high","medium","low","info"], "rateLimitPerMin": 600, "maxMs": 900000 },
+            "tcpTimeoutMs": 800,
+            "httpTimeoutMs": 2200,
+            "maxPortConcurrency": 64,
+            "maxHttpConcurrency": 16
+          }'::jsonb
+        ),
+        (
+          'monster',
+          'standard',
+          '{
+            "ports": [21,22,23,25,53,80,81,88,110,111,135,139,143,389,443,445,465,587,993,995,1433,1521,2049,2375,27017,3000,3306,3389,4000,5000,5432,5601,5900,6379,8000,8080,8443,9000,9200,9300,11211],
+            "httpPaths": ["/","/robots.txt","/.well-known/security.txt","/sitemap.xml","/favicon.ico","/.git/config","/.env","/actuator/health","/swagger-ui/","/api-docs","/graphql"],
+            "nuclei": { "enabled": true, "tags": ["cve","vuln","misconfiguration","misconfig","exposed-panels","panel","default-login","takeovers","tech","exposure","kubernetes","cloud","devops","api"], "excludeTags": ["intrusive","dos","fuzz"], "severity": ["critical","high","medium","low","info"], "rateLimitPerMin": 900, "maxMs": 1800000 },
+            "tcpTimeoutMs": 900,
+            "httpTimeoutMs": 3500,
+            "maxPortConcurrency": 96,
+            "maxHttpConcurrency": 24
+          }'::jsonb
+        )
+       ON CONFLICT (name) DO UPDATE
+         SET mode = EXCLUDED.mode,
+             config = EXCLUDED.config,
+             updated_at = now()`
+    );
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_scan_run (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_id UUID NOT NULL REFERENCES asv_asset(id) ON DELETE CASCADE,
+        profile_id UUID REFERENCES asv_scan_profile(id) ON DELETE SET NULL,
+        scan_mode TEXT NOT NULL DEFAULT 'safe' CHECK (scan_mode IN ('safe','standard')),
+        status TEXT NOT NULL CHECK (status IN ('queued','running','completed','failed','cancelled')) DEFAULT 'queued',
+        started_at TIMESTAMPTZ,
+        ended_at TIMESTAMPTZ,
+        tool_versions JSONB NOT NULL DEFAULT '{}'::jsonb,
+        stats JSONB NOT NULL DEFAULT '{}'::jsonb,
+        error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `ALTER TABLE asv_scan_run
+       ADD COLUMN IF NOT EXISTS scan_mode TEXT NOT NULL DEFAULT 'safe'`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_scan_run_asset_idx ON asv_scan_run (asset_id, created_at DESC)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_scan_run_status_idx ON asv_scan_run (status, updated_at DESC)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_finding (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_id UUID NOT NULL REFERENCES asv_asset(id) ON DELETE CASCADE,
+        scan_run_id UUID REFERENCES asv_scan_run(id) ON DELETE SET NULL,
+        fingerprint TEXT NOT NULL,
+        title TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'info',
+        confidence TEXT NOT NULL DEFAULT 'medium',
+        tool TEXT NOT NULL DEFAULT 'unknown',
+        external_id TEXT,
+        affected JSONB NOT NULL DEFAULT '{}'::jsonb,
+        evidence JSONB NOT NULL DEFAULT '[]'::jsonb,
+        status TEXT NOT NULL DEFAULT 'open',
+        first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (asset_id, fingerprint)
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_finding_asset_idx ON asv_finding (asset_id, last_seen DESC)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_finding_severity_idx ON asv_finding (severity)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_finding_scan_run_idx ON asv_finding (scan_run_id)`);
+
+    /**
+     * AI notes for ASV: LLM-generated triage/explanations stored as immutable snapshots.
+     * Written by apps/ai worker via queue. Read by API/UI.
+     */
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_ai_note (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_id UUID NOT NULL REFERENCES asv_asset(id) ON DELETE CASCADE,
+        finding_id UUID REFERENCES asv_finding(id) ON DELETE CASCADE,
+        issue_id UUID REFERENCES asv_issue(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        model TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        output_text TEXT,
+        tokens_input INT,
+        tokens_output INT,
+        cost_usd NUMERIC(10, 6),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (kind, finding_id, input_hash),
+        UNIQUE (kind, issue_id, input_hash)
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_ai_note_asset_idx ON asv_ai_note (asset_id, created_at DESC)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_ai_note_finding_idx ON asv_ai_note (finding_id, created_at DESC)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_ai_note_issue_idx ON asv_ai_note (issue_id, created_at DESC)`);
+
+    /**
+     * Issues = агрегированные проблемы поверх findings.
+     * Ключ issue_key сейчас совпадает с finding.fingerprint (стабильный дедуп).
+     */
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_issue (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_id UUID NOT NULL REFERENCES asv_asset(id) ON DELETE CASCADE,
+        issue_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        tool TEXT NOT NULL DEFAULT 'unknown',
+        external_id TEXT,
+        endpoint_key TEXT,
+        severity TEXT NOT NULL DEFAULT 'info',
+        confidence TEXT NOT NULL DEFAULT 'medium',
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved','accepted','false_positive')),
+        first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_scan_run_id UUID REFERENCES asv_scan_run(id) ON DELETE SET NULL,
+        occurrences INT NOT NULL DEFAULT 1 CHECK (occurrences >= 1),
+        fix_guidance JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (asset_id, issue_key)
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_issue_asset_idx ON asv_issue (asset_id, last_seen DESC)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_issue_status_idx ON asv_issue (status, last_seen DESC)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_issue_severity_idx ON asv_issue (severity)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_issue_endpoint_idx ON asv_issue (endpoint_key)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_port_observation (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_id UUID NOT NULL REFERENCES asv_asset(id) ON DELETE CASCADE,
+        scan_run_id UUID REFERENCES asv_scan_run(id) ON DELETE SET NULL,
+        target TEXT NOT NULL,
+        ip INET,
+        port INT NOT NULL CHECK (port > 0 AND port <= 65535),
+        transport TEXT NOT NULL DEFAULT 'tcp' CHECK (transport IN ('tcp')),
+        state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','closed','filtered','unknown')),
+        latency_ms INT,
+        evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+        observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS asv_port_observation_asset_idx ON asv_port_observation (asset_id, observed_at DESC)`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS asv_port_observation_scan_idx ON asv_port_observation (scan_run_id, observed_at DESC)`
+    );
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_http_observation (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_id UUID NOT NULL REFERENCES asv_asset(id) ON DELETE CASCADE,
+        scan_run_id UUID REFERENCES asv_scan_run(id) ON DELETE SET NULL,
+        url TEXT NOT NULL,
+        final_url TEXT,
+        status INT,
+        title TEXT,
+        server TEXT,
+        headers JSONB NOT NULL DEFAULT '{}'::jsonb,
+        tech JSONB NOT NULL DEFAULT '[]'::jsonb,
+        latency_ms INT,
+        evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+        observed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS asv_http_observation_asset_idx ON asv_http_observation (asset_id, observed_at DESC)`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS asv_http_observation_scan_idx ON asv_http_observation (scan_run_id, observed_at DESC)`
+    );
+
+    // --- Nuclei readiness: artifacts + template metadata cache (optional) ---
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_scan_artifact (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        scan_run_id UUID NOT NULL REFERENCES asv_scan_run(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('nuclei.jsonl','nuclei.stdout','nuclei.stderr','scanner.log')),
+        bytes INT NOT NULL DEFAULT 0,
+        sha256 TEXT,
+        storage TEXT NOT NULL DEFAULT 'inline' CHECK (storage IN ('inline')),
+        content_text TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS asv_scan_artifact_scan_idx ON asv_scan_artifact (scan_run_id, created_at DESC)`
+    );
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_nuclei_template (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        template_id TEXT NOT NULL UNIQUE,
+        name TEXT,
+        severity TEXT,
+        tags TEXT[],
+        description TEXT,
+        reference TEXT[],
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+
     await this.db.query(`CREATE EXTENSION IF NOT EXISTS pg_trgm`);
     await this.db.query(
       `CREATE INDEX IF NOT EXISTS cve_cve_id_lower_trgm_idx ON cve USING gin (lower(cve_id) gin_trgm_ops)`

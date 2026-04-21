@@ -48,7 +48,10 @@ function matchQuery(it: PatchFeedItem, q: string): boolean {
 
 function beepPatch() {
   try {
-    const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext | undefined;
+    const Ctx = (window.AudioContext ||
+      (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) as
+      | typeof AudioContext
+      | undefined;
     if (!Ctx) return;
     const ctx = new Ctx();
     const o = ctx.createOscillator();
@@ -104,8 +107,8 @@ export function PatchManagementPanel({
     refetchIntervalInBackground: true
   });
 
-  const itemsRaw = feedQuery.data?.items ?? [];
-  const channels = feedQuery.data?.source.channels ?? [];
+  const itemsRaw = useMemo(() => feedQuery.data?.items ?? [], [feedQuery.data?.items]);
+  const channels = useMemo(() => feedQuery.data?.source.channels ?? [], [feedQuery.data?.source.channels]);
 
   const detail = useMemo(() => {
     if (!detailId) return null;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Activity, ExternalLink, Loader2, RefreshCw, TriangleAlert } from "lucide-react";
 import { RequireAuth } from "@/components/auth/require-auth";
 import { apiFetch } from "@/lib/api-fetch";
@@ -38,7 +38,7 @@ export default function HealthPage() {
     return [...data.checks].sort((a, b) => a.name.localeCompare(b.name));
   }, [data]);
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     setBusy(true);
     setErr(null);
     try {
@@ -54,14 +54,13 @@ export default function HealthPage() {
     } finally {
       setBusy(false);
     }
-  }
+  }, []);
 
   useEffect(() => {
     void refresh();
     const t = setInterval(() => void refresh(), 30_000);
     return () => clearInterval(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [refresh]);
 
   return (
     <RequireAuth>

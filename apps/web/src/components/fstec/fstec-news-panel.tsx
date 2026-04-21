@@ -108,7 +108,10 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
 
     if (soundEnabled) {
       try {
-        const Ctx = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext | undefined;
+        const Ctx = (window.AudioContext ||
+          (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) as
+          | typeof AudioContext
+          | undefined;
         if (Ctx) {
           const ctx = new Ctx();
           const o = ctx.createOscillator();
