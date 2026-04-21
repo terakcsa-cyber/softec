@@ -1,204 +1,284 @@
-# Vuln Intel Platform
+# Платформа разведки уязвимостей (Vuln Intel Platform)
 
-Vulnerability intelligence platform: ingest CVE + enrich with EPSS/KEV + AI context, provide a fast UI for triage, and keep the pipeline observable.
+Монорепозиторий на **pnpm + Turbo** для сбора и нормализации данных об уязвимостях (CVE, EPSS, KEV, бюллетени вендоров), **ИИ‑обогащения** карточек CVE, веб‑интерфейса для аналитики и модуля **ASV** (Attack Surface / сканирование поверхности атаки с **Nuclei**).
 
-This repo is a **pnpm + turbo monorepo** with:
-- **API** (NestJS): auth + CVE search + stats endpoints
-- **Ingest** (NestJS): NVD/KEV/EPSS + vendor advisory RSS/Atom ingestion
-- **AI** (NestJS): background workers for scoring + LLM enrichment (Ollama/OpenAI-compatible)
-- **Web** (Next.js App Router): UI + BFF routes (proxy to API + extra integrations like ФСТЭК feed)
+Цели проекта:
 
----
-
-## Modules (what you get)
-
-### Web UI (`apps/web`)
-- **Dashboard / Overview**: platform summary, freshness watermarks, “hot” CVEs, vendor landscape.
-- **Vulnerabilities**: list, filters, CVE card (with optional on-demand enrich).
-- **Patch management**: vendor advisory feed (RSS/Atom → normalized table).
-- **ФСТЭК module**: Telegram-based BDU feed parser (`/api/fstec/feed`) with optional local linking.
-- **Health page**: `/health` UI, backed by `/api/health` checks.
-
-### API (`apps/api`)
-- **Auth**: JWT + optional TOTP (2FA). Bootstrap first user via env on empty DB.
-- **CVE**: search/list/details, lookup helpers, optional manual enrich endpoint.
-- **Stats**: summary/vendors/queue health + DLQ tools.
-- **Health**: lightweight API health endpoint.
-
-### Ingest (`apps/ingest`)
-- **NVD**: incremental polling and DB ingestion.
-- **KEV**: CISA Known Exploited Vulnerabilities catalog → DB upsert.
-- **EPSS**: daily feed import (CSV.gz) → DB upsert + deterministic rescoring queue fanout.
-- **Patch advisories**: vendor RSS/Atom ingestion → `vendor_advisory` table.
-
-### AI (`apps/ai`)
-- **Queue workers**: consume from RabbitMQ (`ai.enrich`, scoring queues).
-- **LLM integration**: OpenAI-compatible `chat/completions` (or LAN Ollama) with retries/timeouts.
-- **Redis**: optional enrich cache to avoid repeated LLM calls.
+- быстрый поиск и просмотр CVE с метриками и контекстом;
+- фоновые конвейеры ingest + очереди RabbitMQ с DLQ;
+- опциональное **LLM**‑обогащение (Ollama на LAN или любой OpenAI‑совместимый `chat/completions`);
+- **сканирование активов** (URL, IP, домен, CIDR) с портами, HTTP‑пробами и **Nuclei**;
+- **ИИ‑триаж** находок ASV и **ИИ‑приоритизация** связанных issues.
 
 ---
 
-## Integrations & external data sources
+## Состав системы (приложения)
 
-- **NVD (NIST)**: CVE data (uses `NVD_API_KEY` when set).
-- **CISA KEV**: `known_exploited_vulnerabilities.json`.
-- **EPSS**: `epss_scores-current.csv.gz`.
-- **Vendor advisories (RSS/Atom)**: configurable list; includes international + RU sources.
-- **ФСТЭК BDU Telegram feed**: parses `https://t.me/s/<channel>` by default (no RSSHub dependency).
-- **RabbitMQ**: event bus / queues / DLQ.
-- **Postgres**: primary storage.
-- **Redis**: enrich cache + some invalidation helpers.
+| Приложение | Стек | Назначение |
+|------------|------|------------|
+| `apps/web` | Next.js (App Router) | UI, BFF‑маршруты (`/api/...`), прокси к Nest API |
+| `apps/api` | NestJS | HTTP API: аутентификация, CVE, статистика, **ASV REST**, публикация задач в очередь |
+| `apps/ingest` | NestJS | NVD / KEV / EPSS, patch‑advisories, **воркер ASV** (`asv.scan`) |
+| `apps/ai` | NestJS | Воркеры: enrich CVE, **ASV triage**, **ASV issue priority** |
+| `packages/shared` | TypeScript | Общие типы, утилиты, схемы |
 
----
-
-## Repo layout
-
-- `apps/api` — NestJS HTTP API (port is `PORT`, default in dev orchestrator: 4001)
-- `apps/ingest` — NestJS ingest runner (no public port)
-- `apps/ai` — NestJS worker runner (no public port)
-- `apps/web` — Next.js UI + BFF routes (port: `WEB_PORT`, default: 3001)
-- `packages/shared` — shared types/schemas/utilities (used by all apps)
-- `infra` — local dev infra (Docker compose + Postgres init SQL)
-- `scripts` — dev orchestrator + ops helpers
+Инфраструктура для локальной разработки: **`infra/docker-compose.yml`** — Postgres, Redis, RabbitMQ.
 
 ---
 
-## Quickstart (local dev)
+## Ключевые возможности
 
-### Prerequisites
-- **Node.js**: >= 20
-- **pnpm**: repo pins `pnpm@10`
-- **Docker**: for Postgres/Redis/RabbitMQ
+### Дашборд и CVE
 
-### 1) Start infra (DB/Redis/RabbitMQ)
+- Сводка по платформе, «свежесть» источников, горячие CVE, вендоры.
+- Список уязвимостей с фильтрами, карточка CVE, по необходимости **on‑demand enrich**.
+- Интеграции: **NVD**, **CISA KEV**, **EPSS**, **RSS/Atom** бюллетеней вендоров (в т.ч. русскоязычные источники по умолчанию).
+
+### Patch management
+
+- Нормализованная лента `vendor_advisory`, детали записи, live‑уведомления (при наличии настроек).
+
+### ФСТЭК / БДУ
+
+- Парсинг ленты (по умолчанию публичная страница `t.me/s/...`, без обязательного RSSHub).
+- Настраиваемые `FSTEC_*` переменные (см. `.env.example`).
+
+### Здоровье сервисов
+
+- UI: `/health`.
+- BFF: `GET /api/health` — параллельные проверки API и зависимостей (для авторизованного пользователя передаётся `Authorization`).
+
+### ASV — сканер поверхности атаки
+
+Модуль для учёта **активов** и запуска **скан‑ранов** с записью наблюдений и находок в Postgres.
+
+**Типы активов** (`asset_type`):
+
+- `url` — полный URL (веб‑ориентированное сканирование путей + Nuclei по «живым» origin’ам).
+- `ip`, `domain`, `cidr` — сетевой контур: **TCP‑проверка портов** из профиля, минимальная или расширенная **HTTP‑проба** открытых web‑портов (80/443/8080/8443), **Nuclei в режиме `host:port`** (`network`), без «пентеста по путям» как у классического URL‑ассета.
+
+**Профили сканирования** (таблица `asv_scan_profile`, сиды в API при инициализации схемы):
+
+- **safe** — узкий набор портов, щадящие HTTP‑пути, режим `safe` для политики Nuclei.
+- **standard** — расширенный портовый список, несколько стандартных HTTP‑путей, режим `standard`, широкий набор тегов Nuclei для URL.
+- **monster** — максимально широкий портовый список, **дополнительные HTTP‑пути** (в т.ч. типичные чувствительные эндпоинты вроде `/.env`, swagger и т.д. в конфиге профиля), повышенные таймауты и конкурентность; для **URL** включается **двухфазный «умный» Nuclei**: сначала **lite** (misconfig / panel / tech / …), затем при наличии **технологических подсказок** и отсутствии жёсткой блокировки WAF — **heavy** (`cve`, `vuln`, только critical/high). Для **IP / domain / CIDR** при профиле **monster** выполняется тот же **lite → heavy** по списку целей **`host:port`**, с учётом WAF/таймаутов для **решения, запускать ли heavy**; **lite по открытым портам не отменяется** только из‑за того, что HTTP за Cloudflare отдаёт `null` (поведение доведено до разумного для CDN‑IP).
+
+**Артефакты скана** (`asv_scan_artifact`): `scanner.log`, `nuclei.stdout`, `nuclei.stderr`, `nuclei.jsonl` — удобно смотреть в UI и отлаживать шаблоны.
+
+**Nuclei**:
+
+- Включается переменными окружения (см. `.env.example`, блок `ASV_NUCLEI_*`): `ASV_NUCLEI_ENABLED`, раннер **docker** или бинарь на хосте, образ `ASV_NUCLEI_IMAGE`, лимиты времени, каталог шаблонов на хосте (`ASV_NUCLEI_TEMPLATES_DIR`), опции обновления шаблонов.
+- Для сетевых целей используются протоколы **`tcp,ssl`** там, где это уместно, чтобы не навязывать чисто HTTP‑шаблоны всем портам.
+- Ошибки уровня `[FTL]` и фатальные проблемы прокси учитываются при разборе результата; скан может завершиться **`failed`** при критическом падении Nuclei (вместо «тихого» успеха).
+
+**ИИ по ASV**:
+
+- Очередь **`ai.asv-triage`** — структурированный **триаж находки** (запрос из UI/API, результат в `asv_ai_note` / связанных сущностях по реализации).
+- Очередь **`ai.asv-priority`** — **приоритизация issue**, связанных с ASV.
+
+**Очереди RabbitMQ (основные)**:
+
+| Очередь | Потребитель | Назначение |
+|---------|-------------|------------|
+| `asv.scan` | `apps/ingest` | Выполнение скана по активу |
+| `ai.enrich` | `apps/ai` | LLM‑обогащение CVE |
+| `ai.asv-triage` | `apps/ai` | Триаж находки ASV |
+| `ai.asv-priority` | `apps/ai` | Приоритет issue |
+
+Для каждой очереди объявляются **DLQ** (`dlq.*`) и привязка к exchange `vuln.dlx`.
+
+**REST API ASV** (базовый префикс `/api/asv` — см. `apps/api/src/routes/asv.controller.ts`):
+
+- активы: список / создание / обновление;
+- профили сканирования;
+- запуск и список **scan runs**;
+- находки, наблюдения портов/HTTP, инвентарь, **дифф** между прогонами;
+- артефакты прогона (в т.ч. тело `nuclei.stderr`);
+- справочник шаблонов Nuclei для UI;
+- постановка задач на **ИИ‑триаж** и **ИИ‑приоритет**.
+
+**Веб‑панель ASV** (`apps/web/src/components/dashboard/asv-scanner-panel.tsx`): управление активами, выбор профиля, просмотр прогонов, находок, артефактов, запрос ИИ‑триажа (с опросом статуса).
+
+---
+
+## Интеграции и внешние данные
+
+- **NVD (NIST)** — CVE (рекомендуется `NVD_API_KEY`).
+- **CISA KEV** — каталог известных эксплуатируемых CVE.
+- **EPSS** — ежедневный CSV.gz, пересчёт скоринга через очереди.
+- **Vendor advisories** — настраиваемый список RSS/Atom (или встроенный набор источников).
+- **ФСТЭК BDU** — парсинг Telegram‑ленты или RSS (переменные `FSTEC_*`).
+- **Postgres** — основное хранилище.
+- **Redis** — кэш enrich, вспомогательные ключи.
+- **RabbitMQ** — события и воркеры.
+
+---
+
+## Структура репозитория
+
+```
+apps/api       — NestJS HTTP API
+apps/ingest    — NestJS: NVD/KEV/EPSS/patch + ASV worker
+apps/ai        — NestJS: enrich + ASV triage/priority workers
+apps/web       — Next.js UI + BFF
+packages/shared — общий код
+infra          — Docker Compose (Postgres, Redis, RabbitMQ) + init SQL
+scripts        — dev.mjs (оркестратор портов), утилиты
+```
+
+---
+
+## Быстрый старт (локальная разработка)
+
+### Требования
+
+- **Node.js** ≥ 20  
+- **pnpm** 10 (версия зафиксирована в `package.json`)  
+- **Docker** — для Postgres / Redis / RabbitMQ  
+
+### 1. Поднять инфраструктуру
 
 ```bash
 pnpm infra:up
 ```
 
-This starts:
-- Postgres `localhost:5432`
-- Redis `localhost:6379`
-- RabbitMQ `localhost:5672` + management UI `http://localhost:15672` (user/pass: `vuln`/`vuln`)
+Будут запущены:
 
-### 2) Configure env
+- Postgres: `localhost:5432`, БД `vuln_intel`, пользователь/пароль `vuln` / `vuln`
+- Redis: `localhost:6379`
+- RabbitMQ: `localhost:5672`, UI управления `http://localhost:15672` (`vuln` / `vuln`)
 
-Create local secrets file:
+Остановка **без удаления томов** (данные БД сохраняются):
+
+```bash
+docker compose -f infra/docker-compose.yml down
+```
+
+Скрипт **`pnpm infra:down`** в корне вызывает `down **-v**` — **удаляет именованные volumes**; используйте его только если осознанно нужен «чистый» старт.
+
+### 2. Переменные окружения
 
 ```bash
 cp .env.example .env
 ```
 
-Minimum required for API auth:
-- `JWT_SECRET` (**>= 32 chars**)
+Обязательно задайте **`JWT_SECRET`** (не короче 32 символов).
 
-Optional but recommended:
-- `AUTH_BOOTSTRAP_EMAIL` / `AUTH_BOOTSTRAP_PASSWORD` to auto-create the first user (only when `auth_user` table is empty)
-- `NVD_API_KEY` for higher NVD throughput
-- `LLM_ENDPOINT` / `LLM_API_KEY` / `LLM_MODEL` for AI enrichment
+Рекомендуется:
 
-### 3) Install deps
+- `AUTH_BOOTSTRAP_EMAIL` / `AUTH_BOOTSTRAP_PASSWORD` — первый пользователь при пустой таблице пользователей;
+- `NVD_API_KEY` — лимиты NVD;
+- `LLM_ENDPOINT`, `LLM_API_KEY` (если нужен ключ), `LLM_MODEL` — для ИИ;
+- для ASV / Nuclei — блок **`ASV_NUCLEI_*`** в `.env.example` (включение сканера, Docker‑образ, таймауты, путь к шаблонам на диске).
+
+### 3. Установка зависимостей
 
 ```bash
 pnpm install
 ```
 
-### 4) Run everything
+### 4. Запуск всех сервисов разработки
 
 ```bash
 pnpm dev
 ```
 
-The dev orchestrator (`scripts/dev.mjs`) selects free ports and prints them, typically:
-- Web: `http://127.0.0.1:3001`
+Скрипт **`scripts/dev.mjs`**:
+
+- подбирает **свободные** порты (базово API с `API_PORT_BASE`, web с `WEB_PORT_BASE`, по умолчанию 4001 и 3001, с шагом при занятости);
+- собирает **`packages/shared`**;
+- запускает **`turbo dev`** (api, web, ingest, ai).
+
+В консоли появятся фактические URL, например:
+
+- Web: `http://127.0.0.1:3001` (или следующий свободный)
 - API: `http://127.0.0.1:4001/api`
 
-If you want a faster restart without wiping Next cache:
+Переменные **`UPSTREAM_API_BASE`** и **`NEXT_PUBLIC_API_BASE`** для дочерних процессов выставляются **согласованно** с выбранным портом API — не подменяйте их вручную при работе через `pnpm dev`, если не уверены.
+
+Более быстрый перезапуск без очистки кэша Next:
 
 ```bash
 pnpm dev:fast
 ```
 
----
+### Файл `.dev.lock`
 
-## Health / observability
+Если прошлый `pnpm dev` завершился аварийно, может остаться **`.dev.lock`**. Тогда новый запуск напишет, что dev уже запущен. Удалите lock вручную после проверки, что старых процессов нет:
 
-### Health page (UI)
-- `GET /health` — authenticated UI page with a live view of checks.
-
-### Health API (BFF)
-- `GET /api/health` — performs parallel checks against upstream API and local integrations.
-  - If you are logged in, it forwards your `Authorization` header.
-  - `401` is treated as “service reachable” (auth required), not a failure.
+```bash
+rm -f .dev.lock
+```
 
 ---
 
-## Running with Docker (all-in-one)
+## Запуск «всё в Docker» (демо)
 
-This is useful for a quick demo environment.
+Подходит для быстрого поднятия стенда (см. `infra/docker-compose.full.yml`):
 
 ```bash
 cp .env.example .env
 docker compose -f infra/docker-compose.full.yml up --build
 ```
 
-Services:
-- Web: `http://localhost:3000`
-- API: `http://localhost:4000/api`
+Типичные порты (см. compose‑файл): web **3000**, API **4000**.
 
 ---
 
-## Hardware requirements (rule-of-thumb)
+## Аппаратные ориентиры
 
-These are pragmatic starting points. Your real needs depend on ingest cadence, CVE backlog size, and LLM setup.
+### Ноутбук / один разработчик
 
-### Dev / single-user demo (laptop)
-- **CPU**: 4–8 cores
-- **RAM**: 8–16 GB (16 GB recommended if running Docker + Next + Nest workers)
-- **Disk**: 10–30 GB free (Postgres volume grows with CVE history; lockfile/node_modules also large)
-- **Network**: outbound access to NVD/CISA/EPSS/Telegram if you want live feeds
+- CPU: 4–8 ядер  
+- RAM: 8–16 ГБ (с Docker + Next + несколькими Nest — комфортнее 16 ГБ)  
+- Диск: 10–30 ГБ свободно (объём БД, `node_modules`, кэши)  
 
-### Small team / continuous ingest (single VM)
-- **CPU**: 8–16 cores
-- **RAM**: 16–32 GB
-- **Disk**: 50–200+ GB depending on retention / indexing
-- **DB**: use managed Postgres if possible
+### Небольшая команда / непрерывный ingest
 
-### AI enrichment (Ollama on LAN / GPU)
-- If using **Ollama**: a GPU box is recommended.
-- Control concurrency via `LLM_MAX_PARALLEL` and queue prefetch via `AI_ENRICH_PREFETCH`.
+- CPU: 8–16 ядер  
+- RAM: 16–32 ГБ  
+- Диск: 50–200+ ГБ в зависимости от ретеншена  
+
+### ИИ (Ollama на LAN / GPU)
+
+- Разумно ограничивать параллелизм: `LLM_MAX_PARALLEL`, `AI_ENRICH_PREFETCH`, настройки очередей ASV (на стороне RabbitMQ — prefetch у потребителей).
 
 ---
 
-## Common troubleshooting
+## Распространённые проблемы
 
-### “Dev already running … .dev.lock”
-`scripts/dev.mjs` writes `.dev.lock`. If your last run crashed and left a stale pid, stop it or delete the lock:
+### `Dev already running … .dev.lock`
 
-```bash
-rm -f .dev.lock
-```
+См. раздел про **`.dev.lock`** выше.
 
-### RabbitMQ `PRECONDITION_FAILED` on `ai.enrich`
-Queue parameters may have changed (e.g., priority). Delete the queue in RabbitMQ UI and restart the apps.
+### RabbitMQ `PRECONDITION_FAILED` (например, на `ai.enrich`)
 
-### ФСТЭК feed errors
-By default it parses Telegram HTML:
-- Source: `https://t.me/s/<channel>`
-- Configure channel via `FSTEC_TG_CHANNEL`
+Параметры очереди изменились между версиями. Удалите проблемную очередь в UI RabbitMQ (или через CLI) и перезапустите приложения — очереди пересоздадутся.
 
-If your network blocks Telegram, switch to RSS mode:
-- `FSTEC_FEED_SOURCE=rss`
-- `FSTEC_TG_RSS_URL=...` (ideally your own RSSHub instance)
+### ФСТЭК / Telegram
 
-### EPSS/KEV/NVD not updating
-Check `stats/summary` freshness watermarks and make sure outbound network is available.
+Если сеть режет `t.me`, переключите источник на RSS (`FSTEC_FEED_SOURCE`, `FSTEC_TG_RSS_URL`).
+
+### Nuclei / Docker
+
+- Убедитесь, что Docker доступен пользователю, образ `ASV_NUCLEI_IMAGE` можно скачать.  
+- Первый прогон с обновлением шаблонов может занять много времени и места на диске — смотрите `ASV_NUCLEI_TEMPLATES_DIR`, `ASV_NUCLEI_UPDATE_MAX_MS`, `ASV_NUCLEI_SKIP_TEMPLATE_BOOTSTRAP`.
+
+### EPSS / KEV / NVD не обновляются
+
+Проверьте `GET /api/stats/summary`, сетевой доступ с хоста ingest и логи `apps/ingest`.
 
 ---
 
-## Security notes
+## Безопасность
 
-- Do **not** commit `.env` (repo ignores it).
-- If you accidentally posted a token anywhere, **revoke it immediately**.
-- For production, set a strong `JWT_SECRET` and disable any dev-only registration flow.
+- **Не коммитьте** файл `.env` (он в `.gitignore`). В репозитории только **`.env.example`** без секретов.  
+- Любой утёкший ключ — **немедленно отозвать** и ротировать.  
+- В production: надёжный `JWT_SECRET`, отключение лишних dev‑флагов (`AUTH_ALLOW_REGISTER` и т.д.).  
+- ASV и Nuclei способны генерировать **активный сетевой трафик** к указанным вами активам — используйте только **разрешённые** цели и профили; теги `intrusive` / `dos` в дополнительных аргументах Nuclei могут навредить инфраструктуре.
 
+---
+
+## Лицензия и вклад
+
+Уточните в корне репозитория наличие файла `LICENSE` и внутренние правила команды (code review, ветки, CI). Для предложений по изменениям используйте pull request в основную ветку (`main`).

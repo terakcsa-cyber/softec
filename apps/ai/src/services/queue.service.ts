@@ -38,11 +38,33 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     });
     await this.channel.bindQueue("ai.score", "vuln.events", "vuln.score.requested.*");
 
+    await this.channel.assertQueue("ai.asv-triage", {
+      durable: true,
+      arguments: {
+        "x-dead-letter-exchange": "vuln.dlx",
+        "x-dead-letter-routing-key": "dlq.ai.asv-triage"
+      }
+    });
+    await this.channel.bindQueue("ai.asv-triage", "vuln.events", "asv.ai.triage.requested.*");
+
+    await this.channel.assertQueue("ai.asv-priority", {
+      durable: true,
+      arguments: {
+        "x-dead-letter-exchange": "vuln.dlx",
+        "x-dead-letter-routing-key": "dlq.ai.asv-priority"
+      }
+    });
+    await this.channel.bindQueue("ai.asv-priority", "vuln.events", "asv.ai.priority.requested.*");
+
     // DLQs
     await this.channel.assertQueue("dlq.ai.enrich", { durable: true });
     await this.channel.assertQueue("dlq.ai.score", { durable: true });
+    await this.channel.assertQueue("dlq.ai.asv-triage", { durable: true });
+    await this.channel.assertQueue("dlq.ai.asv-priority", { durable: true });
     await this.channel.bindQueue("dlq.ai.enrich", "vuln.dlx", "dlq.ai.enrich");
     await this.channel.bindQueue("dlq.ai.score", "vuln.dlx", "dlq.ai.score");
+    await this.channel.bindQueue("dlq.ai.asv-triage", "vuln.dlx", "dlq.ai.asv-triage");
+    await this.channel.bindQueue("dlq.ai.asv-priority", "vuln.dlx", "dlq.ai.asv-priority");
   }
 
   publish(exchange: string, routingKey: string, payload: unknown, options?: Options.Publish) {

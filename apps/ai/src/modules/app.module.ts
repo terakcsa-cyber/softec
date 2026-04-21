@@ -5,10 +5,12 @@ import { RedisModule } from "./redis.module.js";
 import { LlmModule } from "./llm.module.js";
 import { EnrichmentWorker } from "../workers/enrichment.worker.js";
 import { ScoringWorker } from "../workers/scoring.worker.js";
+import { AsvTriageWorker } from "../workers/asv-triage.worker.js";
+import { AsvPriorityWorker } from "../workers/asv-priority.worker.js";
 
 @Module({
   imports: [DbModule, RedisModule, QueueModule, LlmModule],
-  providers: [EnrichmentWorker, ScoringWorker]
+  providers: [EnrichmentWorker, ScoringWorker, AsvTriageWorker, AsvPriorityWorker]
 })
 export class AppModule {}
 

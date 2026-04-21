@@ -53,11 +53,11 @@ function extractCveIds(text: string): string[] {
 }
 
 function extractFetchErrorMessage(e: unknown): string {
-  const anyErr = e as any;
+  const anyErr = e as { cause?: unknown; code?: unknown; hostname?: unknown };
   const msg = e instanceof Error ? e.message : "Failed to load feed";
-  const cause = anyErr?.cause;
-  const code: string | undefined = cause?.code || anyErr?.code;
-  const hostname: string | undefined = cause?.hostname || anyErr?.hostname;
+  const cause = anyErr?.cause as { code?: unknown; hostname?: unknown; message?: unknown } | undefined;
+  const code = (cause?.code ?? anyErr?.code) as string | undefined;
+  const hostname = (cause?.hostname ?? anyErr?.hostname) as string | undefined;
   if (code === "ENOTFOUND") return `Нет доступа к интернету/DNS: не удалось разрешить домен${hostname ? ` (${hostname})` : ""}.`;
   if (code === "EAI_AGAIN") return `Проблема с DNS (EAI_AGAIN)${hostname ? ` для ${hostname}` : ""} — попробуйте позже.`;
   if (code === "ETIMEDOUT") return "Таймаут соединения (ETIMEDOUT) — проверьте сеть или попробуйте позже.";

@@ -8,7 +8,7 @@ import { apiFetch } from "@/lib/api-fetch";
 import { needsOnDemandEnrich, parseAiOutputJson, shouldAutoEnrichOnOpen } from "@/lib/cve-enrich-ui";
 import { CVE_POLL_BACKGROUND_ONLY_MS, CVE_POLL_WHILE_ENRICH_MS, ENRICH_UI_WAIT_MS } from "@/lib/enrich-ui-wait";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bandage, BarChart3, Loader2, RefreshCw, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Bandage, BarChart3, Loader2, Radar, RefreshCw, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
 import * as Tabs from "@radix-ui/react-tabs";
 import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "../ui/cn";
@@ -32,6 +32,7 @@ import {
 } from "./draggable-cve-modals";
 import { FstecNewsPanel } from "../fstec/fstec-news-panel";
 import { PatchManagementPanel } from "./patch-management-panel";
+import { AsvScannerPanel } from ".";
 import { VulnSearchBar } from "./vuln-search-bar";
 
 type CveListItem = {
@@ -75,7 +76,7 @@ type SavedView = {
 };
 
 type TriageStatus = "new" | "review" | "done";
-type ModuleKey = "dashboard" | "vulns" | "fstec" | "patches" | "settings";
+type ModuleKey = "dashboard" | "vulns" | "fstec" | "patches" | "asv" | "settings";
 
 export function Dashboard() {
   const queryClient = useQueryClient();
@@ -585,6 +586,19 @@ export function Dashboard() {
             <Bandage className="h-5 w-5" />
           </button>
           <button
+            onClick={() => switchModule("asv")}
+            className={cn(
+              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+              "hover:bg-slate-100 dark:hover:bg-black/25",
+              moduleKey === "asv"
+                ? "border-accent/30 bg-accent/10"
+                : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
+            )}
+            title="ASV Scanner"
+          >
+            <Radar className="h-5 w-5" />
+          </button>
+          <button
             onClick={() => switchModule("settings")}
             className={cn(
               "mt-auto flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
@@ -961,6 +975,10 @@ export function Dashboard() {
           ) : moduleKey === "patches" ? (
             <div className="glass rounded-2xl p-5 sm:p-6">
               <PatchManagementPanel onOpenCve={openDashboardModal} />
+            </div>
+          ) : moduleKey === "asv" ? (
+            <div className="glass rounded-2xl p-5 sm:p-6">
+              <AsvScannerPanel />
             </div>
           ) : (
             <div className="glass rounded-2xl p-6">

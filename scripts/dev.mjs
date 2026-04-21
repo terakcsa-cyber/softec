@@ -83,6 +83,25 @@ const maxDevRetries = Number(process.env.DEV_RETRIES ?? 25);
 
 cleanWebNextCache();
 
+function sanitizeNodeOptions(env) {
+  const raw = typeof env.NODE_OPTIONS === "string" ? env.NODE_OPTIONS : "";
+  if (!raw) return env;
+  // Cursor/shell tooling may inject `--localstorage-file` without a value, which makes Node warn.
+  // Drop it (and its potential value) defensively. This only affects dev runner children.
+  const parts = raw.split(/\s+/).filter(Boolean);
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (p === "--localstorage-file" || p.startsWith("--localstorage-file=")) {
+      // If it's exactly the flag, also drop the next token (potential value).
+      if (p === "--localstorage-file" && parts[i + 1] && !parts[i + 1].startsWith("--")) i++;
+      continue;
+    }
+    out.push(p);
+  }
+  return { ...env, NODE_OPTIONS: out.join(" ") };
+}
+
 for (let attempt = 1; attempt <= maxDevRetries; attempt++) {
   const apiPort = await findFreePort(apiBasePort + (attempt - 1) * 2, API_HOST);
   const webPort = await findFreePort(webBasePort + (attempt - 1) * 2, WEB_HOST);
@@ -102,7 +121,7 @@ for (let attempt = 1; attempt <= maxDevRetries; attempt++) {
     process.env.JWT_SECRET?.trim() ||
     "dev-only-change-me-min-32-chars-for-jwt-secret!!";
 
-  const env = {
+  const env = sanitizeNodeOptions({
     ...process.env,
     API_HOST,
     WEB_HOST,
@@ -115,7 +134,7 @@ for (let attempt = 1; attempt <= maxDevRetries; attempt++) {
      * а `findFreePort` мог выбрать другой порт — иначе BFF и браузер расходятся с Nest.
      */
     NEXT_PUBLIC_API_BASE: apiBase
-  };
+  });
 
   // AI/ingest resolve @vuln-intel/shared from dist; build once so Zod/schemas match source.
   const built = spawnSync("pnpm", ["--filter", "@vuln-intel/shared", "build"], {

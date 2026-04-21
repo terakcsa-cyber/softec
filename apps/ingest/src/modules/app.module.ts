@@ -5,10 +5,11 @@ import { NvdIngestJob } from "../jobs/nvd-ingest.job.js";
 import { KevIngestJob } from "../jobs/kev-ingest.job.js";
 import { EpssIngestJob } from "../jobs/epss-ingest.job.js";
 import { VendorAdvisoryIngestJob } from "../jobs/vendor-advisory-ingest.job.js";
+import { AsvScanWorker } from "../workers/asv-scan.worker.js";
 
 @Module({
   imports: [DbModule, QueueModule],
-  providers: [NvdIngestJob, KevIngestJob, EpssIngestJob, VendorAdvisoryIngestJob]
+  providers: [NvdIngestJob, KevIngestJob, EpssIngestJob, VendorAdvisoryIngestJob, AsvScanWorker]
 })
 export class AppModule {}
 

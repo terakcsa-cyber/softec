@@ -51,10 +51,44 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     });
     await ch.bindQueue("ai.score", "vuln.events", "vuln.score.requested.*");
 
+    await ch.assertQueue("ai.asv-triage", {
+      durable: true,
+      arguments: {
+        "x-dead-letter-exchange": "vuln.dlx",
+        "x-dead-letter-routing-key": "dlq.ai.asv-triage"
+      }
+    });
+    await ch.bindQueue("ai.asv-triage", "vuln.events", "asv.ai.triage.requested.*");
+
+    await ch.assertQueue("ai.asv-priority", {
+      durable: true,
+      arguments: {
+        "x-dead-letter-exchange": "vuln.dlx",
+        "x-dead-letter-routing-key": "dlq.ai.asv-priority"
+      }
+    });
+    await ch.bindQueue("ai.asv-priority", "vuln.events", "asv.ai.priority.requested.*");
+
     await ch.assertQueue("dlq.ai.enrich", { durable: true });
     await ch.assertQueue("dlq.ai.score", { durable: true });
+    await ch.assertQueue("dlq.ai.asv-triage", { durable: true });
+    await ch.assertQueue("dlq.ai.asv-priority", { durable: true });
     await ch.bindQueue("dlq.ai.enrich", "vuln.dlx", "dlq.ai.enrich");
     await ch.bindQueue("dlq.ai.score", "vuln.dlx", "dlq.ai.score");
+    await ch.bindQueue("dlq.ai.asv-triage", "vuln.dlx", "dlq.ai.asv-triage");
+    await ch.bindQueue("dlq.ai.asv-priority", "vuln.dlx", "dlq.ai.asv-priority");
+
+    // ASV scan worker queue (consumed by apps/ingest).
+    await ch.assertQueue("asv.scan", {
+      durable: true,
+      arguments: {
+        "x-dead-letter-exchange": "vuln.dlx",
+        "x-dead-letter-routing-key": "dlq.asv.scan"
+      }
+    });
+    await ch.bindQueue("asv.scan", "vuln.events", "asv.scan.requested.*");
+    await ch.assertQueue("dlq.asv.scan", { durable: true });
+    await ch.bindQueue("dlq.asv.scan", "vuln.dlx", "dlq.asv.scan");
   }
 
   async publish(exchange: string, routingKey: string, payload: unknown, options?: Options.Publish) {
