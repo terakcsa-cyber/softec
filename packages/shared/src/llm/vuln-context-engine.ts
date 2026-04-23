@@ -186,33 +186,50 @@ function normalizeOutputJson(parsed: LlmJson | null, rawContent: string): LlmJso
   const rawSnippet = rawContent.length > 12_000 ? `${rawContent.slice(0, 12_000)}…` : rawContent;
   if (!parsed) {
     return {
+      title: "Модель вернула не-JSON",
       summary: "Модель вернула не-JSON. Использую текст как черновик.",
-      explanation: rawSnippet.slice(0, 4000),
+      description: rawSnippet.slice(0, 4000),
+      vulnerabilityClass: null,
       attackFlow: [],
+      exploitation: {
+        publicExploit: "unknown",
+        exploitNotes: null
+      },
       exploitNarrative: null,
       consequences: [],
       remediation: [],
       graph: { nodes: [], edges: [] },
+      applicability: {
+        status: "unknown",
+        notes: "Не удалось распарсить структурированный ответ модели."
+      },
+      nextSteps: [],
+      questions: [],
+      sources: [],
       uncertainties: [],
       raw_text: rawSnippet
     };
   }
-  const hasExpectedShape =
+
+  // v2+ schema: the new "bank-grade" analysis block.
+  const hasV2Shape =
+    typeof parsed.title === "string" &&
     typeof parsed.summary === "string" &&
-    typeof parsed.explanation === "string" &&
+    typeof parsed.description === "string" &&
     Array.isArray(parsed.attackFlow) &&
     Array.isArray(parsed.consequences) &&
     Array.isArray(parsed.remediation) &&
+    Array.isArray(parsed.nextSteps) &&
+    Array.isArray(parsed.questions) &&
+    Array.isArray(parsed.sources) &&
     parsed.graph != null &&
-    typeof parsed.graph === "object";
+    typeof parsed.graph === "object" &&
+    parsed.applicability != null &&
+    typeof parsed.applicability === "object" &&
+    parsed.exploitation != null &&
+    typeof parsed.exploitation === "object";
 
-  if (hasExpectedShape && (parsed.summary as string).trim().length > 0) return parsed;
-
-  const fromExplanation =
-    typeof parsed.explanation === "string" && parsed.explanation.trim().length > 0
-      ? parsed.explanation.trim()
-      : null;
-  if (hasExpectedShape && fromExplanation) return { ...parsed, summary: fromExplanation };
+  if (hasV2Shape && (parsed.summary as string).trim().length > 0) return parsed;
 
   const vuln = (parsed.vulnerability as Record<string, unknown> | undefined) ?? undefined;
   const vulnTitle = vuln && typeof vuln.title === "string" ? vuln.title : null;
@@ -224,7 +241,7 @@ function normalizeOutputJson(parsed: LlmJson | null, rawContent: string): LlmJso
     (vulnTitle ?? "").trim() ||
     (rootId && rootDesc ? `Кратко: ${rootId} — ${rootDesc}` : null) ||
     rawSnippet.slice(0, 4000);
-  const fallbackExplanation =
+  const fallbackDescription =
     (vulnDesc ?? "").trim() ||
     (rootDesc ? `Описание (как в источнике): ${rootDesc}` : null) ||
     rawSnippet.slice(0, 4000);
@@ -232,12 +249,25 @@ function normalizeOutputJson(parsed: LlmJson | null, rawContent: string): LlmJso
   // Some local models (e.g. smaller Qwen) can ignore schema instructions.
   // Normalize into the expected envelope so downstream UI/code has stable keys.
   return {
+    title: rootId ? `Комплексный анализ ${rootId}` : "Комплексный анализ уязвимости",
     summary: fallbackSummary,
-    explanation: fallbackExplanation,
+    description: fallbackDescription,
+    vulnerabilityClass: null,
     attackFlow: [],
+    exploitation: {
+      publicExploit: "unknown",
+      exploitNotes: null
+    },
     exploitNarrative: null,
     consequences: [],
     remediation: [],
+    applicability: {
+      status: "unknown",
+      notes: null
+    },
+    nextSteps: [],
+    questions: [],
+    sources: [],
     graph: { nodes: [], edges: [] },
     uncertainties: [],
     raw_model_json: parsed
@@ -541,9 +571,12 @@ export async function runVulnContextLlm(
       model: config.model,
       promptVersion: config.promptVersion,
       outputJson: {
+        title: "ИИ не настроен (LLM not configured)",
         summary: `${LLM_NOT_CONFIGURED_SUMMARY_PREFIX} (set LLM_API_KEY, XAI_API_KEY, or DASHSCOPE_API_KEY, or use local Ollama / LAN LLM and LLM_ENDPOINT).`,
-        explanation: "Configure LLM_API_KEY (or XAI_API_KEY for x.ai) to enable AI context engine.",
+        description: "Configure LLM_API_KEY (or XAI_API_KEY for x.ai) to enable AI context engine.",
+        vulnerabilityClass: null,
         attackFlow: [],
+        exploitation: { publicExploit: "unknown", exploitNotes: null },
         exploitNarrative: null,
         consequences: [],
         graph: { nodes: [], edges: [] }
@@ -553,12 +586,31 @@ export async function runVulnContextLlm(
   }
 
   const schemaHint = {
+    title: "string",
     summary: "string",
-    explanation: "string",
+    description: "string",
+    vulnerabilityClass: "string | null",
     attackFlow: ["step strings"],
-    exploitNarrative: "string | null",
+    exploitation: {
+      publicExploit: "'yes'|'no'|'unknown'",
+      exploitNotes: "string | null"
+    },
+    exploitNarrative: "string | null (legacy; optional)",
     consequences: ["string"],
     remediation: ["string"],
+    applicability: {
+      status: "'applicable'|'not_applicable'|'unknown'",
+      notes: "string | null"
+    },
+    nextSteps: ["string"],
+    questions: ["string (questions for clarification)"],
+    sources: [
+      {
+        url: "string",
+        label: "string | null",
+        kind: "'vendor'|'nvd'|'epss'|'kev'|'advisory'|'exploit'|'other'|null"
+      }
+    ],
     graph: {
       nodes: [{ id: "string", label: "string", type: "attacker|vector|asset|service|impact" }],
       edges: [{ from: "nodeId", to: "nodeId", label: "string" }]
@@ -574,26 +626,39 @@ export async function runVulnContextLlm(
   }
 
   const userContent =
-    `Сгенерируй "контекст уязвимости" для ${cveId}.\n` +
-    `Все текстовые поля (summary, explanation, attackFlow, consequences, remediation, uncertainties, exploitNarrative) пиши НА РУССКОМ.\n` +
-    `Поле attackFlow обязательно: 4–10 коротких шагов (строки), описывающих ход атаки от входной точки до воздействия.\n` +
-    `Верни ТОЛЬКО raw JSON (без markdown, без \`\`\`, без пояснений).\n` +
+    `Сгенерируй КОМПЛЕКСНЫЙ АНАЛИЗ УЯЗВИМОСТИ для ${cveId} по шаблону банка.\n` +
+    `Цель: человекочитаемый отчёт + структурированные поля для автоматизации.\n` +
+    `Все текстовые поля пиши НА РУССКОМ. Верни ТОЛЬКО raw JSON (без markdown, без \`\`\`, без пояснений).\n` +
     `Top-level объект ДОЛЖЕН совпадать с формой и ключами ниже:\n${JSON.stringify(schemaHint, null, 2)}\n\n` +
-    `Пример МИНИМАЛЬНО корректного ответа (заполни конкретикой для ${cveId}):\n` +
+    `Требования:\n` +
+    `- title: короткий заголовок (например, \"Критическая уязвимость в Linux Kernel (n_gsm)\").\n` +
+    `- summary: 2–4 предложения для менеджера (что, где, эффект).\n` +
+    `- description: 1–3 абзаца технически (что за баг, условия эксплуатации, ограничения).\n` +
+    `- vulnerabilityClass: например \"Race Condition → Use-After-Free\" / \"RCE\" / \"SSRF\".\n` +
+    `- exploitation.publicExploit: \"yes\" если есть публичный PoC/эксплойт, \"no\" если явно нет, иначе \"unknown\".\n` +
+    `- applicability.status: \"applicable\" если уязвимость обычно релевантна в реальных окружениях и требует проверки; \"not_applicable\" если только узкая/редкая конфигурация; иначе \"unknown\".\n` +
+    `- attackFlow: обязательно 4–10 коротких шагов от входной точки до воздействия.\n` +
+    `- graph: построй простой граф (attacker→vector→service/asset→impact). Узлы с понятными label.\n` +
+    `- remediation: конкретные шаги фикса/минимизации.\n` +
+    `- nextSteps: что делать прямо сейчас (аудит/проверки/сбор фактов/создание заявки).\n` +
+    `- questions: если не хватает данных (версия, модуль, конфигурация) — задай 3–8 вопросов.\n` +
+    `- sources: заполни ссылками, которые нашёл в raw.references/источниках (если есть). Не выдумывай ссылки.\n\n` +
+    `Пример (упрощённый):\n` +
     `{\n` +
-    `  "summary": "Коротко (1–2 предложения): что это за уязвимость и где проявляется.",\n` +
-    `  "explanation": "Чуть подробнее: в чём баг, какие условия эксплуатации, какие компоненты/версии.",\n` +
-    `  "attackFlow": [\n` +
-    `    "Шаг 1: точка входа (например, HTTP-запрос/параметр/заголовок).",\n` +
-    `    "Шаг 2: обработка приложением и достижение уязвимого кода.",\n` +
-    `    "Шаг 3: действие злоумышленника, которое приводит к эксплуатации.",\n` +
-    `    "Шаг 4: результат (RCE/утечка/DoS) и пост-эксплуатация."\n` +
-    `  ],\n` +
-    `  "exploitNarrative": null,\n` +
-    `  "consequences": ["К чему приводит эксплуатация (список)."],\n` +
-    `  "remediation": ["Что сделать для устранения (список)."],\n` +
-    `  "graph": { "nodes": [], "edges": [] },\n` +
-    `  "uncertainties": []\n` +
+    `  \"title\": \"Критическая уязвимость в ...\",\n` +
+    `  \"summary\": \"...\",\n` +
+    `  \"description\": \"...\",\n` +
+    `  \"vulnerabilityClass\": \"...\",\n` +
+    `  \"attackFlow\": [\"...\"],\n` +
+    `  \"exploitation\": { \"publicExploit\": \"unknown\", \"exploitNotes\": null },\n` +
+    `  \"consequences\": [\"...\"],\n` +
+    `  \"remediation\": [\"...\"],\n` +
+    `  \"applicability\": { \"status\": \"unknown\", \"notes\": null },\n` +
+    `  \"nextSteps\": [\"...\"],\n` +
+    `  \"questions\": [\"...\"],\n` +
+    `  \"sources\": [{\"url\":\"https://...\",\"label\":\"...\",\"kind\":\"advisory\"}],\n` +
+    `  \"graph\": { \"nodes\": [{\"id\":\"attacker\",\"label\":\"Злоумышленник\",\"type\":\"attacker\"}], \"edges\": [] },\n` +
+    `  \"uncertainties\": []\n` +
     `}\n\n` +
     `Неверифицированный CVE-ввод:\n${JSON.stringify(raw).slice(0, effectiveRawJsonMaxChars(config.endpoint))}`;
 

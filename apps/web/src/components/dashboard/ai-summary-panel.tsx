@@ -30,13 +30,19 @@ export function AiSummaryPanel({
   const out = parseAiOutputJson(d?.ai?.output_json ?? null);
   const get = (k: string): unknown => (out ? out[k] : undefined);
   const enrichError = Boolean(get("_enrich_error"));
+  const title = get("title") ?? null;
   const summary = get("summary") ?? d?.ai?.output_text ?? null;
   const summaryText =
     summary == null ? null : typeof summary === "string" ? summary : JSON.stringify(summary, null, 2);
-  const explanation = get("explanation") ?? null;
+  const description = get("description") ?? get("explanation") ?? null;
   const attackFlow = get("attackFlow") ?? null;
   const remediation = get("remediation") ?? null;
   const consequences = get("consequences") ?? null;
+  const vulnerabilityClass = get("vulnerabilityClass") ?? null;
+  const applicability = get("applicability") ?? null;
+  const exploitation = get("exploitation") ?? null;
+  const nextSteps = get("nextSteps") ?? null;
+  const questions = get("questions") ?? null;
 
   const canRefresh = Boolean(manualEnrichAllowed && onRequestEnrich && d?.cve?.cve_id && data);
 
@@ -80,7 +86,15 @@ export function AiSummaryPanel({
               !summary && "opacity-70"
             )}
           >
-            <div className="text-xs text-muted">Описание простыми словами</div>
+            <div className="text-xs text-muted">Комплексный анализ (кратко)</div>
+            {title ? (
+              <div className="mt-1 text-sm font-medium text-fg/95">{String(title)}</div>
+            ) : null}
+            {vulnerabilityClass ? (
+              <div className="mt-1 text-xs text-muted">
+                класс: <span className="text-fg/85">{String(vulnerabilityClass)}</span>
+              </div>
+            ) : null}
             <div className="mt-2 text-sm leading-relaxed">
               {summaryText ??
                 (aiPending
@@ -116,16 +130,56 @@ export function AiSummaryPanel({
                 ) : null}
               </div>
             ) : null}
-            {explanation && (
+            {description && (
               <div className="mt-4 text-xs text-muted">
                 <div className="font-medium text-fg">Детали</div>
-                <div className="mt-1 whitespace-pre-wrap">{String(explanation)}</div>
+                <div className="mt-1 whitespace-pre-wrap">{String(description)}</div>
               </div>
             )}
           </div>
         </div>
 
         <div className="col-span-12 xl:col-span-5 space-y-3">
+          <div className="rounded-xl border border-border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none">
+            <div className="text-xs text-muted">Эксплуатация / применимость</div>
+            <div className="mt-2 text-sm text-fg/90">
+              <div>
+                публичный PoC/эксплойт:{" "}
+                <span className="text-fg/95">
+                  {(() => {
+                    const e = exploitation && typeof exploitation === "object" ? (exploitation as Record<string, unknown>) : null;
+                    const v = e?.publicExploit;
+                    if (v === "yes") return "да";
+                    if (v === "no") return "нет";
+                    return "неизвестно";
+                  })()}
+                </span>
+              </div>
+              <div className="mt-1">
+                статус применимости:{" "}
+                <span className="text-fg/95">
+                  {(() => {
+                    const a = applicability && typeof applicability === "object" ? (applicability as Record<string, unknown>) : null;
+                    const s = a?.status;
+                    if (s === "applicable") return "применимо (нужна проверка)";
+                    if (s === "not_applicable") return "скорее не применимо";
+                    return "неизвестно";
+                  })()}
+                </span>
+              </div>
+              {(() => {
+                const a = applicability && typeof applicability === "object" ? (applicability as Record<string, unknown>) : null;
+                const notes = a?.notes;
+                return notes ? <div className="mt-2 text-xs text-muted whitespace-pre-wrap">{String(notes)}</div> : null;
+              })()}
+              {(() => {
+                const e = exploitation && typeof exploitation === "object" ? (exploitation as Record<string, unknown>) : null;
+                const notes = e?.exploitNotes;
+                return notes ? <div className="mt-2 text-xs text-muted whitespace-pre-wrap">{String(notes)}</div> : null;
+              })()}
+            </div>
+          </div>
+
           <div className="rounded-xl border border-border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none">
             <div className="text-xs text-muted">Ход атаки</div>
             <div className="mt-2 text-sm">
@@ -180,6 +234,36 @@ export function AiSummaryPanel({
               )}
             </div>
           </div>
+
+          {Array.isArray(nextSteps) && nextSteps.length > 0 ? (
+            <div className="rounded-xl border border-border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none">
+              <div className="text-xs text-muted">Следующие шаги</div>
+              <div className="mt-2 text-sm">
+                <ul className="list-disc space-y-1 pl-5">
+                  {nextSteps.slice(0, 8).map((s: unknown, i: number) => (
+                    <li key={i} className="text-sm text-fg/90">
+                      {String(s)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          ) : null}
+
+          {Array.isArray(questions) && questions.length > 0 ? (
+            <div className="rounded-xl border border-accent/25 bg-accent/5 p-4 shadow-sm dark:bg-black/20 dark:shadow-none">
+              <div className="text-xs text-muted">Вопросы для уточнения (чтобы повысить точность)</div>
+              <div className="mt-2 text-sm">
+                <ol className="list-decimal space-y-1 pl-5">
+                  {questions.slice(0, 10).map((q: unknown, i: number) => (
+                    <li key={i} className="text-sm text-fg/90">
+                      {String(q)}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
