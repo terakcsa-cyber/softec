@@ -74,6 +74,23 @@ export class CveController {
     private readonly enrichRunner: CveEnrichRunnerService
   ) {}
 
+  private buildCveLinks(cveId: string) {
+    const id = String(cveId ?? "").trim();
+    const nvd = id ? `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}` : null;
+    // CISA KEV is a catalog; per-CVE deep links are not stable, so we keep a searchable entry point.
+    const kev = id
+      ? `https://www.cisa.gov/known-exploited-vulnerabilities-catalog?search=${encodeURIComponent(id)}`
+      : `https://www.cisa.gov/known-exploited-vulnerabilities-catalog`;
+    const epss = id
+      ? `https://www.first.org/epss/scorecard/${encodeURIComponent(id)}`
+      : `https://www.first.org/epss/`;
+    return {
+      nvd,
+      kev,
+      epss
+    };
+  }
+
   @Get()
   async list(
     @Query("q") q?: string,
@@ -374,6 +391,23 @@ export class CveController {
     );
     if (cve.rowCount === 0) return { found: false };
 
+    const advisories = await this.db.query<{
+      id: string;
+      vendor_slug: string;
+      title: string;
+      link: string;
+      summary: string | null;
+      published_at: Date | null;
+      fetched_at: Date;
+    }>(
+      `SELECT id, vendor_slug, title, link, summary, published_at, fetched_at
+         FROM vendor_advisory
+        WHERE $1 = ANY(cve_ids)
+     ORDER BY published_at DESC NULLS LAST, fetched_at DESC
+        LIMIT 50`,
+      [cveId]
+    );
+
     const ai = await this.db.query<EnrichmentAiQueryRow>(
       `SELECT model, prompt_version, output_json, output_text, created_at
          FROM enrichment_ai
@@ -388,6 +422,16 @@ export class CveController {
     return {
       found: true,
       cve: cve.rows[0],
+      links: this.buildCveLinks(cveId),
+      vendorAdvisories: advisories.rows.map((r) => ({
+        id: r.id,
+        vendorSlug: r.vendor_slug,
+        title: r.title,
+        link: r.link,
+        summary: r.summary,
+        publishedAt: r.published_at ? new Date(r.published_at).toISOString() : null,
+        fetchedAt: new Date(r.fetched_at).toISOString()
+      })),
       ai: aiPayload
     };
   }
