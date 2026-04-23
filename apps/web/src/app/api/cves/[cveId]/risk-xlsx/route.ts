@@ -25,6 +25,40 @@ function asStrArray(v: unknown): string[] {
   return v.map((x) => String(x)).map((s) => s.trim()).filter(Boolean);
 }
 
+function cellBoxStyle(fill: string) {
+  return {
+    fill: { type: "pattern" as const, pattern: "solid" as const, fgColor: { argb: fill } },
+    border: {
+      top: { style: "thin" as const, color: { argb: "FF94A3B8" } },
+      left: { style: "thin" as const, color: { argb: "FF94A3B8" } },
+      bottom: { style: "thin" as const, color: { argb: "FF94A3B8" } },
+      right: { style: "thin" as const, color: { argb: "FF94A3B8" } }
+    },
+    alignment: { vertical: "middle" as const, horizontal: "center" as const, wrapText: true as const }
+  };
+}
+
+function setMergedBox(
+  ws: ExcelJS.Worksheet,
+  fromCell: string,
+  toCell: string,
+  text: string,
+  fillArgb: string
+) {
+  ws.mergeCells(`${fromCell}:${toCell}`);
+  const c = ws.getCell(fromCell);
+  c.value = text;
+  Object.assign(c, cellBoxStyle(fillArgb));
+  c.font = { bold: true, size: 11, color: { argb: "FF0F172A" } };
+}
+
+function setArrow(ws: ExcelJS.Worksheet, cell: string, text: string) {
+  const c = ws.getCell(cell);
+  c.value = text;
+  c.alignment = { vertical: "middle", horizontal: "center" };
+  c.font = { bold: true, size: 14, color: { argb: "FF64748B" } };
+}
+
 export async function GET(req: Request, ctx: { params: Promise<{ cveId: string }> }) {
   const { cveId } = await ctx.params;
   const target = `${getUpstreamApiBase()}/cves/${encodeURIComponent(cveId)}`;
@@ -179,6 +213,51 @@ export async function GET(req: Request, ctx: { params: Promise<{ cveId: string }
   wsAf.views = [{ state: "frozen", ySplit: 1 }];
   wsAf.getColumn("t").alignment = { wrapText: true, vertical: "top" };
 
+  // === Sheet: Attack map (diagram with arrows) ===
+  const wsMap = wb.addWorksheet("Attack map");
+  wsMap.columns = [
+    { header: "", key: "a", width: 6 },
+    { header: "", key: "b", width: 18 },
+    { header: "", key: "c", width: 18 },
+    { header: "", key: "d", width: 18 },
+    { header: "", key: "e", width: 18 },
+    { header: "", key: "f", width: 18 },
+    { header: "", key: "g", width: 6 }
+  ];
+  wsMap.views = [{ state: "frozen", ySplit: 1 }];
+  wsMap.getRow(1).height = 22;
+  wsMap.getCell("A1").value = "Схема атаки (Excel)";
+  wsMap.getCell("A1").font = { bold: true, size: 12 };
+  wsMap.mergeCells("A1:G1");
+  wsMap.getCell("A1").alignment = { vertical: "middle", horizontal: "left" };
+
+  const flow = attackFlow.length ? attackFlow : [];
+  if (!out || flow.length === 0) {
+    wsMap.getCell("A3").value = out ? "—" : "ИИ‑данных пока нет (attackFlow/graph появятся после обогащения)";
+    wsMap.mergeCells("A3:G6");
+    wsMap.getCell("A3").alignment = { wrapText: true, vertical: "top", horizontal: "left" };
+  } else {
+    // Render a vertical chain of boxes with arrows:
+    // Attacker -> Step 1 -> Step 2 -> ... -> Impact
+    const startRow = 3;
+    let r = startRow;
+    wsMap.getRow(r).height = 34;
+    setMergedBox(wsMap, `B${r}`, `F${r}`, "Злоумышленник", "FFFFE4E6"); // rose-50
+    r += 1;
+    setArrow(wsMap, `D${r}`, "↓");
+    r += 1;
+    for (let i = 0; i < Math.min(flow.length, 8); i++) {
+      wsMap.getRow(r).height = 54;
+      const txt = `Шаг ${i + 1}\n${flow[i]}`;
+      setMergedBox(wsMap, `B${r}`, `F${r}`, txt, "FFF5F3FF"); // purple-ish
+      r += 1;
+      setArrow(wsMap, `D${r}`, "↓");
+      r += 1;
+    }
+    wsMap.getRow(r).height = 40;
+    setMergedBox(wsMap, `B${r}`, `F${r}`, "Воздействие / результат", "FFFFF7ED"); // amber-50
+  }
+
   // === Sheet: Graph ===
   const graph = asObj(out?.graph);
   const nodes = Array.isArray(graph?.nodes) ? graph!.nodes : [];
@@ -252,7 +331,13 @@ export async function GET(req: Request, ctx: { params: Promise<{ cveId: string }
   if (srcRows.length === 0) {
     wsSrc.addRow({ kind: "", label: "", url: out ? "—" : "ИИ‑данных пока нет (sources появятся после обогащения)" });
   } else {
-    for (const r of srcRows) wsSrc.addRow(r);
+    for (const r of srcRows) {
+      const row = wsSrc.addRow({ kind: r.kind, label: r.label, url: r.url });
+      // Make URL clickable
+      const cell = row.getCell(3);
+      cell.value = { text: r.url, hyperlink: r.url };
+      cell.font = { color: { argb: "FF2563EB" }, underline: true };
+    }
   }
   wsSrc.getRow(1).font = { bold: true };
   wsSrc.views = [{ state: "frozen", ySplit: 1 }];
