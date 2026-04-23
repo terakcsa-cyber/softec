@@ -16,6 +16,7 @@ import { CveCard } from "./cve-card";
 import { AiSummaryPanel } from "./ai-summary-panel";
 import { RiskBreakdownPanel } from "./risk-breakdown-panel";
 import { OverviewDashboardPanel } from "./overview-dashboard-panel";
+import { CveSourcesPanel } from "./cve-sources-panel";
 
 /** reactflow ломает SSR/Webpack в Next 15 — только клиент. */
 const AttackGraphPanel = dynamic(
@@ -917,6 +918,12 @@ export function Dashboard() {
                         >
                           Граф атаки
                         </Tabs.Trigger>
+                        <Tabs.Trigger
+                          value="sources"
+                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
+                        >
+                          Источники
+                        </Tabs.Trigger>
                         <div className="ml-auto flex items-center gap-2 text-[11px] text-muted">
                           <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 font-mono text-fg/85 shadow-sm dark:border-white/10 dark:bg-white/5">
                             {selected}
@@ -947,6 +954,9 @@ export function Dashboard() {
                       </Tabs.Content>
                       <Tabs.Content value="attack">
                         <AttackGraphPanel graph={graph} attackFlow={attackFlowSteps} />
+                      </Tabs.Content>
+                      <Tabs.Content value="sources">
+                        <CveSourcesPanel data={selectedDetails} />
                       </Tabs.Content>
                     </Tabs.Root>
                   ) : (
