@@ -213,6 +213,11 @@ export async function GET(req: Request, ctx: { params: Promise<{ cveId: string }
   wsAf.views = [{ state: "frozen", ySplit: 1 }];
   wsAf.getColumn("t").alignment = { wrapText: true, vertical: "top" };
 
+  // === Sheet: Graph ===
+  const graph = asObj(out?.graph);
+  const nodes = Array.isArray(graph?.nodes) ? graph!.nodes : [];
+  const edges = Array.isArray(graph?.edges) ? graph!.edges : [];
+
   // === Sheet: Attack map (diagram with arrows) ===
   const wsMap = wb.addWorksheet("Attack map");
   wsMap.columns = [
@@ -258,10 +263,78 @@ export async function GET(req: Request, ctx: { params: Promise<{ cveId: string }
     setMergedBox(wsMap, `B${r}`, `F${r}`, "Воздействие / результат", "FFFFF7ED"); // amber-50
   }
 
-  // === Sheet: Graph ===
-  const graph = asObj(out?.graph);
-  const nodes = Array.isArray(graph?.nodes) ? graph!.nodes : [];
-  const edges = Array.isArray(graph?.edges) ? graph!.edges : [];
+  // Graph-based horizontal map (attacker → vector → service/asset → impact)
+  if (out && nodes.length > 0) {
+    const baseRow = 22;
+    wsMap.getCell(`A${baseRow}`).value = "Схема по LLM graph (горизонтально)";
+    wsMap.mergeCells(`A${baseRow}:G${baseRow}`);
+    wsMap.getCell(`A${baseRow}`).font = { bold: true, size: 11 };
+    wsMap.getRow(baseRow).height = 20;
+
+    const byType = (t: string) =>
+      nodes
+        .map((n) => asObj(n))
+        .filter(Boolean)
+        .filter((n) => String(n!.type ?? "") === t)
+        .slice(0, 6) as Array<Record<string, unknown>>;
+
+    const attackers = byType("attacker");
+    const vectors = byType("vector");
+    const services = [...byType("service"), ...byType("asset")].slice(0, 6);
+    const impacts = byType("impact");
+
+    const col = {
+      attacker: { from: "B", to: "B" },
+      arrow1: "C",
+      vector: { from: "D", to: "D" },
+      arrow2: "E",
+      impact: { from: "F", to: "F" }
+    };
+
+    // headers
+    const headerRow = baseRow + 1;
+    wsMap.getRow(headerRow).height = 18;
+    wsMap.getCell(`B${headerRow}`).value = "Attacker";
+    wsMap.getCell(`D${headerRow}`).value = "Vector";
+    wsMap.getCell(`F${headerRow}`).value = "Impact";
+    for (const c of ["B", "D", "F"]) {
+      const cell = wsMap.getCell(`${c}${headerRow}`);
+      cell.font = { bold: true, size: 10, color: { argb: "FF334155" } };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+    }
+
+    const maxRows = Math.max(attackers.length, vectors.length, services.length, impacts.length, 1);
+    const start = baseRow + 2;
+    for (let i = 0; i < maxRows; i++) {
+      const rr = start + i * 2;
+      wsMap.getRow(rr).height = 34;
+
+      const a = attackers[i] ? String(attackers[i]!.label ?? attackers[i]!.id ?? "attacker") : "";
+      const v = vectors[i] ? String(vectors[i]!.label ?? vectors[i]!.id ?? "vector") : "";
+      const s = services[i] ? String(services[i]!.label ?? services[i]!.id ?? "service") : "";
+      const im = impacts[i] ? String(impacts[i]!.label ?? impacts[i]!.id ?? "impact") : "";
+
+      // attacker + arrow + vector + arrow + impact
+      if (a) setMergedBox(wsMap, `B${rr}`, `B${rr}`, a, "FFFFE4E6");
+      setArrow(wsMap, `C${rr}`, "→");
+      if (v || s) {
+        const vv = [v, s].filter(Boolean).join("\n");
+        setMergedBox(wsMap, `D${rr}`, `D${rr}`, vv, "FFF5F3FF");
+      }
+      setArrow(wsMap, `E${rr}`, "→");
+      if (im) setMergedBox(wsMap, `F${rr}`, `F${rr}`, im, "FFFFF7ED");
+
+      // edge labels (best-effort): look for matching from/to ids in edges and put in row below
+      const rr2 = rr + 1;
+      wsMap.getRow(rr2).height = 18;
+      const eText = asObj(edges[i])?.label ? String(asObj(edges[i])!.label) : "";
+      if (eText) {
+        wsMap.getCell(`D${rr2}`).value = eText.length > 90 ? `${eText.slice(0, 90)}…` : eText;
+        wsMap.getCell(`D${rr2}`).alignment = { wrapText: true, vertical: "top", horizontal: "center" };
+        wsMap.getCell(`D${rr2}`).font = { size: 9, color: { argb: "FF64748B" } };
+      }
+    }
+  }
 
   const wsGn = wb.addWorksheet("Graph nodes");
   wsGn.columns = [

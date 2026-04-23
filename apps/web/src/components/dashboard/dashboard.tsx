@@ -17,6 +17,7 @@ import { AiSummaryPanel } from "./ai-summary-panel";
 import { RiskBreakdownPanel } from "./risk-breakdown-panel";
 import { OverviewDashboardPanel } from "./overview-dashboard-panel";
 import { CveSourcesPanel } from "./cve-sources-panel";
+import { computeCvePriority } from "@/lib/cve-priority";
 
 /** reactflow ломает SSR/Webpack в Next 15 — только клиент. */
 const AttackGraphPanel = dynamic(
@@ -65,7 +66,7 @@ type SavedView = {
   name: string;
   state: {
     view: "critical_v2" | "critical" | "latest" | "last24h" | "kev" | "all";
-    sort: "rank" | "fresh" | "risk" | "epss" | "cvss";
+    sort: "rank" | "fresh" | "risk" | "epss" | "cvss" | "priority";
     limit: 15 | 20;
     kevOnly: boolean;
     minCvss: number | null;
@@ -88,7 +89,8 @@ export function Dashboard() {
   const [selected, setSelected] = useState<string | null>(null);
   const [view, setView] = useState<"critical_v2" | "critical" | "latest" | "last24h" | "kev" | "all">("critical_v2");
   const [limit, setLimit] = useState<15 | 20>(20);
-  const [sort, setSort] = useState<"rank" | "fresh" | "risk" | "epss" | "cvss">("rank");
+  const [sort, setSort] = useState<"rank" | "fresh" | "risk" | "epss" | "cvss" | "priority">("rank");
+  const [attentionOnly, setAttentionOnly] = useState(false);
   const [kevOnly, setKevOnly] = useState(false);
   const [minCvss, setMinCvss] = useState<number | null>(null);
   const [minEpss, setMinEpss] = useState<number | null>(null);
@@ -262,10 +264,16 @@ export function Dashboard() {
       const url = new URL(`/api/cves`, window.location.origin);
       url.searchParams.set("limit", String(view === "all" ? 50 : limit));
       url.searchParams.set("view", view === "all" ? "latest" : view);
-      url.searchParams.set(
-        "sort",
-        view === "critical" || view === "critical_v2" ? sort : sort === "rank" ? "fresh" : sort
-      );
+      // `priority` is client-side (bank-ish); use upstream rank/fresh then re-sort locally.
+      const upstreamSort =
+        sort === "priority"
+          ? "rank"
+          : view === "critical" || view === "critical_v2"
+            ? sort
+            : sort === "rank"
+              ? "fresh"
+              : sort;
+      url.searchParams.set("sort", upstreamSort);
       if (kevOnly) url.searchParams.set("kevOnly", "true");
       if (minCvss != null) url.searchParams.set("minCvss", String(minCvss));
       if (minEpss != null) url.searchParams.set("minEpss", String(minEpss));
@@ -278,6 +286,21 @@ export function Dashboard() {
       return data.items;
     }
   });
+
+  const visibleItems = useMemo(() => {
+    const items = listQuery.data ?? [];
+    let out = items;
+    if (attentionOnly) {
+      out = out.filter((it) => {
+        const p = computeCvePriority(it);
+        return p.level === "critical" || p.level === "high";
+      });
+    }
+    if (sort === "priority") {
+      out = [...out].sort((a, b) => computeCvePriority(b).score - computeCvePriority(a).score);
+    }
+    return out;
+  }, [listQuery.data, attentionOnly, sort]);
 
   const exportCsv = () => {
     const rows = (listQuery.data ?? []).map((it) => ({
@@ -714,6 +737,18 @@ export function Dashboard() {
                       Экспорт CSV
                     </button>
                     <button
+                      onClick={() => setAttentionOnly((v) => !v)}
+                      className={cn(
+                        "rounded-lg border px-2 py-1 text-xs hover:bg-slate-200/80 dark:hover:bg-black/30",
+                        attentionOnly
+                          ? "border-warn/30 bg-warn/15 text-warn"
+                          : "border-slate-200 bg-slate-50 text-fg/90 dark:border-border dark:bg-black/20"
+                      )}
+                      title="Показать только высокий/критический приоритет (фокус для triage)"
+                    >
+                      Внимание
+                    </button>
+                    <button
                       onClick={() => setSavedViewsOpen(true)}
                       className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
                     >
@@ -727,11 +762,14 @@ export function Dashboard() {
                       <div className="flex items-center gap-2">
                         <select
                           value={sort}
-                          onChange={(e) => setSort(e.target.value as "rank" | "fresh" | "risk" | "epss" | "cvss")}
+                          onChange={(e) =>
+                            setSort(e.target.value as "rank" | "fresh" | "risk" | "epss" | "cvss" | "priority")
+                          }
                           className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-fg/90 dark:border-border dark:bg-black/20"
                           title="Сортировка"
                         >
                           <option value="rank">Ранг</option>
+                          <option value="priority">Приоритет</option>
                           <option value="risk">Риск</option>
                           <option value="epss">EPSS</option>
                           <option value="cvss">CVSS</option>
@@ -869,7 +907,7 @@ export function Dashboard() {
                   </div>
 
                   <div className="space-y-3">
-                    {items.map((it) => (
+                    {visibleItems.map((it) => (
                       <CveCard
                         key={it.cve_id}
                         item={it}
