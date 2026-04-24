@@ -135,6 +135,67 @@ export class SchemaService implements OnModuleInit {
 
     await this.seedVendorAdvisoryDemoRows();
 
+    // --- Vulnerability task tracker (CVE tasks) ---
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS vuln_task (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'new'
+          CHECK (status IN ('new','in_progress','needs_info','fixing','mitigated','closed','not_applicable','risk_accepted')),
+        priority_local TEXT NOT NULL DEFAULT 'medium'
+          CHECK (priority_local IN ('low','medium','high','critical')),
+        owner TEXT,
+        due_date TIMESTAMPTZ,
+        review_date TIMESTAMPTZ,
+        vendor_key TEXT NOT NULL,
+        vendor_display TEXT NOT NULL,
+        product_key_norm TEXT NOT NULL DEFAULT '',
+        product_display TEXT NOT NULL DEFAULT '',
+        notes_md TEXT NOT NULL DEFAULT '',
+        decision TEXT,
+        decision_notes TEXT,
+        evidence TEXT,
+        closed_at TIMESTAMPTZ,
+        -- cached scoring (recomputed on write)
+        score_raw INT NOT NULL DEFAULT 0 CHECK (score_raw >= 0 AND score_raw <= 100),
+        score_final INT NOT NULL DEFAULT 0 CHECK (score_final >= 0 AND score_final <= 100),
+        score_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+        stats JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_updated_idx ON vuln_task (updated_at DESC)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_status_idx ON vuln_task (status)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_vendor_product_idx ON vuln_task (vendor_key, product_key_norm)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_score_final_idx ON vuln_task (score_final DESC, updated_at DESC)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS vuln_task_cve (
+        task_id UUID NOT NULL REFERENCES vuln_task(id) ON DELETE CASCADE,
+        cve_id TEXT NOT NULL REFERENCES cve(cve_id) ON DELETE CASCADE,
+        added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        note TEXT,
+        PRIMARY KEY (task_id, cve_id)
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_cve_cve_idx ON vuln_task_cve (cve_id)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_cve_task_idx ON vuln_task_cve (task_id)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS vuln_task_event (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        task_id UUID NOT NULL REFERENCES vuln_task(id) ON DELETE CASCADE,
+        ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+        actor TEXT,
+        action TEXT NOT NULL,
+        before JSONB,
+        after JSONB,
+        meta JSONB NOT NULL DEFAULT '{}'::jsonb
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_event_task_ts_idx ON vuln_task_event (task_id, ts DESC)`);
+
     // --- ASV / External attack surface management (assets + scan runs + findings) ---
     await this.db.query(
       `CREATE TABLE IF NOT EXISTS asv_asset (

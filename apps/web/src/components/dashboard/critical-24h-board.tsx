@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { AlertTriangle, Flame, ShieldAlert, Target, Zap } from "lucide-react";
 import { cn } from "../ui/cn";
@@ -12,6 +12,15 @@ export type HotCveRow = {
   risk_score: number | null;
   epss?: number | null;
   cvss_base?: number | null;
+  vp_vendor?: string | null;
+  vp_product?: string | null;
+  short_description?: string | null;
+  short_ru?: string | null;
+  cvss_av_network?: boolean;
+  cvss_pr_none?: boolean;
+  cvss_ui_none?: boolean;
+  cvss_ac_low?: boolean;
+  perimeter_product?: boolean;
   exploit_known?: boolean;
   critical_reasons?: string[] | null;
   ai_ready?: boolean;
@@ -23,6 +32,88 @@ function riskAccent(score: number | null | undefined): { border: string; glow: s
   if (score >= 70) return { border: "border-warn/45", glow: "shadow-[0_0_20px_rgba(245,158,11,0.1)]", label: "высокий" };
   if (score >= 40) return { border: "border-accent/35", glow: "", label: "средний" };
   return { border: "border-slate-300 dark:border-white/12", glow: "", label: "низкий" };
+}
+
+type HotCategory = "all24h" | "kev" | "cvss9" | "epss05";
+
+function categoryTone(cat: HotCategory) {
+  if (cat === "kev") return { grad: "from-rose-500/15 to-red-600/10", ring: "ring-danger/15", border: "border-danger/30" };
+  if (cat === "cvss9") return { grad: "from-amber-500/12 to-orange-600/10", ring: "ring-warn/15", border: "border-warn/30" };
+  if (cat === "epss05") return { grad: "from-fuchsia-500/12 to-pink-600/10", ring: "ring-accent/15", border: "border-accent/30" };
+  return { grad: "from-indigo-500/12 to-violet-600/10", ring: "ring-accent/10", border: "border-accent/25" };
+}
+
+function cardTone(it: HotCveRow) {
+  // Per-card "signal" coloring for the default 24h view.
+  // Priority: KEV > CVSS>=9 > EPSS>=0.5 > default.
+  const isKev = Boolean(it.exploit_known);
+  const isCvss9 = typeof it.cvss_base === "number" && it.cvss_base >= 9;
+  const isEpss = typeof it.epss === "number" && it.epss >= 0.5;
+  if (isKev) return { ring: "ring-danger/15", border: "border-danger/30" };
+  if (isCvss9) return { ring: "ring-warn/15", border: "border-warn/30" };
+  if (isEpss) return { ring: "ring-accent/15", border: "border-accent/30" };
+  return { ring: "ring-accent/10", border: "border-accent/25" };
+}
+
+function filterByCategory(list: HotCveRow[], cat: HotCategory): HotCveRow[] {
+  if (cat === "kev") return list.filter((i) => Boolean(i.exploit_known));
+  if (cat === "cvss9") return list.filter((i) => typeof i.cvss_base === "number" && i.cvss_base >= 9);
+  if (cat === "epss05") return list.filter((i) => typeof i.epss === "number" && i.epss >= 0.5);
+  return list;
+}
+
+function sortByCategory(list: HotCveRow[], cat: HotCategory): HotCveRow[] {
+  const byTsDesc = (a: HotCveRow, b: HotCveRow) => {
+    const ta = a.published_at ?? a.modified_at ?? "";
+    const tb = b.published_at ?? b.modified_at ?? "";
+    return tb.localeCompare(ta);
+  };
+  // Default mode: sort by criticality (operationally useful), then by time.
+  if (cat === "all24h") {
+    return [...list].sort((a, b) => {
+      const ka = a.exploit_known ? 1 : 0;
+      const kb = b.exploit_known ? 1 : 0;
+      if (kb !== ka) return kb - ka;
+      const ra = typeof a.risk_score === "number" ? a.risk_score : -1;
+      const rb = typeof b.risk_score === "number" ? b.risk_score : -1;
+      if (rb !== ra) return rb - ra;
+      const ea = typeof a.epss === "number" ? a.epss : -1;
+      const eb = typeof b.epss === "number" ? b.epss : -1;
+      if (eb !== ea) return eb - ea;
+      const ca = typeof a.cvss_base === "number" ? a.cvss_base : -1;
+      const cb = typeof b.cvss_base === "number" ? b.cvss_base : -1;
+      if (cb !== ca) return cb - ca;
+      return byTsDesc(a, b);
+    });
+  }
+  if (cat === "kev") {
+    return [...list].sort((a, b) => {
+      const ka = a.exploit_known ? 1 : 0;
+      const kb = b.exploit_known ? 1 : 0;
+      if (kb !== ka) return kb - ka;
+      const ra = typeof a.risk_score === "number" ? a.risk_score : -1;
+      const rb = typeof b.risk_score === "number" ? b.risk_score : -1;
+      if (rb !== ra) return rb - ra;
+      return byTsDesc(a, b);
+    });
+  }
+  if (cat === "cvss9") {
+    return [...list].sort((a, b) => {
+      const ca = typeof a.cvss_base === "number" ? a.cvss_base : -1;
+      const cb = typeof b.cvss_base === "number" ? b.cvss_base : -1;
+      if (cb !== ca) return cb - ca;
+      return byTsDesc(a, b);
+    });
+  }
+  if (cat === "epss05") {
+    return [...list].sort((a, b) => {
+      const ea = typeof a.epss === "number" ? a.epss : -1;
+      const eb = typeof b.epss === "number" ? b.epss : -1;
+      if (eb !== ea) return eb - ea;
+      return byTsDesc(a, b);
+    });
+  }
+  return [...list].sort(byTsDesc);
 }
 
 export function Critical24hBoard({
@@ -37,6 +128,7 @@ export function Critical24hBoard({
   highlightedCveIds?: ReadonlySet<string> | null;
   onCveClick: (cveId: string) => void;
 }) {
+  const [cat, setCat] = useState<HotCategory>("all24h");
   const stats = useMemo(() => {
     const arr = items ?? [];
     const kev = arr.filter((i) => i.exploit_known).length;
@@ -63,6 +155,11 @@ export function Critical24hBoard({
   }
 
   const list = items ?? [];
+  const filtered = useMemo(() => {
+    const base = filterByCategory(list, cat);
+    return sortByCategory(base, cat);
+  }, [list, cat]);
+  const tone = categoryTone(cat);
 
   return (
     <div className="space-y-4">
@@ -77,8 +174,10 @@ export function Critical24hBoard({
       </div>
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {[
+        {(
+          [
           {
+            key: "all24h",
             icon: Target,
             label: "В окне 24ч",
             value: stats.total,
@@ -86,6 +185,7 @@ export function Critical24hBoard({
             tone: "from-indigo-500/20 to-violet-600/10"
           },
           {
+            key: "kev",
             icon: ShieldAlert,
             label: "KEV",
             value: stats.kev,
@@ -93,6 +193,7 @@ export function Critical24hBoard({
             tone: "from-rose-500/20 to-red-600/10"
           },
           {
+            key: "cvss9",
             icon: Zap,
             label: "CVSS ≥ 9",
             value: stats.criticalCvss,
@@ -100,22 +201,29 @@ export function Critical24hBoard({
             tone: "from-amber-500/15 to-orange-600/10"
           },
           {
+            key: "epss05",
             icon: Flame,
             label: "EPSS ≥ 0.5",
             value: stats.highEpss,
             sub: "высокая вероятность",
             tone: "from-fuchsia-500/15 to-pink-600/10"
           }
-        ].map((c, i) => (
-          <motion.div
+        ] as const
+        ).map((c, i) => {
+          const active = cat === (c.key as HotCategory);
+          return (
+          <motion.button
+            type="button"
+            onClick={() => setCat(c.key as HotCategory)}
             key={c.label}
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.04 * i }}
             className={cn(
-              "relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-br p-4 ring-1 ring-slate-200/60",
+              "relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-br p-4 ring-1 ring-slate-200/60 text-left",
               "dark:border-white/[0.08] dark:ring-white/[0.04]",
-              c.tone
+              c.tone,
+              active && "ring-2 ring-accent/25 border-accent/30"
             )}
           >
             <div className="flex items-center gap-2 text-[11px] font-medium text-muted">
@@ -124,8 +232,9 @@ export function Critical24hBoard({
             </div>
             <div className="mt-2 text-3xl font-semibold tabular-nums tracking-tight text-fg/95">{c.value}</div>
             <div className="mt-0.5 text-[10px] text-muted/90">{c.sub}</div>
-          </motion.div>
-        ))}
+          </motion.button>
+        );
+        })}
       </div>
 
       {stats.total === 0 ? (
@@ -135,7 +244,7 @@ export function Critical24hBoard({
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-          {list.map((it, idx) => {
+          {filtered.map((it, idx) => {
             const ra = riskAccent(it.risk_score);
             const epssPct =
               typeof it.epss === "number" && Number.isFinite(it.epss) ? `${(it.epss * 100).toFixed(1)}%` : "—";
@@ -143,6 +252,7 @@ export function Critical24hBoard({
               typeof it.cvss_base === "number" && Number.isFinite(it.cvss_base) ? it.cvss_base.toFixed(1) : "—";
             const reasons = Array.isArray(it.critical_reasons) ? it.critical_reasons.slice(0, 3) : [];
             const isOpen = highlightedCveIds?.has(it.cve_id) ?? false;
+            const per = cat === "all24h" ? cardTone(it) : tone;
             return (
               <motion.div
                 key={it.cve_id}
@@ -164,13 +274,19 @@ export function Critical24hBoard({
                     "pointer-events-auto transition hover:border-accent/35 active:scale-[0.99]",
                     isOpen && "border-accent/50 ring-2 ring-accent/25",
                     ra.border,
-                    !isOpen && ra.glow
+                    !isOpen && ra.glow,
+                    // Color cards: default view uses per-card signal tones; category views use category tone.
+                    cn("ring-1", per.ring, per.border)
                   )}
                 >
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="font-mono text-sm font-semibold tracking-tight text-fg/95 group-hover:text-fg">
                       {it.cve_id}
+                    </div>
+                    <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-fg/80">
+                      {[it.vp_vendor, it.vp_product].filter(Boolean).join(" / ") || "—"}{" "}
+                      {it.short_ru ? `— ${it.short_ru}` : it.short_description ? `— ${it.short_description}` : ""}
                     </div>
                     <div className="mt-1 text-[10px] text-muted">
                       {it.published_at

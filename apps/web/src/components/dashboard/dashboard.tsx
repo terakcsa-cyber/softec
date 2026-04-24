@@ -8,7 +8,7 @@ import { apiFetch } from "@/lib/api-fetch";
 import { needsOnDemandEnrich, parseAiOutputJson, shouldAutoEnrichOnOpen } from "@/lib/cve-enrich-ui";
 import { CVE_POLL_BACKGROUND_ONLY_MS, CVE_POLL_WHILE_ENRICH_MS, ENRICH_UI_WAIT_MS } from "@/lib/enrich-ui-wait";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bandage, BarChart3, Loader2, Radar, RefreshCw, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Bandage, BarChart3, ClipboardList, Loader2, Radar, RefreshCw, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
 import * as Tabs from "@radix-ui/react-tabs";
 import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "../ui/cn";
@@ -18,6 +18,7 @@ import { RiskBreakdownPanel } from "./risk-breakdown-panel";
 import { OverviewDashboardPanel } from "./overview-dashboard-panel";
 import { CveSourcesPanel } from "./cve-sources-panel";
 import { computeCvePriority } from "@/lib/cve-priority";
+import { CveDetailPanel } from "./cve-detail-panel";
 
 /** reactflow ломает SSR/Webpack в Next 15 — только клиент. */
 const AttackGraphPanel = dynamic(
@@ -36,6 +37,7 @@ import { FstecNewsPanel } from "../fstec/fstec-news-panel";
 import { PatchManagementPanel } from "./patch-management-panel";
 import { AsvScannerPanel } from ".";
 import { VulnSearchBar } from "./vuln-search-bar";
+import { VulnTaskPanel } from "./vuln-task-panel";
 
 type CveListItem = {
   cve_id: string;
@@ -44,6 +46,16 @@ type CveListItem = {
   risk_score: number | null;
   epss?: number | null;
   cvss_base?: number | null;
+  vp_vendor?: string | null;
+  vp_product?: string | null;
+  short_description?: string | null;
+  short_ru?: string | null;
+  task_open_count?: number | null;
+  cvss_av_network?: boolean;
+  cvss_pr_none?: boolean;
+  cvss_ui_none?: boolean;
+  cvss_ac_low?: boolean;
+  perimeter_product?: boolean;
   exploit_known?: boolean;
   critical_reasons?: string[] | null;
   ai_ready?: boolean;
@@ -78,11 +90,12 @@ type SavedView = {
 };
 
 type TriageStatus = "new" | "review" | "done";
-type ModuleKey = "dashboard" | "vulns" | "fstec" | "patches" | "asv" | "settings";
+type ModuleKey = "dashboard" | "vulns" | "tasks" | "fstec" | "patches" | "asv" | "settings";
 
 export function Dashboard() {
   const queryClient = useQueryClient();
   const [moduleKey, setModuleKey] = useState<ModuleKey>("dashboard");
+  const [tasksSelectedId, setTasksSelectedId] = useState<string | null>(null);
   const [q, setQ] = useState("");
   /** Задержка запроса к API при наборе текста полнотекстового поиска */
   const [qDebounced, setQDebounced] = useState("");
@@ -241,7 +254,7 @@ export function Dashboard() {
   });
 
   const hotCvesQuery = useQuery({
-    queryKey: ["cves", "dashboard", "last24h", "fresh", 24],
+    queryKey: ["cves", "dashboard", "last24h", "fresh", 200],
     enabled: moduleKey === "dashboard",
     staleTime: 45_000,
     refetchInterval: moduleKey === "dashboard" ? 90_000 : false,
@@ -249,9 +262,28 @@ export function Dashboard() {
       const url = new URL(`/api/cves`, window.location.origin);
       url.searchParams.set("view", "last24h");
       url.searchParams.set("sort", "fresh");
-      url.searchParams.set("limit", "24");
+      // IMPORTANT: fetch a wide window; UI filters/sorts locally.
+      // 24 items made the counters "stuck" and hid critical CVEs.
+      url.searchParams.set("limit", "200");
       const res = await apiFetch(url.toString(), { cache: "no-store" });
       if (!res.ok) throw new Error(`Failed to fetch hot CVEs (${res.status})`);
+      const data = (await res.json()) as { items: CveListItem[] };
+      return data.items;
+    }
+  });
+
+  const topPriorityQuery = useQuery({
+    queryKey: ["cves", "dashboard", "topPriority", "latest", "rank", 80],
+    enabled: moduleKey === "dashboard",
+    staleTime: 60_000,
+    refetchInterval: moduleKey === "dashboard" ? 120_000 : false,
+    queryFn: async () => {
+      const url = new URL(`/api/cves`, window.location.origin);
+      url.searchParams.set("view", "latest");
+      url.searchParams.set("sort", "rank");
+      url.searchParams.set("limit", "80");
+      const res = await apiFetch(url.toString(), { cache: "no-store" });
+      if (!res.ok) throw new Error(`Failed to fetch top priority CVEs (${res.status})`);
       const data = (await res.json()) as { items: CveListItem[] };
       return data.items;
     }
@@ -423,13 +455,52 @@ export function Dashboard() {
     await Promise.all([
       summaryQuery.refetch(),
       hotCvesQuery.refetch(),
+      topPriorityQuery.refetch(),
       vendorsQuery.refetch(),
       queueHealthQuery.refetch()
     ]);
-  }, [summaryQuery, hotCvesQuery, vendorsQuery, queueHealthQuery]);
+  }, [summaryQuery, hotCvesQuery, topPriorityQuery, vendorsQuery, queueHealthQuery]);
 
   const overviewRefreshing =
-    summaryQuery.isFetching || hotCvesQuery.isFetching || vendorsQuery.isFetching || queueHealthQuery.isFetching;
+    summaryQuery.isFetching ||
+    hotCvesQuery.isFetching ||
+    topPriorityQuery.isFetching ||
+    vendorsQuery.isFetching ||
+    queueHealthQuery.isFetching;
+
+  const topPriorityItems = useMemo(() => {
+    const items = topPriorityQuery.data ?? [];
+    const boost = (it: CveListItem) => {
+      // Perimeter exploitation heuristic: CVSS v3 AV:N + (PR:N, UI:N, AC:L) are strong proxies.
+      let b = 0;
+      const avN = it.cvss_av_network === true;
+      const prN = it.cvss_pr_none === true;
+      const uiN = it.cvss_ui_none === true;
+      const acL = it.cvss_ac_low === true;
+      const edge = it.perimeter_product === true;
+      if (edge) b += 10;
+      if (edge && avN) b += 6;
+      if (avN) b += 12;
+      if (avN && prN) b += 8;
+      if (avN && uiN) b += 6;
+      if (avN && acL) b += 3;
+      if (avN && prN && uiN) b += 10; // "internet RCE style" shape
+
+      if (it.exploit_known) b += 12; // KEV is the strongest "externally relevant" indicator.
+      if (typeof it.epss === "number" && it.epss >= 0.6) b += 8;
+      else if (typeof it.epss === "number" && it.epss >= 0.3) b += 4;
+      if (typeof it.cvss_base === "number" && it.cvss_base >= 9.0) b += 5;
+      if (typeof it.risk_score === "number" && it.risk_score >= 85) b += 4;
+      return b;
+    };
+    return [...items]
+      .map((it) => {
+        const p = computeCvePriority(it);
+        return { ...it, _prio: p.score + boost(it) };
+      })
+      .sort((a, b) => b._prio - a._prio)
+      .slice(0, 20);
+  }, [topPriorityQuery.data]);
 
   const refreshVulns = useCallback(async () => {
     const tasks: Promise<unknown>[] = [listQuery.refetch(), vendorsQuery.refetch()];
@@ -549,6 +620,7 @@ export function Dashboard() {
     }
     setModuleKey(next);
     if (next !== "vulns" && next !== "dashboard") setSelected(null);
+    if (next !== "tasks") setTasksSelectedId(null);
   };
 
   return (
@@ -583,6 +655,18 @@ export function Dashboard() {
           >
             <ShieldAlert className="h-5 w-5" />
           </button>
+            <button
+              onClick={() => switchModule("tasks")}
+              className={cn(
+                "rounded-2xl border p-3 transition",
+                moduleKey === "tasks"
+                  ? "border-accent/40 bg-accent/10"
+                  : "border-border bg-white/60 hover:bg-white dark:bg-black/20 dark:hover:bg-black/30"
+              )}
+              title="Задачник"
+            >
+              <ClipboardList className="h-5 w-5" />
+            </button>
           <button
             onClick={() => switchModule("fstec")}
             className={cn(
@@ -648,6 +732,9 @@ export function Dashboard() {
                 vendorsLoading={vendorsQuery.isLoading}
                 hotCves={hotCvesQuery.data}
                 hotLoading={hotCvesQuery.isLoading}
+                topPriorityCves={topPriorityItems}
+                topPriorityLoading={topPriorityQuery.isLoading}
+                onTopPriorityCveClick={openDashboardModal}
                 dashboardHighlightCveIds={dashboardHighlightSet}
                 onHotCveClick={openDashboardModal}
                 onVendorSelect={(v) => {
@@ -672,7 +759,27 @@ export function Dashboard() {
             </div>
           ) : moduleKey === "vulns" ? (
             <div className="mt-0 grid grid-cols-12 gap-6">
-              <section className="col-span-12 lg:col-span-4">
+              {selected ? (
+                <section className="col-span-12">
+                  <div className="glass rounded-2xl p-3 sm:p-4">
+                    <CveDetailPanel
+                      data={selectedDetails}
+                      loading={detailsQuery.isLoading}
+                      aiPending={aiSummaryPending}
+                      aiStalled={enrichStalled}
+                      manualEnrichAllowed={manualEnrichAllowed}
+                      onRequestEnrich={selected ? (opts) => void requestEnrich(selected, Boolean(opts?.force)) : undefined}
+                      onClose={() => setSelected(null)}
+                      onOpenTask={(taskId: string) => {
+                        setTasksSelectedId(taskId);
+                        setModuleKey("tasks");
+                      }}
+                    />
+                  </div>
+                </section>
+              ) : null}
+
+              <section className={cn("col-span-12 lg:col-span-4", selected && "hidden")}>
                 <div className="glass overflow-visible rounded-2xl p-4">
                   <div className="mb-1 flex items-start justify-between gap-2">
                     <div className="min-w-0 space-y-0.5">
@@ -793,7 +900,7 @@ export function Dashboard() {
                       </div>
                     </div>
 
-                    <Tabs.Root value={view} onValueChange={(v) => setView(v as typeof view)}>
+                    <Tabs.Root value={view} onValueChange={(v: string) => setView(v as typeof view)}>
                       <Tabs.List className="mt-2 grid grid-cols-5 gap-2">
                         {[
                           ["critical_v2", "Критичные"],
@@ -933,90 +1040,39 @@ export function Dashboard() {
                 </div>
               </section>
 
-              <section className="col-span-12 lg:col-span-8">
+              <section className={cn("col-span-12 lg:col-span-8", selected && "hidden")}>
                 <div className="glass rounded-2xl p-5 sm:p-6">
-                  {selected ? (
-                    <Tabs.Root defaultValue="ai">
-                      <Tabs.List className="mb-4 flex flex-wrap gap-2">
-                        <Tabs.Trigger
-                          value="ai"
-                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
-                        >
-                          ИИ‑сводка
-                        </Tabs.Trigger>
-                        <Tabs.Trigger
-                          value="risk"
-                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
-                        >
-                          Риск
-                        </Tabs.Trigger>
-                        <Tabs.Trigger
-                          value="attack"
-                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
-                        >
-                          Граф атаки
-                        </Tabs.Trigger>
-                        <Tabs.Trigger
-                          value="sources"
-                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
-                        >
-                          Источники
-                        </Tabs.Trigger>
-                        <div className="ml-auto flex items-center gap-2 text-[11px] text-muted">
-                          <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 font-mono text-fg/85 shadow-sm dark:border-white/10 dark:bg-white/5">
-                            {selected}
-                          </span>
-                          <button
-                            onClick={() => setSelected(null)}
-                            className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-fg/85 hover:bg-slate-200/80 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
-                          >
-                            Закрыть
-                          </button>
-                        </div>
-                      </Tabs.List>
-
-                      <Tabs.Content value="ai">
-                        <AiSummaryPanel
-                          data={selectedDetails}
-                          loading={detailsQuery.isLoading}
-                          aiPending={aiSummaryPending}
-                          aiStalled={enrichStalled}
-                          manualEnrichAllowed={manualEnrichAllowed}
-                          onRequestEnrich={
-                            selected ? (opts) => void requestEnrich(selected, Boolean(opts?.force)) : undefined
-                          }
-                        />
-                      </Tabs.Content>
-                      <Tabs.Content value="risk">
-                        <RiskBreakdownPanel data={selectedDetails} />
-                      </Tabs.Content>
-                      <Tabs.Content value="attack">
-                        <AttackGraphPanel graph={graph} attackFlow={attackFlowSteps} />
-                      </Tabs.Content>
-                      <Tabs.Content value="sources">
-                        <CveSourcesPanel data={selectedDetails} />
-                      </Tabs.Content>
-                    </Tabs.Root>
-                  ) : (
-                    <div>
-                      <div className="text-sm font-medium">Анализ</div>
-                      <div className="mt-2 text-sm text-muted">
-                        Выбери CVE слева — здесь появятся ИИ‑сводка, risk‑разбор и схема атаки.
+                  <div>
+                    <div className="text-sm font-medium">Анализ</div>
+                    <div className="mt-2 text-sm text-muted">
+                      Выбери CVE слева — откроем детальную карточку на весь экран (без прыжков вправо).
+                    </div>
+                    <div className="mt-4 grid grid-cols-2 gap-3 text-[11px]">
+                      <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
+                        <div className="text-muted">Приоритизация</div>
+                        <div className="mt-1 text-fg/85">Сначала приоритет/риск, потом детали и источники</div>
                       </div>
-                      <div className="mt-4 grid grid-cols-2 gap-3 text-[11px]">
-                        <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
-                          <div className="text-muted">Сводка</div>
-                          <div className="mt-1 text-fg/85">Русский текст + remediation/последствия</div>
-                        </div>
-                        <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
-                          <div className="text-muted">Attack graph</div>
-                          <div className="mt-1 text-fg/85">Схема attacker → vector → asset → impact</div>
-                        </div>
+                      <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
+                        <div className="text-muted">Экспорт</div>
+                        <div className="mt-1 text-fg/85">XLSX с картой атаки и ссылками на источники</div>
                       </div>
                     </div>
-                  )}
+                  </div>
                 </div>
               </section>
+            </div>
+          ) : moduleKey === "tasks" ? (
+            <div className="glass rounded-2xl p-5 sm:p-6">
+              <VulnTaskPanel
+                vendorsHint={
+                  vendorsQuery.data
+                    ? { vendors: vendorsQuery.data.vendors, products: vendorsQuery.data.products }
+                    : null
+                }
+                onOpenCve={openDashboardModal}
+                selectedTaskId={tasksSelectedId}
+                onSelectTaskId={setTasksSelectedId}
+              />
             </div>
           ) : moduleKey === "fstec" ? (
             <FstecNewsPanel onOpenCve={openDashboardModal} />

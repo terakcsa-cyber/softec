@@ -6,6 +6,7 @@ import { Activity, Clock, Database, Loader2, RefreshCw, Shield, Sparkles, Trendi
 import { cn } from "../ui/cn";
 import { Critical24hBoard, type HotCveRow } from "./critical-24h-board";
 import { VendorLandscape } from "./vendor-landscape";
+import { computeCvePriority } from "@/lib/cve-priority";
 
 export type SummaryStats = {
   totalCves: number;
@@ -224,6 +225,29 @@ function CoverageBarsChart({ data }: { data: BarDatum[] }) {
   );
 }
 
+function computePerimeterScore(it: HotCveRow): { score: number; reasons: string[] } {
+  let s = 0;
+  const reasons: string[] = [];
+  const add = (n: number, r: string) => {
+    s += n;
+    reasons.push(r);
+  };
+
+  if (it.perimeter_product) add(22, "edge/web/VPN продукт (CPE)");
+  if (it.cvss_av_network) add(25, "CVSS AV:N (network)");
+  if (it.cvss_av_network && it.cvss_pr_none) add(18, "CVSS PR:N (без привилегий)");
+  if (it.cvss_av_network && it.cvss_ui_none) add(12, "CVSS UI:N (без пользователя)");
+  if (it.cvss_av_network && it.cvss_ac_low) add(8, "CVSS AC:L (низкая сложность)");
+
+  if (it.exploit_known) add(15, "KEV (известная эксплуатация)");
+  if (typeof it.epss === "number" && it.epss >= 0.6) add(10, "EPSS ≥ 0.60");
+  else if (typeof it.epss === "number" && it.epss >= 0.3) add(6, "EPSS ≥ 0.30");
+
+  // Clamp to [0..100]
+  const score = Math.max(0, Math.min(100, Math.round(s)));
+  return { score, reasons };
+}
+
 export function OverviewDashboardPanel({
   data,
   loading,
@@ -236,6 +260,9 @@ export function OverviewDashboardPanel({
   hotCves,
   hotLoading,
   onHotCveClick,
+  topPriorityCves,
+  topPriorityLoading,
+  onTopPriorityCveClick,
   vendorsLoading,
   dashboardHighlightCveIds,
   onRefresh,
@@ -260,6 +287,9 @@ export function OverviewDashboardPanel({
   hotCves?: HotCveRow[];
   hotLoading?: boolean;
   onHotCveClick?: (cveId: string) => void;
+  topPriorityCves?: HotCveRow[];
+  topPriorityLoading?: boolean;
+  onTopPriorityCveClick?: (cveId: string) => void;
   vendorsLoading?: boolean;
   /** Подсветка карточек, для которых открыто модальное окно. */
   dashboardHighlightCveIds?: ReadonlySet<string> | null;
@@ -390,6 +420,118 @@ export function OverviewDashboardPanel({
           highlightedCveIds={dashboardHighlightCveIds}
           onCveClick={onHotCveClick ?? (() => undefined)}
         />
+      </section>
+
+      <section className="rounded-2xl border border-slate-200/90 bg-white p-5 ring-1 ring-slate-200/60 dark:border-border dark:bg-black/15 dark:ring-white/[0.05]">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-medium">ТОП‑20 по приоритету (банк / наружу / 443‑класс)</div>
+            <div className="mt-1 text-[11px] leading-relaxed text-muted">
+              Подборка для triage: bank‑priority + небольшой буст за периметр‑сигналы (KEV/EPSS/CVSS). В первую очередь —
+              уязвимости, которые чаще всего реально эксплуатируются “снаружи”.
+            </div>
+          </div>
+          <div className="shrink-0 text-[11px] text-muted">
+            {topPriorityLoading ? "Загрузка…" : topPriorityCves?.length ? `${topPriorityCves.length}` : "—"}
+          </div>
+        </div>
+
+        {topPriorityLoading ? (
+          <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div
+                key={i}
+                className="h-16 animate-pulse rounded-xl border border-slate-200/80 bg-slate-50 dark:border-white/[0.06] dark:bg-white/[0.03]"
+              />
+            ))}
+          </div>
+        ) : topPriorityCves?.length ? (
+          <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
+            {topPriorityCves.slice(0, 20).map((it) => {
+              const p = computeCvePriority(it as any);
+              const per = computePerimeterScore(it);
+              const pillCls =
+                p.level === "critical"
+                  ? "border-danger/30 bg-danger/15 text-danger"
+                  : p.level === "high"
+                    ? "border-warn/30 bg-warn/15 text-warn"
+                    : p.level === "medium"
+                      ? "border-accent/30 bg-accent/10 text-fg/80"
+                      : "border-ok/30 bg-ok/10 text-ok";
+              const perCls =
+                per.score >= 80
+                  ? "border-danger/30 bg-danger/10 text-danger"
+                  : per.score >= 55
+                    ? "border-warn/30 bg-warn/10 text-warn"
+                    : per.score >= 30
+                      ? "border-accent/30 bg-accent/10 text-fg/80"
+                      : "border-slate-200 bg-slate-50 text-fg/75 dark:border-white/10 dark:bg-white/5";
+              const epss =
+                typeof (it as any).epss === "number" && Number.isFinite((it as any).epss)
+                  ? `${(((it as any).epss as number) * 100).toFixed(2)}%`
+                  : "—";
+              const cvss =
+                typeof (it as any).cvss_base === "number" && Number.isFinite((it as any).cvss_base)
+                  ? ((it as any).cvss_base as number).toFixed(1)
+                  : "—";
+              return (
+                <button
+                  key={(it as any).cve_id}
+                  onClick={() => onTopPriorityCveClick?.(String((it as any).cve_id))}
+                  className={cn(
+                    "w-full rounded-xl border border-slate-200 bg-gradient-to-br from-white to-slate-50 p-3 text-left shadow-sm transition hover:from-slate-50 hover:to-slate-100/60",
+                    "dark:border-white/[0.06] dark:from-white/[0.04] dark:to-white/[0.01] dark:shadow-none dark:hover:from-white/[0.06] dark:hover:to-white/[0.02]"
+                  )}
+                  title={p.reasons.join(" • ")}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-semibold tracking-tight">{String((it as any).cve_id)}</div>
+                      <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-fg/80">
+                        {[
+                          (it as any).vp_vendor ?? null,
+                          (it as any).vp_product ?? null
+                        ].filter(Boolean).join(" / ") || "—"}{" "}
+                        {(it as any).short_ru
+                          ? `— ${String((it as any).short_ru)}`
+                          : (it as any).short_description
+                            ? `— ${String((it as any).short_description)}`
+                            : ""}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
+                        <span className={cn("rounded-full border px-2 py-0.5 tabular-nums", pillCls)}>
+                          Приоритет {p.score}
+                        </span>
+                        <span
+                          className={cn("rounded-full border px-2 py-0.5 tabular-nums", perCls)}
+                          title={per.reasons.join(" • ")}
+                        >
+                          Периметр {per.score}
+                        </span>
+                        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 tabular-nums dark:border-white/10 dark:bg-white/5">
+                          EPSS <span className="text-fg/80">{epss}</span>
+                        </span>
+                        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 tabular-nums dark:border-white/10 dark:bg-white/5">
+                          CVSS <span className="text-fg/80">{cvss}</span>
+                        </span>
+                        {(it as any).exploit_known ? (
+                          <span className="rounded-full border border-danger/30 bg-danger/15 px-2 py-0.5 text-danger">
+                            KEV
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-medium tabular-nums text-fg/80 dark:border-white/10 dark:bg-white/5">
+                      {(it as any).risk_score ?? "—"}
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="mt-4 text-sm text-muted">Пока нет данных.</div>
+        )}
       </section>
 
       <div className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-br from-white via-slate-50 to-indigo-100/40 p-4 ring-1 ring-slate-200/70 dark:border-border dark:from-black/40 dark:via-black/25 dark:to-indigo-950/20 dark:ring-white/[0.06]">

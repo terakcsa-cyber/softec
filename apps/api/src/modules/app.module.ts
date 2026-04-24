@@ -8,12 +8,14 @@ import { CveController } from "../routes/cve.controller.js";
 import { StatsController } from "../routes/stats.controller.js";
 import { VendorAdvisoryController } from "../routes/vendor-advisory.controller.js";
 import { AsvController } from "../routes/asv.controller.js";
+import { VulnTaskController } from "../routes/vuln-task.controller.js";
 import { DbModule } from "./db.module.js";
 import { QueueModule } from "./queue.module.js";
 import { CveEnrichRunnerService } from "../services/cve-enrich-runner.service.js";
 import { RedisEnrichCacheService } from "../services/redis-enrich-cache.service.js";
 import { SchemaService } from "../services/schema.service.js";
 import { CveVendorIndexService } from "../services/cve-vendor-index.service.js";
+import { VulnTaskService } from "../services/vuln-task.service.js";
 
 @Module({
   imports: [
@@ -28,12 +30,13 @@ import { CveVendorIndexService } from "../services/cve-vendor-index.service.js";
       }
     ])
   ],
-  controllers: [HealthController, CveController, StatsController, VendorAdvisoryController, AsvController],
+  controllers: [HealthController, CveController, StatsController, VendorAdvisoryController, AsvController, VulnTaskController],
   providers: [
     SchemaService,
     RedisEnrichCacheService,
     CveEnrichRunnerService,
     CveVendorIndexService,
+    VulnTaskService,
     { provide: APP_GUARD, useClass: JwtAuthGuard }
   ]
 })
