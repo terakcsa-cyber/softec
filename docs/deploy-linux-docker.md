@@ -12,8 +12,11 @@ cd vuln-intel-platform
 
 Скрипт сам:
 
+- проверит Docker и Docker daemon;
+- если возможно, доставит Docker/Compose plugin через пакетный менеджер;
 - создаст `.env.production`, если его ещё нет;
 - сгенерирует сильные секреты;
+- предложит выбрать публичный web/HTTPS порт;
 - проверит Docker Compose config;
 - соберёт и поднимет production stack.
 
@@ -26,16 +29,28 @@ cd vuln-intel-platform
 Если нужен другой порт:
 
 ```bash
-./deploy.sh --port=8080
+./deploy.sh --port=8443 --origin=https://vuln-intel.example.com:8443
 ```
 
 ## Требования
 
-- Linux-хост с Docker Engine и Docker Compose v2.
+- Linux-хост с Docker Engine и Docker Compose v2. Если их нет, `./deploy.sh` попробует поставить их автоматически через `apt-get`, `dnf` или `yum`.
 - Доступ к Git-репозиторию.
 - Node.js/pnpm не обязательны для `./deploy.sh`: если Node.js нет на хосте, скрипт запустит генератор env в одноразовом Docker-контейнере `node:20-alpine`.
 - 4+ CPU, 16+ GB RAM для комфортного старта; больше, если включены ASV/Nuclei, Metasploit или локальная LLM.
 - Открытый наружу порт только для web (`WEB_PUBLISHED_PORT`, по умолчанию `3000`) или reverse proxy перед ним.
+
+Если автоматическая установка Compose v2 не прошла, установите compose plugin вручную:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y docker-compose-plugin
+docker compose version
+```
+
+Скрипт также поддерживает standalone `docker-compose`, но только версии v2.
+
+Важно: контейнер `web` внутри Docker слушает HTTP. Указывайте `https://` origin, если TLS завершается на reverse proxy/load balancer/хосте перед приложением. Сам `deploy.sh` выбирает и публикует порт, но не выпускает TLS-сертификаты.
 
 ## Подготовка
 
@@ -46,6 +61,7 @@ cd vuln-intel-platform
 ```
 
 `./deploy.sh --init-only` создаёт `.env.production`, генерирует сильные случайные значения для `JWT_SECRET`, `POSTGRES_PASSWORD`, `RABBITMQ_DEFAULT_PASS` и сразу согласует `DATABASE_URL` / `RABBITMQ_URL`.
+При интерактивном запуске скрипт спросит публичный порт web/HTTPS и публичный URL приложения.
 
 Если `.env.production` уже существует, скрипт не перезаписывает его. Для осознанной пересборки env:
 
