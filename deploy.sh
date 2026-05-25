@@ -98,6 +98,23 @@ read_env_value() {
   awk -F= -v key="$key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$file"
 }
 
+write_env_value() {
+  local key="$1"
+  local value="$2"
+  local file="$3"
+  local tmp
+  tmp="$(mktemp)"
+  if awk -F= -v key="$key" -v value="$value" '
+    BEGIN { written = 0 }
+    $1 == key { print key "=" value; written = 1; next }
+    { print }
+    END { if (!written) print key "=" value }
+  ' "$file" > "$tmp"; then
+    cat "$tmp" > "$file"
+  fi
+  rm -f "$tmp"
+}
+
 validate_port() {
   local port="$1"
   [[ "$port" =~ ^[0-9]+$ && "$port" -ge 1 && "$port" -le 65535 ]]
@@ -361,6 +378,42 @@ create_or_update_env() {
   fi
 }
 
+normalize_env_file() {
+  [[ -f "$ENV_FILE" ]] || return 0
+
+  local rabbit_url rabbit_user rabbit_pass
+  rabbit_url="$(read_env_value RABBITMQ_URL "$ENV_FILE" || true)"
+  rabbit_user="$(read_env_value RABBITMQ_DEFAULT_USER "$ENV_FILE" || true)"
+  rabbit_pass="$(read_env_value RABBITMQ_DEFAULT_PASS "$ENV_FILE" || true)"
+
+  if [[ -n "$rabbit_user" && -n "$rabbit_pass" ]]; then
+    local expected="amqp://${rabbit_user}:${rabbit_pass}@rabbitmq:5672/%2F"
+    if [[ "$rabbit_url" == "amqp://${rabbit_user}:${rabbit_pass}@rabbitmq:5672/" || -z "$rabbit_url" ]]; then
+      log "Normalizing RABBITMQ_URL for default '/' vhost."
+      write_env_value RABBITMQ_URL "$expected" "$ENV_FILE"
+    fi
+  fi
+}
+
+validate_env_file() {
+  local missing=()
+  local key value
+  for key in JWT_SECRET DATABASE_URL RABBITMQ_URL REDIS_URL POSTGRES_PASSWORD RABBITMQ_DEFAULT_PASS; do
+    value="$(read_env_value "$key" "$ENV_FILE" || true)"
+    [[ -n "$value" ]] || missing+=( "$key" )
+  done
+
+  if (( ${#missing[@]} > 0 )); then
+    die "Missing required values in $ENV_FILE: ${missing[*]}"
+  fi
+
+  local jwt
+  jwt="$(read_env_value JWT_SECRET "$ENV_FILE" || true)"
+  if (( ${#jwt} < 32 )); then
+    die "JWT_SECRET in $ENV_FILE is too short."
+  fi
+}
+
 wait_for_web() {
   local port="$1"
   local url="http://127.0.0.1:${port}/health"
@@ -384,6 +437,23 @@ wait_for_web() {
   return 0
 }
 
+dump_compose_diagnostics() {
+  local app_env_file="$1"
+  warn "Production stack failed to start. Collecting diagnostics."
+
+  echo
+  echo "===== docker compose ps ====="
+  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml ps -a || true
+
+  echo
+  echo "===== api logs ====="
+  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml logs --tail=200 api || true
+
+  echo
+  echo "===== dependencies logs ====="
+  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml logs --tail=120 postgres rabbitmq redis || true
+}
+
 log "Starting production deploy from $ROOT_DIR"
 ensure_docker_cli
 ensure_docker_daemon
@@ -392,6 +462,8 @@ check_host_capacity
 prepare_interactive_env_inputs
 ensure_port_available "$WEB_PORT"
 create_or_update_env
+normalize_env_file
+validate_env_file
 
 if [[ "$INIT_ONLY" == "1" ]]; then
   log "Env ready: $ENV_FILE"
@@ -410,7 +482,10 @@ APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/doc
 log "Starting production stack"
 up_args=( "up" "-d" )
 if [[ "$NO_BUILD" != "1" ]]; then up_args+=( "--build" ); fi
-APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml "${up_args[@]}"
+if ! APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml "${up_args[@]}"; then
+  dump_compose_diagnostics "$app_env_file"
+  die "Production stack failed. See diagnostics above."
+fi
 
 published_port="$(read_env_value WEB_PUBLISHED_PORT "$ENV_FILE" || true)"
 published_port="${published_port:-${WEB_PORT:-3000}}"

@@ -52,7 +52,7 @@ const replacements = {
   RABBITMQ_DEFAULT_VHOST: "/",
   DATABASE_URL: `postgres://${postgresUser}:${postgresPassword}@postgres:5432/${postgresDb}`,
   REDIS_URL: "redis://redis:6379",
-  RABBITMQ_URL: `amqp://${rabbitUser}:${rabbitPassword}@rabbitmq:5672/`,
+  RABBITMQ_URL: `amqp://${rabbitUser}:${rabbitPassword}@rabbitmq:5672/%2F`,
   JWT_SECRET: secret(48),
   API_CORS_ORIGIN: origin,
   AUTH_ALLOW_REGISTER: "false",
