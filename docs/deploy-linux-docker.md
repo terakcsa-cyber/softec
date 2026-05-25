@@ -2,10 +2,38 @@
 
 Документ описывает безопасный перенос проекта на отдельный Linux-сервер. Основной сценарий — запуск всего стека через `infra/docker-compose.prod.yml`.
 
+## Самый простой запуск
+
+```bash
+git clone <repo-url> vuln-intel-platform
+cd vuln-intel-platform
+./deploy.sh
+```
+
+Скрипт сам:
+
+- создаст `.env.production`, если его ещё нет;
+- сгенерирует сильные секреты;
+- проверит Docker Compose config;
+- соберёт и поднимет production stack.
+
+Если есть домен:
+
+```bash
+./deploy.sh --origin=https://vuln-intel.example.com
+```
+
+Если нужен другой порт:
+
+```bash
+./deploy.sh --port=8080
+```
+
 ## Требования
 
 - Linux-хост с Docker Engine и Docker Compose v2.
 - Доступ к Git-репозиторию.
+- Node.js/pnpm не обязательны для `./deploy.sh`: если Node.js нет на хосте, скрипт запустит генератор env в одноразовом Docker-контейнере `node:20-alpine`.
 - 4+ CPU, 16+ GB RAM для комфортного старта; больше, если включены ASV/Nuclei, Metasploit или локальная LLM.
 - Открытый наружу порт только для web (`WEB_PUBLISHED_PORT`, по умолчанию `3000`) или reverse proxy перед ним.
 
@@ -14,25 +42,24 @@
 ```bash
 git clone <repo-url> vuln-intel-platform
 cd vuln-intel-platform
-cp .env.production.example .env.production
+./deploy.sh --init-only
 ```
 
-Обязательно замените все `CHANGE_ME` в `.env.production`.
+`./deploy.sh --init-only` создаёт `.env.production`, генерирует сильные случайные значения для `JWT_SECRET`, `POSTGRES_PASSWORD`, `RABBITMQ_DEFAULT_PASS` и сразу согласует `DATABASE_URL` / `RABBITMQ_URL`.
 
-Минимальные секреты:
+Если `.env.production` уже существует, скрипт не перезаписывает его. Для осознанной пересборки env:
 
 ```bash
-openssl rand -base64 48  # JWT_SECRET
-openssl rand -base64 32  # POSTGRES_PASSWORD
-openssl rand -base64 32  # RABBITMQ_DEFAULT_PASS
+./deploy.sh --init-only --force-env
 ```
 
-Проверьте, что URL и пароли согласованы:
+Для сервера с доменом сразу задайте публичный origin:
 
-- `DATABASE_URL` должен использовать тот же пароль, что `POSTGRES_PASSWORD`, и host `postgres`.
-- `RABBITMQ_URL` должен использовать тот же пароль, что `RABBITMQ_DEFAULT_PASS`, и host `rabbitmq`.
-- `UPSTREAM_API_BASE` внутри Docker должен быть `http://api:4001/api`.
-- `API_CORS_ORIGIN` должен совпадать с публичным origin web или reverse proxy.
+```bash
+./deploy.sh --init-only --origin=https://vuln-intel.example.com
+```
+
+Если запускаете по IP/порту, можно оставить дефолт `http://localhost:3000` и потом при необходимости поменять `PUBLIC_WEB_ORIGIN` / `API_CORS_ORIGIN` в `.env.production`.
 
 ## Запуск
 
@@ -45,7 +72,7 @@ docker compose --env-file .env.production -f infra/docker-compose.prod.yml confi
 Собрать и запустить:
 
 ```bash
-docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d --build
+./deploy.sh
 ```
 
 Посмотреть состояние:

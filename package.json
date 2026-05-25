@@ -24,6 +24,11 @@
     "format": "prettier -w .",
     "infra:up": "docker compose -f infra/docker-compose.yml up -d",
     "infra:down": "docker compose -f infra/docker-compose.yml down -v",
+    "deploy:init": "node scripts/init-production-env.mjs",
+    "deploy:config": "docker compose --env-file .env.production -f infra/docker-compose.prod.yml config",
+    "deploy:up": "docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d --build",
+    "deploy:logs": "docker compose --env-file .env.production -f infra/docker-compose.prod.yml logs -f api web ingest ai",
+    "deploy": "./deploy.sh",
     "security:sast": "node scripts/security-sast.mjs",
     "security:dast": "node scripts/security-dast.mjs"
   },

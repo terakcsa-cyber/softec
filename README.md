@@ -241,11 +241,10 @@ rm -f .dev.lock
 Для переноса на Linux-сервер используйте production compose:
 
 ```bash
-cp .env.production.example .env.production
-docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d --build
+./deploy.sh
 ```
 
-Наружу публикуется только web (`WEB_PUBLISHED_PORT`, по умолчанию **3000**); API и зависимости остаются внутри Docker network. Подробная инструкция: `docs/deploy-linux-docker.md`.
+`deploy.sh` автоматически создаёт `.env.production`, генерирует сильные секреты, проверяет compose config, собирает и поднимает stack. Наружу публикуется только web (`WEB_PUBLISHED_PORT`, по умолчанию **3000**); API и зависимости остаются внутри Docker network. Подробная инструкция: `docs/deploy-linux-docker.md`.
 
 ---
 
