@@ -584,6 +584,32 @@ export class SchemaService implements OnModuleInit {
     await this.db.query(`CREATE INDEX IF NOT EXISTS asv_finding_scan_run_idx ON asv_finding (scan_run_id)`);
 
     /**
+     * Issues must exist before asv_ai_note because notes can reference issue_id.
+     */
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_issue (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        asset_id UUID NOT NULL REFERENCES asv_asset(id) ON DELETE CASCADE,
+        issue_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        tool TEXT NOT NULL DEFAULT 'unknown',
+        external_id TEXT,
+        endpoint_key TEXT,
+        severity TEXT NOT NULL DEFAULT 'info',
+        confidence TEXT NOT NULL DEFAULT 'medium',
+        status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','resolved','accepted','false_positive')),
+        first_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_seen TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_scan_run_id UUID REFERENCES asv_scan_run(id) ON DELETE SET NULL,
+        occurrences INT NOT NULL DEFAULT 1 CHECK (occurrences >= 1),
+        fix_guidance JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (asset_id, issue_key)
+      )`
+    );
+
+    /**
      * AI notes for ASV: LLM-generated triage/explanations stored as immutable snapshots.
      * Written by apps/ai worker via queue. Read by API/UI.
      */
