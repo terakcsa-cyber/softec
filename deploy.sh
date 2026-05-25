@@ -393,6 +393,13 @@ normalize_env_file() {
       write_env_value RABBITMQ_URL "$expected" "$ENV_FILE"
     fi
   fi
+
+  local bdu_fallback
+  bdu_fallback="$(read_env_value BDU_ALLOW_MIRROR_FALLBACK "$ENV_FILE" || true)"
+  if [[ -z "$bdu_fallback" ]]; then
+    log "Enabling BDU mirror fallback for resilient first ingest."
+    write_env_value BDU_ALLOW_MIRROR_FALLBACK "true" "$ENV_FILE"
+  fi
 }
 
 validate_env_file() {
