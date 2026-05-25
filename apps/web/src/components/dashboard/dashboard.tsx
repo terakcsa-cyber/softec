@@ -4,11 +4,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import { AppearanceSettings } from "@/components/auth/appearance-settings";
 import { SecuritySettings } from "@/components/auth/security-settings";
+import { IntegrationSettingsPanel } from "@/components/dashboard/integration-settings-panel";
 import { apiFetch } from "@/lib/api-fetch";
+import { needsOnDemandBduEnrich, shouldAutoEnrichBduOnOpen } from "@/lib/bdu-enrich-ui";
 import { needsOnDemandEnrich, parseAiOutputJson, shouldAutoEnrichOnOpen } from "@/lib/cve-enrich-ui";
 import { CVE_POLL_BACKGROUND_ONLY_MS, CVE_POLL_WHILE_ENRICH_MS, ENRICH_UI_WAIT_MS } from "@/lib/enrich-ui-wait";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bandage, BarChart3, Loader2, Radar, RefreshCw, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Bandage, BarChart3, ClipboardList, Loader2, Radar, RefreshCw, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
 import * as Tabs from "@radix-ui/react-tabs";
 import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "../ui/cn";
@@ -18,6 +20,10 @@ import { RiskBreakdownPanel } from "./risk-breakdown-panel";
 import { OverviewDashboardPanel } from "./overview-dashboard-panel";
 import { CveSourcesPanel } from "./cve-sources-panel";
 import { computeCvePriority } from "@/lib/cve-priority";
+import { computeBduPriority } from "@/lib/bdu-priority";
+import { CveDetailPanel } from "./cve-detail-panel";
+import { BduCard, type BduListItem } from "./bdu-card";
+import { BduDetailPanel, type BduDetailsPayload } from "./bdu-detail-panel";
 
 /** reactflow ломает SSR/Webpack в Next 15 — только клиент. */
 const AttackGraphPanel = dynamic(
@@ -32,18 +38,35 @@ import {
   DraggableCveModals,
   type DashboardModalFrame
 } from "./draggable-cve-modals";
-import { FstecNewsPanel } from "../fstec/fstec-news-panel";
+import {
+  DASHBOARD_BDU_MODAL_BASE_WIDTH_PX,
+  DraggableBduModals,
+  type DashboardBduModalFrame
+} from "./draggable-bdu-modals";
+import { FstecModulePanel } from "../fstec/fstec-module-panel";
 import { PatchManagementPanel } from "./patch-management-panel";
 import { AsvScannerPanel } from ".";
 import { VulnSearchBar } from "./vuln-search-bar";
+import { VulnTaskPanel } from "./vuln-task-panel";
 
 type CveListItem = {
   cve_id: string;
+  bdu_ids?: string[] | null;
   published_at: string | null;
   modified_at: string | null;
   risk_score: number | null;
   epss?: number | null;
   cvss_base?: number | null;
+  vp_vendor?: string | null;
+  vp_product?: string | null;
+  short_description?: string | null;
+  short_ru?: string | null;
+  task_open_count?: number | null;
+  cvss_av_network?: boolean;
+  cvss_pr_none?: boolean;
+  cvss_ui_none?: boolean;
+  cvss_ac_low?: boolean;
+  perimeter_product?: boolean;
   exploit_known?: boolean;
   critical_reasons?: string[] | null;
   ai_ready?: boolean;
@@ -59,6 +82,12 @@ async function fetchCveDetail(cveId: string): Promise<CveDetails> {
   const res = await apiFetch(`/api/cves/${encodeURIComponent(cveId)}`, { cache: "no-store" });
   if (!res.ok) throw new Error("Failed to fetch CVE");
   return (await res.json()) as CveDetails;
+}
+
+async function fetchBduDetail(bduId: string): Promise<BduDetailsPayload> {
+  const res = await apiFetch(`/api/bdu/${encodeURIComponent(bduId)}`, { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to fetch BDU");
+  return (await res.json()) as BduDetailsPayload;
 }
 
 type SavedView = {
@@ -78,15 +107,17 @@ type SavedView = {
 };
 
 type TriageStatus = "new" | "review" | "done";
-type ModuleKey = "dashboard" | "vulns" | "fstec" | "patches" | "asv" | "settings";
+type ModuleKey = "dashboard" | "vulns" | "tasks" | "fstec" | "patches" | "asv" | "settings";
 
 export function Dashboard() {
   const queryClient = useQueryClient();
   const [moduleKey, setModuleKey] = useState<ModuleKey>("dashboard");
+  const [tasksSelectedId, setTasksSelectedId] = useState<string | null>(null);
   const [q, setQ] = useState("");
   /** Задержка запроса к API при наборе текста полнотекстового поиска */
   const [qDebounced, setQDebounced] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  const [selectedBdu, setSelectedBdu] = useState<string | null>(null);
   const [view, setView] = useState<"critical_v2" | "critical" | "latest" | "last24h" | "kev" | "all">("critical_v2");
   const [limit, setLimit] = useState<15 | 20>(20);
   const [sort, setSort] = useState<"rank" | "fresh" | "risk" | "epss" | "cvss" | "priority">("rank");
@@ -190,7 +221,13 @@ export function Dashboard() {
   const enrichPollDeadlineRef = useRef<number | null>(null);
   /** Один автозапрос enrich на CVE при открытии (без зацикливания). */
   const autoEnrichForCveRef = useRef<string | null>(null);
+  const [bduEnrichPosted, setBduEnrichPosted] = useState(false);
+  const [bduEnrichTargetId, setBduEnrichTargetId] = useState<string | null>(null);
+  const [bduEnrichStalled, setBduEnrichStalled] = useState(false);
+  const bduEnrichPollDeadlineRef = useRef<number | null>(null);
+  const autoEnrichForBduRef = useRef<string | null>(null);
   const [dashboardModals, setDashboardModals] = useState<DashboardModalFrame[]>([]);
+  const [dashboardBduModals, setDashboardBduModals] = useState<DashboardBduModalFrame[]>([]);
 
   const summaryQuery = useQuery({
     queryKey: ["stats", "summary"],
@@ -200,6 +237,12 @@ export function Dashboard() {
       return (await res.json()) as {
         totalCves: number;
         cvesLastHourCount?: number;
+        cvesPublishedLast24hCount?: number;
+        maxPublishedAt?: string | null;
+        totalBduCount?: number;
+        bduPublishedLast24hCount?: number;
+        cveBduLinkCount?: number;
+        maxBduPublicationAt?: string | null;
         kevCount: number;
         epssCount: number;
         cvssCount: number;
@@ -213,6 +256,7 @@ export function Dashboard() {
           epssIngestTs?: string | null;
           kevIngestTs?: string | null;
           riskScoreComputedAt?: string | null;
+          bduIngestTs?: string | null;
         };
       };
     }
@@ -230,6 +274,9 @@ export function Dashboard() {
       return (await res.json()) as {
         windowHours: number;
         sampledCves: number;
+        sampledBdu?: number;
+        sampledTotal?: number;
+        usedBdu?: number;
         method?: string;
         usedCpe?: number;
         usedFallback?: number;
@@ -240,21 +287,94 @@ export function Dashboard() {
     staleTime: 30_000
   });
 
+  const hotBduQuery = useQuery({
+    queryKey: ["bdu", "dashboard", "attention24h", "kev-or-epss05-or-cvss9", 100],
+    enabled: moduleKey === "dashboard",
+    staleTime: 45_000,
+    refetchInterval: moduleKey === "dashboard" ? 90_000 : false,
+    queryFn: async () => {
+      const url = new URL(`/api/bdu`, window.location.origin);
+      url.searchParams.set("publishedLast24h", "true");
+      url.searchParams.set("urgentOnly", "true");
+      url.searchParams.set("minLinkedEpss", "0.5");
+      url.searchParams.set("minCvss", "9");
+      url.searchParams.set("limit", "100");
+      const res = await apiFetch(url.toString(), { cache: "no-store" });
+      if (!res.ok) throw new Error(`Failed to fetch hot BDU (${res.status})`);
+      const data = (await res.json()) as { items: BduListItem[] };
+      return data.items;
+    }
+  });
+
   const hotCvesQuery = useQuery({
-    queryKey: ["cves", "dashboard", "last24h", "fresh", 24],
+    queryKey: ["cves", "dashboard", "attention24h", "kev-or-epss05-or-cvss9", 200],
     enabled: moduleKey === "dashboard",
     staleTime: 45_000,
     refetchInterval: moduleKey === "dashboard" ? 90_000 : false,
     queryFn: async () => {
       const url = new URL(`/api/cves`, window.location.origin);
       url.searchParams.set("view", "last24h");
-      url.searchParams.set("sort", "fresh");
-      url.searchParams.set("limit", "24");
+      url.searchParams.set("sort", "epss");
+      url.searchParams.set("limit", "200");
       const res = await apiFetch(url.toString(), { cache: "no-store" });
       if (!res.ok) throw new Error(`Failed to fetch hot CVEs (${res.status})`);
       const data = (await res.json()) as { items: CveListItem[] };
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      return data.items
+        .filter((it) => {
+          if (!it.published_at) return false;
+          const t = new Date(it.published_at).getTime();
+          const highEpss = typeof it.epss === "number" && it.epss >= 0.5;
+          const criticalCvss = typeof it.cvss_base === "number" && it.cvss_base >= 9;
+          return !Number.isNaN(t) && t >= cutoff && (Boolean(it.exploit_known) || highEpss || criticalCvss);
+        })
+        .sort((a, b) => {
+          const ka = a.exploit_known ? 1 : 0;
+          const kb = b.exploit_known ? 1 : 0;
+          if (kb !== ka) return kb - ka;
+          const ea = typeof a.epss === "number" ? a.epss : -1;
+          const eb = typeof b.epss === "number" ? b.epss : -1;
+          if (eb !== ea) return eb - ea;
+          const ca = typeof a.cvss_base === "number" ? a.cvss_base : -1;
+          const cb = typeof b.cvss_base === "number" ? b.cvss_base : -1;
+          if (cb !== ca) return cb - ca;
+          const ra = typeof a.risk_score === "number" ? a.risk_score : -1;
+          const rb = typeof b.risk_score === "number" ? b.risk_score : -1;
+          if (rb !== ra) return rb - ra;
+          return String(b.published_at ?? "").localeCompare(String(a.published_at ?? ""));
+        });
+    }
+  });
+
+  const topPriorityQuery = useQuery({
+    queryKey: ["cves", "dashboard", "topPriority", "latest", "rank", 80],
+    enabled: moduleKey === "dashboard",
+    staleTime: 60_000,
+    refetchInterval: moduleKey === "dashboard" ? 120_000 : false,
+    queryFn: async () => {
+      const url = new URL(`/api/cves`, window.location.origin);
+      url.searchParams.set("view", "latest");
+      url.searchParams.set("sort", "rank");
+      url.searchParams.set("limit", "80");
+      const res = await apiFetch(url.toString(), { cache: "no-store" });
+      if (!res.ok) throw new Error(`Failed to fetch top priority CVEs (${res.status})`);
+      const data = (await res.json()) as { items: CveListItem[] };
       return data.items;
     }
+  });
+
+  const bduListQuery = useQuery({
+    queryKey: ["bdu", "search", qDebounced],
+    enabled: moduleKey === "vulns" && qDebounced.length > 0,
+    queryFn: async () => {
+      const url = new URL(`/api/bdu`, window.location.origin);
+      url.searchParams.set("q", qDebounced);
+      url.searchParams.set("limit", "20");
+      const res = await apiFetch(url.toString(), { cache: "no-store" });
+      if (!res.ok) throw new Error(`Поиск БДУ (${res.status})`);
+      return (await res.json()) as { items: BduListItem[] };
+    },
+    staleTime: 30_000
   });
 
   const listQuery = useQuery({
@@ -290,7 +410,8 @@ export function Dashboard() {
   const visibleItems = useMemo(() => {
     const items = listQuery.data ?? [];
     let out = items;
-    if (attentionOnly) {
+    const searching = qDebounced.trim().length > 0;
+    if (attentionOnly && !searching) {
       out = out.filter((it) => {
         const p = computeCvePriority(it);
         return p.level === "critical" || p.level === "high";
@@ -300,7 +421,37 @@ export function Dashboard() {
       out = [...out].sort((a, b) => computeCvePriority(b).score - computeCvePriority(a).score);
     }
     return out;
-  }, [listQuery.data, attentionOnly, sort]);
+  }, [listQuery.data, attentionOnly, sort, qDebounced]);
+
+  type VulnListEntry =
+    | { kind: "cve"; item: CveListItem; priority: number }
+    | { kind: "bdu"; item: BduListItem; priority: number };
+
+  const vulnListEntries = useMemo((): VulnListEntry[] => {
+    const searching = qDebounced.trim().length > 0;
+    if (!searching) {
+      return visibleItems.map((item) => ({
+        kind: "cve" as const,
+        item,
+        priority: computeCvePriority(item).score
+      }));
+    }
+    const entries: VulnListEntry[] = [
+      ...(bduListQuery.data?.items ?? []).map((item) => ({
+        kind: "bdu" as const,
+        item,
+        priority: computeBduPriority(item).score
+      })),
+      ...visibleItems.map((item) => ({
+        kind: "cve" as const,
+        item,
+        priority: computeCvePriority(item).score
+      }))
+    ];
+    return entries.sort((a, b) => b.priority - a.priority);
+  }, [visibleItems, bduListQuery.data?.items, qDebounced]);
+
+  const bduTriageKey = (bduId: string) => `BDU:${bduId}`;
 
   const exportCsv = () => {
     const rows = (listQuery.data ?? []).map((it) => ({
@@ -419,26 +570,162 @@ export function Dashboard() {
     return () => clearInterval(id);
   }, [enrichPosted, enrichTargetCveId]);
 
+  const bduDetailsQuery = useQuery({
+    queryKey: ["bdu", "detail", selectedBdu],
+    enabled: selectedBdu != null && moduleKey === "vulns",
+    staleTime: 8_000,
+    refetchOnWindowFocus: false,
+    queryFn: () => (selectedBdu ? fetchBduDetail(selectedBdu) : Promise.reject(new Error("no bdu"))),
+    refetchInterval: (q) => {
+      const d = q.state.data;
+      if (!selectedBdu || !d?.found) return false;
+      const manual = summaryQuery.data?.manualEnrichAllowed !== false;
+      if (manual && bduEnrichPosted && bduEnrichTargetId === selectedBdu) {
+        if (!needsOnDemandBduEnrich(d)) return false;
+        const deadline = bduEnrichPollDeadlineRef.current;
+        if (deadline != null && Date.now() > deadline) return false;
+        return CVE_POLL_WHILE_ENRICH_MS;
+      }
+      return false;
+    },
+    refetchIntervalInBackground: false
+  });
+
+  useEffect(() => {
+    autoEnrichForBduRef.current = null;
+  }, [selectedBdu]);
+
+  useEffect(() => {
+    if (!bduEnrichTargetId || !bduEnrichPosted) return;
+    const d = bduDetailsQuery.data;
+    if (!d?.found) return;
+    if (needsOnDemandBduEnrich(d)) return;
+    bduEnrichPollDeadlineRef.current = null;
+    setBduEnrichPosted(false);
+    setBduEnrichTargetId(null);
+    setBduEnrichStalled(false);
+  }, [bduDetailsQuery.data, bduEnrichTargetId, bduEnrichPosted]);
+
+  useEffect(() => {
+    if (!bduEnrichPosted || bduEnrichTargetId == null) return;
+    const tick = () => {
+      const deadline = bduEnrichPollDeadlineRef.current;
+      if (deadline != null && Date.now() > deadline) {
+        bduEnrichPollDeadlineRef.current = null;
+        setBduEnrichPosted(false);
+        setBduEnrichTargetId(null);
+        setBduEnrichStalled(true);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [bduEnrichPosted, bduEnrichTargetId]);
+
+  const requestBduEnrich = useCallback(
+    async (bduId: string, force = false) => {
+      setBduEnrichTargetId(bduId);
+      setBduEnrichPosted(true);
+      setBduEnrichStalled(false);
+      bduEnrichPollDeadlineRef.current = Date.now() + ENRICH_UI_WAIT_MS;
+      try {
+        const q = force ? "?force=1" : "";
+        const res = await apiFetch(`/api/bdu/${encodeURIComponent(bduId)}/enrich${q}`, { method: "POST" });
+        if (!res.ok) throw new Error("bdu enrich request failed");
+        await queryClient.invalidateQueries({ queryKey: ["bdu", "detail", bduId] });
+      } catch {
+        bduEnrichPollDeadlineRef.current = null;
+        setBduEnrichPosted(false);
+        setBduEnrichTargetId(null);
+        setBduEnrichStalled(true);
+      }
+    },
+    [queryClient]
+  );
+
+  useEffect(() => {
+    if (!selectedBdu || moduleKey !== "vulns" || !manualEnrichAllowed) return;
+    if (bduDetailsQuery.isLoading) return;
+    const d = bduDetailsQuery.data;
+    if (!d) return;
+    if (!shouldAutoEnrichBduOnOpen(d)) return;
+    if (autoEnrichForBduRef.current === selectedBdu) return;
+    autoEnrichForBduRef.current = selectedBdu;
+    void requestBduEnrich(selectedBdu, false);
+  }, [
+    selectedBdu,
+    moduleKey,
+    manualEnrichAllowed,
+    bduDetailsQuery.data,
+    bduDetailsQuery.isLoading,
+    requestBduEnrich
+  ]);
+
   const refreshOverview = useCallback(async () => {
     await Promise.all([
       summaryQuery.refetch(),
       hotCvesQuery.refetch(),
+      hotBduQuery.refetch(),
+      topPriorityQuery.refetch(),
       vendorsQuery.refetch(),
       queueHealthQuery.refetch()
     ]);
-  }, [summaryQuery, hotCvesQuery, vendorsQuery, queueHealthQuery]);
+  }, [summaryQuery, hotCvesQuery, hotBduQuery, topPriorityQuery, vendorsQuery, queueHealthQuery]);
 
   const overviewRefreshing =
-    summaryQuery.isFetching || hotCvesQuery.isFetching || vendorsQuery.isFetching || queueHealthQuery.isFetching;
+    summaryQuery.isFetching ||
+    hotCvesQuery.isFetching ||
+    hotBduQuery.isFetching ||
+    topPriorityQuery.isFetching ||
+    vendorsQuery.isFetching ||
+    queueHealthQuery.isFetching;
+
+  const topPriorityItems = useMemo(() => {
+    const items = topPriorityQuery.data ?? [];
+    const boost = (it: CveListItem) => {
+      // Perimeter exploitation heuristic: CVSS v3 AV:N + (PR:N, UI:N, AC:L) are strong proxies.
+      let b = 0;
+      const avN = it.cvss_av_network === true;
+      const prN = it.cvss_pr_none === true;
+      const uiN = it.cvss_ui_none === true;
+      const acL = it.cvss_ac_low === true;
+      const edge = it.perimeter_product === true;
+      if (edge) b += 10;
+      if (edge && avN) b += 6;
+      if (avN) b += 12;
+      if (avN && prN) b += 8;
+      if (avN && uiN) b += 6;
+      if (avN && acL) b += 3;
+      if (avN && prN && uiN) b += 10; // "internet RCE style" shape
+
+      if (it.exploit_known) b += 12; // KEV is the strongest "externally relevant" indicator.
+      if (typeof it.epss === "number" && it.epss >= 0.6) b += 8;
+      else if (typeof it.epss === "number" && it.epss >= 0.3) b += 4;
+      if (typeof it.cvss_base === "number" && it.cvss_base >= 9.0) b += 5;
+      if (typeof it.risk_score === "number" && it.risk_score >= 85) b += 4;
+      return b;
+    };
+    return [...items]
+      .map((it) => {
+        const p = computeCvePriority(it);
+        return { ...it, _prio: p.score + boost(it) };
+      })
+      .sort((a, b) => b._prio - a._prio)
+      .slice(0, 20);
+  }, [topPriorityQuery.data]);
 
   const refreshVulns = useCallback(async () => {
     const tasks: Promise<unknown>[] = [listQuery.refetch(), vendorsQuery.refetch()];
     if (selected) tasks.push(detailsQuery.refetch());
+    if (selectedBdu) tasks.push(bduDetailsQuery.refetch());
     await Promise.all(tasks);
-  }, [listQuery, vendorsQuery, selected, detailsQuery]);
+  }, [listQuery, vendorsQuery, selected, selectedBdu, detailsQuery, bduDetailsQuery]);
 
   const vulnsRefreshing =
-    listQuery.isFetching || vendorsQuery.isFetching || (selected != null && detailsQuery.isFetching);
+    listQuery.isFetching ||
+    vendorsQuery.isFetching ||
+    (selected != null && detailsQuery.isFetching) ||
+    (selectedBdu != null && bduDetailsQuery.isFetching);
 
   const requestEnrich = useCallback(async (cveId: string, force = false) => {
     enrichKickoffForCveRef.current = cveId;
@@ -496,6 +783,30 @@ export function Dashboard() {
     return Array.isArray(af) ? af.map(String).filter(Boolean) : [];
   }, [selectedDetails]);
 
+  const selectedBduDetails = bduDetailsQuery.data?.found ? bduDetailsQuery.data : null;
+  const bduAiSummaryPending = Boolean(
+    selectedBduDetails &&
+      manualEnrichAllowed &&
+      bduEnrichPosted &&
+      bduEnrichTargetId === selectedBdu &&
+      needsOnDemandBduEnrich(selectedBduDetails)
+  );
+
+  const bduGraph = useMemo(() => {
+    const ai = selectedBduDetails?.ai as { output_json?: unknown } | null | undefined;
+    const parsed = parseAiOutputJson(ai?.output_json ?? null);
+    const out = parsed?.graph;
+    if (out && typeof out === "object") return out;
+    return null;
+  }, [selectedBduDetails]);
+
+  const bduAttackFlowSteps = useMemo(() => {
+    const ai = selectedBduDetails?.ai as { output_json?: unknown } | null | undefined;
+    const parsed = parseAiOutputJson(ai?.output_json ?? null);
+    const af = parsed?.attackFlow;
+    return Array.isArray(af) ? af.map(String).filter(Boolean) : [];
+  }, [selectedBduDetails]);
+
   const dashboardHighlightSet = useMemo(
     () => new Set(dashboardModals.map((m) => m.cveId)),
     [dashboardModals]
@@ -543,12 +854,60 @@ export function Dashboard() {
     });
   }, []);
 
+  const openDashboardBduModal = useCallback((bduId: string) => {
+    const id = bduId.replace(/^BDU:/i, "").trim();
+    if (!id) return;
+    setDashboardBduModals((prev) => {
+      const dup = prev.find((m) => m.bduId === id);
+      if (dup) {
+        const maxZ = prev.reduce((a, m) => Math.max(a, m.z), 0);
+        return prev.map((m) => (m.instanceId === dup.instanceId ? { ...m, z: maxZ + 1 } : m));
+      }
+      if (prev.length >= 4) return prev;
+      const maxZ = prev.length === 0 ? 3099 : Math.max(...prev.map((m) => m.z));
+      const i = prev.length;
+      const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
+      const pad = 24;
+      const x = Math.min(48 + (i % 5) * 40, Math.max(16, vw - DASHBOARD_BDU_MODAL_BASE_WIDTH_PX - pad));
+      const y = 56 + (i % 5) * 36;
+      return [
+        ...prev,
+        {
+          instanceId: crypto.randomUUID(),
+          bduId: id,
+          x,
+          y,
+          z: maxZ + 1
+        }
+      ];
+    });
+  }, []);
+
+  const closeDashboardBduModal = useCallback((instanceId: string) => {
+    setDashboardBduModals((prev) => prev.filter((m) => m.instanceId !== instanceId));
+  }, []);
+
+  const moveDashboardBduModal = useCallback((instanceId: string, x: number, y: number) => {
+    setDashboardBduModals((prev) => prev.map((m) => (m.instanceId === instanceId ? { ...m, x, y } : m)));
+  }, []);
+
+  const focusDashboardBduModal = useCallback((instanceId: string) => {
+    setDashboardBduModals((prev) => {
+      const maxZ = prev.reduce((a, m) => Math.max(a, m.z), 0);
+      return prev.map((m) => (m.instanceId === instanceId ? { ...m, z: maxZ + 1 } : m));
+    });
+  }, []);
+
   const switchModule = (next: ModuleKey) => {
     if (moduleKey === "dashboard" && next !== "dashboard") {
       setDashboardModals([]);
     }
     setModuleKey(next);
-    if (next !== "vulns" && next !== "dashboard") setSelected(null);
+    if (next !== "vulns" && next !== "dashboard") {
+      setSelected(null);
+      setSelectedBdu(null);
+    }
+    if (next !== "tasks") setTasksSelectedId(null);
   };
 
   return (
@@ -583,6 +942,18 @@ export function Dashboard() {
           >
             <ShieldAlert className="h-5 w-5" />
           </button>
+            <button
+              onClick={() => switchModule("tasks")}
+              className={cn(
+                "rounded-2xl border p-3 transition",
+                moduleKey === "tasks"
+                  ? "border-accent/40 bg-accent/10"
+                  : "border-border bg-white/60 hover:bg-white dark:bg-black/20 dark:hover:bg-black/30"
+              )}
+              title="Задачник"
+            >
+              <ClipboardList className="h-5 w-5" />
+            </button>
           <button
             onClick={() => switchModule("fstec")}
             className={cn(
@@ -648,6 +1019,12 @@ export function Dashboard() {
                 vendorsLoading={vendorsQuery.isLoading}
                 hotCves={hotCvesQuery.data}
                 hotLoading={hotCvesQuery.isLoading}
+                hotBdu={hotBduQuery.data}
+                hotBduLoading={hotBduQuery.isLoading}
+                onHotBduClick={openDashboardBduModal}
+                topPriorityCves={topPriorityItems}
+                topPriorityLoading={topPriorityQuery.isLoading}
+                onTopPriorityCveClick={openDashboardModal}
                 dashboardHighlightCveIds={dashboardHighlightSet}
                 onHotCveClick={openDashboardModal}
                 onVendorSelect={(v) => {
@@ -672,7 +1049,52 @@ export function Dashboard() {
             </div>
           ) : moduleKey === "vulns" ? (
             <div className="mt-0 grid grid-cols-12 gap-6">
-              <section className="col-span-12 lg:col-span-4">
+              {selectedBdu ? (
+                <section className="col-span-12 space-y-4">
+                  <div className="glass rounded-2xl p-3 sm:p-4">
+                    <BduDetailPanel
+                      bduId={selectedBdu}
+                      data={selectedBduDetails}
+                      loading={bduDetailsQuery.isLoading}
+                      aiPending={bduAiSummaryPending}
+                      aiStalled={bduEnrichStalled}
+                      manualEnrichAllowed={manualEnrichAllowed}
+                      onRequestEnrich={(opts) => void requestBduEnrich(selectedBdu, Boolean(opts?.force))}
+                      onClose={() => setSelectedBdu(null)}
+                      onOpenCve={(cveId) => {
+                        setSelectedBdu(null);
+                        setSelected(cveId);
+                      }}
+                      onOpenTask={(taskId: string) => {
+                        setTasksSelectedId(taskId);
+                        setModuleKey("tasks");
+                      }}
+                    />
+                  </div>
+                  <AttackGraphPanel graph={bduGraph} attackFlow={bduAttackFlowSteps} />
+                </section>
+              ) : null}
+              {selected ? (
+                <section className="col-span-12">
+                  <div className="glass rounded-2xl p-3 sm:p-4">
+                    <CveDetailPanel
+                      data={selectedDetails}
+                      loading={detailsQuery.isLoading}
+                      aiPending={aiSummaryPending}
+                      aiStalled={enrichStalled}
+                      manualEnrichAllowed={manualEnrichAllowed}
+                      onRequestEnrich={selected ? (opts) => void requestEnrich(selected, Boolean(opts?.force)) : undefined}
+                      onClose={() => setSelected(null)}
+                      onOpenTask={(taskId: string) => {
+                        setTasksSelectedId(taskId);
+                        setModuleKey("tasks");
+                      }}
+                    />
+                  </div>
+                </section>
+              ) : null}
+
+              <section className={cn("col-span-12 lg:col-span-4", (selected || selectedBdu) && "hidden")}>
                 <div className="glass overflow-visible rounded-2xl p-4">
                   <div className="mb-1 flex items-start justify-between gap-2">
                     <div className="min-w-0 space-y-0.5">
@@ -793,7 +1215,7 @@ export function Dashboard() {
                       </div>
                     </div>
 
-                    <Tabs.Root value={view} onValueChange={(v) => setView(v as typeof view)}>
+                    <Tabs.Root value={view} onValueChange={(v: string) => setView(v as typeof view)}>
                       <Tabs.List className="mt-2 grid grid-cols-5 gap-2">
                         {[
                           ["critical_v2", "Критичные"],
@@ -907,119 +1329,89 @@ export function Dashboard() {
                   </div>
 
                   <div className="space-y-3">
-                    {visibleItems.map((it) => (
-                      <CveCard
-                        key={it.cve_id}
-                        item={it}
-                        selected={selected === it.cve_id}
-                        onSelect={() => setSelected(it.cve_id)}
-                        triage={triage[it.cve_id]}
-                        showCheckbox={bulkMode}
-                        checked={Boolean(selectedIds[it.cve_id])}
-                        onToggleChecked={(next) =>
-                          setSelectedIds((m) => {
-                            const n = { ...m };
-                            if (next) n[it.cve_id] = true;
-                            else delete n[it.cve_id];
-                            return n;
-                          })
-                        }
-                      />
-                    ))}
-                    {items.length === 0 ? (
-                      <div className="text-sm text-muted">Для этого вида пока нет CVE.</div>
+                    {vulnListEntries.map((entry) =>
+                      entry.kind === "bdu" ? (
+                        <BduCard
+                          key={`bdu-${entry.item.bduId}`}
+                          item={entry.item}
+                          selected={selectedBdu === entry.item.bduId}
+                          onSelect={() => {
+                            setSelected(null);
+                            setSelectedBdu(entry.item.bduId);
+                          }}
+                          triage={triage[bduTriageKey(entry.item.bduId)]}
+                        />
+                      ) : (
+                        <CveCard
+                          key={entry.item.cve_id}
+                          item={entry.item}
+                          selected={selected === entry.item.cve_id}
+                          onSelect={() => {
+                            setSelectedBdu(null);
+                            setSelected(entry.item.cve_id);
+                          }}
+                          triage={triage[entry.item.cve_id]}
+                          showCheckbox={bulkMode}
+                          checked={Boolean(selectedIds[entry.item.cve_id])}
+                          onToggleChecked={(next) =>
+                            setSelectedIds((m) => {
+                              const n = { ...m };
+                              if (next) n[entry.item.cve_id] = true;
+                              else delete n[entry.item.cve_id];
+                              return n;
+                            })
+                          }
+                        />
+                      )
+                    )}
+                    {vulnListEntries.length === 0 ? (
+                      <div className="text-sm text-muted">
+                        {qDebounced.trim() ? "Ничего не найдено." : "Для этого вида пока нет записей."}
+                      </div>
                     ) : null}
                   </div>
                 </div>
               </section>
 
-              <section className="col-span-12 lg:col-span-8">
+              <section className={cn("col-span-12 lg:col-span-8", (selected || selectedBdu) && "hidden")}>
                 <div className="glass rounded-2xl p-5 sm:p-6">
-                  {selected ? (
-                    <Tabs.Root defaultValue="ai">
-                      <Tabs.List className="mb-4 flex flex-wrap gap-2">
-                        <Tabs.Trigger
-                          value="ai"
-                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
-                        >
-                          ИИ‑сводка
-                        </Tabs.Trigger>
-                        <Tabs.Trigger
-                          value="risk"
-                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
-                        >
-                          Риск
-                        </Tabs.Trigger>
-                        <Tabs.Trigger
-                          value="attack"
-                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
-                        >
-                          Граф атаки
-                        </Tabs.Trigger>
-                        <Tabs.Trigger
-                          value="sources"
-                          className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
-                        >
-                          Источники
-                        </Tabs.Trigger>
-                        <div className="ml-auto flex items-center gap-2 text-[11px] text-muted">
-                          <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 font-mono text-fg/85 shadow-sm dark:border-white/10 dark:bg-white/5">
-                            {selected}
-                          </span>
-                          <button
-                            onClick={() => setSelected(null)}
-                            className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-fg/85 hover:bg-slate-200/80 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
-                          >
-                            Закрыть
-                          </button>
-                        </div>
-                      </Tabs.List>
-
-                      <Tabs.Content value="ai">
-                        <AiSummaryPanel
-                          data={selectedDetails}
-                          loading={detailsQuery.isLoading}
-                          aiPending={aiSummaryPending}
-                          aiStalled={enrichStalled}
-                          manualEnrichAllowed={manualEnrichAllowed}
-                          onRequestEnrich={
-                            selected ? (opts) => void requestEnrich(selected, Boolean(opts?.force)) : undefined
-                          }
-                        />
-                      </Tabs.Content>
-                      <Tabs.Content value="risk">
-                        <RiskBreakdownPanel data={selectedDetails} />
-                      </Tabs.Content>
-                      <Tabs.Content value="attack">
-                        <AttackGraphPanel graph={graph} attackFlow={attackFlowSteps} />
-                      </Tabs.Content>
-                      <Tabs.Content value="sources">
-                        <CveSourcesPanel data={selectedDetails} />
-                      </Tabs.Content>
-                    </Tabs.Root>
-                  ) : (
-                    <div>
-                      <div className="text-sm font-medium">Анализ</div>
-                      <div className="mt-2 text-sm text-muted">
-                        Выбери CVE слева — здесь появятся ИИ‑сводка, risk‑разбор и схема атаки.
+                  <div>
+                    <div className="text-sm font-medium">Анализ</div>
+                    <div className="mt-2 text-sm text-muted">
+                      Выбери CVE слева — откроем детальную карточку на весь экран (без прыжков вправо).
+                    </div>
+                    <div className="mt-4 grid grid-cols-2 gap-3 text-[11px]">
+                      <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
+                        <div className="text-muted">Приоритизация</div>
+                        <div className="mt-1 text-fg/85">Сначала приоритет/риск, потом детали и источники</div>
                       </div>
-                      <div className="mt-4 grid grid-cols-2 gap-3 text-[11px]">
-                        <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
-                          <div className="text-muted">Сводка</div>
-                          <div className="mt-1 text-fg/85">Русский текст + remediation/последствия</div>
-                        </div>
-                        <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
-                          <div className="text-muted">Attack graph</div>
-                          <div className="mt-1 text-fg/85">Схема attacker → vector → asset → impact</div>
-                        </div>
+                      <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
+                        <div className="text-muted">Экспорт</div>
+                        <div className="mt-1 text-fg/85">XLSX с картой атаки и ссылками на источники</div>
                       </div>
                     </div>
-                  )}
+                  </div>
                 </div>
               </section>
             </div>
+          ) : moduleKey === "tasks" ? (
+            <div className="glass rounded-2xl p-5 sm:p-6">
+              <VulnTaskPanel
+                vendorsHint={
+                  vendorsQuery.data
+                    ? { vendors: vendorsQuery.data.vendors, products: vendorsQuery.data.products }
+                    : null
+                }
+                onOpenCve={openDashboardModal}
+                selectedTaskId={tasksSelectedId}
+                onSelectTaskId={setTasksSelectedId}
+              />
+            </div>
           ) : moduleKey === "fstec" ? (
-            <FstecNewsPanel onOpenCve={openDashboardModal} />
+            <FstecModulePanel
+              onOpenCve={openDashboardModal}
+              onOpenBdu={openDashboardBduModal}
+            />
           ) : moduleKey === "patches" ? (
             <div className="glass rounded-2xl p-5 sm:p-6">
               <PatchManagementPanel onOpenCve={openDashboardModal} />
@@ -1031,7 +1423,8 @@ export function Dashboard() {
           ) : (
             <div className="glass rounded-2xl p-6">
               <div className="text-sm font-medium">Настройки</div>
-              <div className="mt-4 space-y-6">
+              <div className="mt-4 space-y-8">
+                <IntegrationSettingsPanel />
                 <AppearanceSettings />
                 <SecuritySettings />
               </div>
@@ -1240,6 +1633,19 @@ export function Dashboard() {
         onClose={closeDashboardModal}
         onMove={moveDashboardModal}
         onFocus={focusDashboardModal}
+      />
+
+      <DraggableBduModals
+        modals={dashboardBduModals}
+        manualEnrichAllowed={manualEnrichAllowed}
+        onClose={closeDashboardBduModal}
+        onMove={moveDashboardBduModal}
+        onFocus={focusDashboardBduModal}
+        onOpenCve={openDashboardModal}
+        onOpenTask={(taskId) => {
+          setTasksSelectedId(taskId);
+          setModuleKey("tasks");
+        }}
       />
     </div>
   );

@@ -125,6 +125,8 @@ async function main() {
 
       let startIndex = 0;
       let processedWindow = 0;
+      const maxEmptyRetries = Number(process.env.NVD_EMPTY_PAGE_RETRIES ?? 12);
+      let emptyRetries = 0;
       const t0 = Date.now();
 
       // eslint-disable-next-line no-console
@@ -166,8 +168,26 @@ async function main() {
           totalUpserted += n;
         }
 
+        if (vulnerabilities.length === 0 && startIndex < totalResults) {
+          emptyRetries++;
+          if (emptyRetries > maxEmptyRetries) {
+            throw new Error(
+              `[nvd-backfill] giving up empty page pub=${pubStart}..${pubEnd} startIndex=${startIndex} total=${totalResults}`
+            );
+          }
+          const emptySleepMs = Number(process.env.NVD_EMPTY_PAGE_SLEEP_MS ?? Math.max(PAGE_SLEEP_MS, 6000));
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[nvd-backfill] empty page pub=${pubStart}..${pubEnd} startIndex=${startIndex} total=${totalResults} retry=${emptyRetries}/${maxEmptyRetries} sleep=${emptySleepMs}ms`
+          );
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, emptySleepMs));
+          continue;
+        }
+        emptyRetries = 0;
+
         startIndex += vulnerabilities.length;
-        if (startIndex >= totalResults || vulnerabilities.length === 0) break;
+        if (startIndex >= totalResults) break;
 
         // eslint-disable-next-line no-await-in-loop
         await new Promise((r) => setTimeout(r, PAGE_SLEEP_MS));

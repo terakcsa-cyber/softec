@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
-import { enrichFeedItemsWithLocalBdu } from "@/lib/fstec-feed-enrich";
+import {
+  enrichFeedItemsWithLocalBdu,
+  enrichFeedItemsWithRegistryBdu,
+  syncAllFstecBduPairsToDatabase
+} from "@/lib/fstec-feed-enrich";
 import { parseRssOrAtom } from "@/lib/fstec-rss";
+import { assertSafeHttpUrlForServerSideFetch } from "@/lib/safe-external-url";
 import { looksLikeTelegramChannelPreview, parseTelegramChannelPreviewHtml } from "@/lib/fstec-telegram-preview";
 
 /** По умолчанию — публичная страница Telegram (стабильнее, чем RSSHub с 403). */
@@ -57,17 +62,9 @@ function resolveFeedUrl(): string {
   return raw && raw.length > 0 ? raw : DEFAULT_FSTEC_RSS_URL;
 }
 
-function assertHttpUrl(url: string): URL {
-  let u: URL;
-  try {
-    u = new URL(url);
-  } catch {
-    throw new Error("Invalid URL");
-  }
-  if (u.protocol !== "http:" && u.protocol !== "https:") {
-    throw new Error("Only http(s) URLs are allowed");
-  }
-  return u;
+function fstecFetchTimeoutMs(): number {
+  const n = Number(process.env.FSTEC_FETCH_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 120_000) : 25_000;
 }
 
 const DEFAULT_BROWSER_UA =
@@ -120,9 +117,16 @@ function rssUpstreamErrorMessage(status: number): string {
 async function getFeedFromTelegramPreview(req: Request) {
   const channel = resolveChannel();
   const url = `https://t.me/s/${encodeURIComponent(channel)}`;
+  try {
+    assertSafeHttpUrlForServerSideFetch(url, "rss");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Invalid feed URL";
+    return NextResponse.json({ error: msg }, { status: 500 });
+  }
   const res = await fetch(url, {
     headers: telegramPreviewHeaders(),
-    next: { revalidate: 120 }
+    next: { revalidate: 120 },
+    signal: AbortSignal.timeout(fstecFetchTimeoutMs())
   });
   if (!res.ok) {
     return NextResponse.json(
@@ -143,9 +147,10 @@ async function getFeedFromTelegramPreview(req: Request) {
     );
   }
   const items = parseTelegramChannelPreviewHtml(html);
-  const localBduEnrichment = await enrichFeedItemsWithLocalBdu(items, {
-    authorization: req.headers.get("authorization")
-  });
+  const authHdr = req.headers.get("authorization");
+  const localBduEnrichment = await enrichFeedItemsWithLocalBdu(items, { authorization: authHdr });
+  const registryBduEnrichment = await enrichFeedItemsWithRegistryBdu(items, { authorization: authHdr });
+  await syncAllFstecBduPairsToDatabase(items, req);
   return NextResponse.json({
     items,
     source: {
@@ -153,7 +158,8 @@ async function getFeedFromTelegramPreview(req: Request) {
       fetchedAt: new Date().toISOString(),
       kind: "telegram" as const,
       channel: `@${channel}`,
-      localBduEnrichment
+      localBduEnrichment,
+      registryBduEnrichment
     }
   });
 }
@@ -161,7 +167,7 @@ async function getFeedFromTelegramPreview(req: Request) {
 async function getFeedFromRss(req: Request) {
   const url = resolveFeedUrl();
   try {
-    assertHttpUrl(url);
+    assertSafeHttpUrlForServerSideFetch(url, "rss");
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Invalid URL";
     return NextResponse.json({ error: msg }, { status: 500 });
@@ -169,7 +175,8 @@ async function getFeedFromRss(req: Request) {
 
   const res = await fetch(url, {
     headers: rssRequestHeaders(url),
-    next: { revalidate: 120 }
+    next: { revalidate: 120 },
+    signal: AbortSignal.timeout(fstecFetchTimeoutMs())
   });
   if (!res.ok) {
     return NextResponse.json({ error: rssUpstreamErrorMessage(res.status) }, { status: 502 });
@@ -186,16 +193,18 @@ async function getFeedFromRss(req: Request) {
     );
   }
   const items = parseRssOrAtom(xml);
-  const localBduEnrichment = await enrichFeedItemsWithLocalBdu(items, {
-    authorization: req.headers.get("authorization")
-  });
+  const authHdr = req.headers.get("authorization");
+  const localBduEnrichment = await enrichFeedItemsWithLocalBdu(items, { authorization: authHdr });
+  const registryBduEnrichment = await enrichFeedItemsWithRegistryBdu(items, { authorization: authHdr });
+  await syncAllFstecBduPairsToDatabase(items, req);
   return NextResponse.json({
     items,
     source: {
       url,
       fetchedAt: new Date().toISOString(),
       kind: "rss" as const,
-      localBduEnrichment
+      localBduEnrichment,
+      registryBduEnrichment
     }
   });
 }

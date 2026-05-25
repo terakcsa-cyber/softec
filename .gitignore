@@ -1,9 +1,12 @@
 node_modules
 .DS_Store
 .dev.lock
+.dev-ports.json
+.continue/
 .env
 .env.*
 !.env.example
+!.env.production.example
 dist
 .next
 coverage
@@ -11,6 +14,7 @@ coverage
 *.log
 .pnpm-store
 *.tsbuildinfo
+semgrep-out.json
 
 # local data drops
 data/

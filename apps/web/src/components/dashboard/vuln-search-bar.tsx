@@ -162,7 +162,7 @@ export function VulnSearchBar({
           autoCorrect="off"
           spellCheck={false}
           enterKeyHint="search"
-          placeholder="CVE-2024-…, вендор, продукт, версия, произвольный текст…"
+          placeholder="CVE-2024-…, BDU:2026-…, вендор, продукт, текст…"
           title="Полнотекстовый поиск: id CVE, JSON NVD, индекс вендор/продукт, текст ИИ-обогащения"
           aria-autocomplete="list"
           value={value}

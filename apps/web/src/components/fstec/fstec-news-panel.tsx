@@ -12,6 +12,8 @@ import { cn } from "../ui/cn";
 export type FstecNewsPanelProps = {
   /** Та же перетаскиваемая карточка CVE, что и по клику на «горячие» CVE за 24ч на дашборде. */
   onOpenCve?: (cveId: string) => void;
+  /** Полная карточка BDU в модуле «Уязвимости» (как CVE). */
+  onOpenBdu?: (bduId: string) => void;
 };
 
 type FeedResponse = {
@@ -39,7 +41,7 @@ function fmtPubDate(isoOrRfc: string | null): string {
   });
 }
 
-export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
+export function FstecNewsPanel({ onOpenCve, onOpenBdu }: FstecNewsPanelProps) {
   const [toast, setToast] = useState<{ title: string; body?: string } | null>(null);
   const toastTimer = useRef<number | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -155,8 +157,8 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
             Канал <span className="text-fg/80">@bdufstecru</span> (БДУ ФСТЭК). Лента с{" "}
             <span className="text-fg/80">t.me/s/…</span>. Если в тексте есть{" "}
             <span className="font-mono text-[10px] text-fg/85">BDU:…</span> и{" "}
-            <span className="font-mono text-[10px] text-fg/85">CVE-…</span>, а CVE уже в вашей базе — покажем связку;
-            по кнопке откроется та же плавающая карточка CVE, что на дашборде для «за 24 часа».
+            <span className="font-mono text-[10px] text-fg/85">CVE-…</span> — связка с CVE в базе или отдельная карточка из реестра БДУ
+            (полная XML-выгрузка ФСТЭК). CVE в базе открывается плавающей карточкой, как на дашборде.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -280,6 +282,34 @@ export function FstecNewsPanel({ onOpenCve }: FstecNewsPanelProps) {
                 <p className="mt-2 line-clamp-6 whitespace-pre-wrap text-[13px] leading-relaxed text-fg/80">
                   {item.descriptionText}
                 </p>
+              ) : null}
+              {item.registryBduLinks && item.registryBduLinks.length > 0 ? (
+                <div className="mt-3 flex flex-col gap-2">
+                  {item.registryBduLinks.map((l) => (
+                    <div
+                      key={l.bduId}
+                      className="flex w-full min-w-0 flex-col gap-2 rounded-xl border border-amber-200/60 bg-amber-50/80 px-2.5 py-2 text-[11px] dark:border-amber-500/25 dark:bg-amber-950/20 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="min-w-0">
+                        <span className="font-mono text-fg/95">BDU:{l.bduId}</span>
+                        <span className="ml-2 text-muted">{l.name}</span>
+                      </div>
+                      {onOpenBdu ? (
+                        <button
+                          type="button"
+                          onClick={() => onOpenBdu(l.bduId)}
+                          className={cn(
+                            "inline-flex w-full shrink-0 items-center justify-center gap-1 rounded-lg border border-accent/40 bg-white px-2.5 py-1.5 text-[10px] font-medium uppercase tracking-wide text-accent shadow-sm sm:w-auto dark:bg-black/25 dark:shadow-none",
+                            "hover:bg-accent/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                          )}
+                        >
+                          Карточка BDU
+                          <ArrowRight className="h-3 w-3" aria-hidden />
+                        </button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
               ) : null}
               {item.localBduLinks && item.localBduLinks.length > 0 ? (
                 <div className="mt-3 flex flex-wrap gap-2">

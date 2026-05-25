@@ -17,6 +17,29 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS audit_log_ts_idx ON audit_log (ts DESC);
 CREATE INDEX IF NOT EXISTS audit_log_action_idx ON audit_log (action);
 
+CREATE TABLE IF NOT EXISTS app_integration_settings (
+  key TEXT PRIMARY KEY,
+  value JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS mpvm_asset (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  external_id TEXT NOT NULL,
+  hostname TEXT,
+  ip_address TEXT,
+  os_name TEXT,
+  os_version TEXT,
+  display_name TEXT NOT NULL,
+  raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_synced_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (external_id)
+);
+
+CREATE INDEX IF NOT EXISTS mpvm_asset_last_synced_idx ON mpvm_asset (last_synced_at DESC);
+CREATE INDEX IF NOT EXISTS mpvm_asset_ip_idx ON mpvm_asset (ip_address) WHERE ip_address IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS cve (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   cve_id TEXT UNIQUE NOT NULL,

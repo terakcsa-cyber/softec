@@ -31,8 +31,22 @@
 ### Дашборд и CVE
 
 - Сводка по платформе, «свежесть» источников, горячие CVE, вендоры.
-- Список уязвимостей с фильтрами, карточка CVE, по необходимости **on‑demand enrich**.
+- Список уязвимостей с фильтрами, **полноэкранная карточка CVE** с вкладками («Общая», «Уязвимые продукты», «Исправления», «Источники»).
+- **Приоритизация “bank‑grade”**: локальный скоринг и объяснения (CVSS, EPSS, KEV, сигналы эксплуатации), отдельный **Perimeter‑score** (сеть/вектор + vendor/product эвристики).
+- Блок «Угрозы за 24 часа» с динамическими категориями (All/KEV/CVSS≥9/EPSS≥0.5), сортировкой и корректной раскраской карточек по наиболее сильному сигналу.
+- **Экспорт в XLSX** (для CVE): комплексный анализ, источники, риск‑разбор и attack‑map/граф (формируется сервером и скачивается из UI с `Authorization`).
 - Интеграции: **NVD**, **CISA KEV**, **EPSS**, **RSS/Atom** бюллетеней вендоров (в т.ч. русскоязычные источники по умолчанию).
+
+### Задачник по уязвимостям (Vulnerability Task Tracker)
+
+Модуль для небольшого круга ответственных (1–2 пользователя), чтобы **вести кампании по вендору/продукту** и не терять контекст по обработке CVE.
+
+- **Задача может содержать несколько CVE** (many‑to‑many).
+- Статусы: `new`, `in_progress`, `closed`.
+- Хранение решений и артефактов: контекст, план, заметки, **evidence** для проверки и закрытия.
+- **Audit trail**: события изменений (кто/что/когда).
+- **TaskScore**: серверная агрегация срочности по CVE (priority/perimeter/risk/EPSS/KEV) + мультипликатор по статусу, с объясняющими причинами.
+- Интеграция с карточкой CVE: видно количество открытых задач, можно быстро **создать задачу из CVE** или **добавить CVE в существующую** через поиск, с открытием задачи в модуле.
 
 ### Patch management
 
@@ -76,6 +90,13 @@
 - Очередь **`ai.asv-triage`** — структурированный **триаж находки** (запрос из UI/API, результат в `asv_ai_note` / связанных сущностях по реализации).
 - Очередь **`ai.asv-priority`** — **приоритизация issue**, связанных с ASV.
 
+**Ручная валидация находок через Metasploit**:
+
+- В UI ASV у каждой находки доступен «Metasploit помощник»: генерация команд + **ручной запуск проверки**.
+- При ручном запуске создаётся `asv_msf_run`, а `apps/ingest` поднимает ephemeral контейнер `metasploitframework/metasploit-framework` и выполняет `msfconsole -q -r /work/run.rc`.
+- По умолчанию используется режим **safe** (action `check`/`run`/`search`). Режим **exploit** доступен только при явном подтверждении рисков в UI и серверной валидации.
+- Сохраняются артефакты: `msf.rc`, `msf.stdout`, `msf.stderr`, `msf.meta`, а также события (audit trail) по run’у.
+
 **Очереди RabbitMQ (основные)**:
 
 | Очередь | Потребитель | Назначение |
@@ -84,8 +105,11 @@
 | `ai.enrich` | `apps/ai` | LLM‑обогащение CVE |
 | `ai.asv-triage` | `apps/ai` | Триаж находки ASV |
 | `ai.asv-priority` | `apps/ai` | Приоритет issue |
+| `asv.msf` | `apps/ingest` | Ручной запуск Metasploit‑валидации находки |
 
 Для каждой очереди объявляются **DLQ** (`dlq.*`) и привязка к exchange `vuln.dlx`.
+
+**Важно про DLQ**: если в дашборде «Очереди» вы видите, например, `dlq.ai.enrich > 0`, это означает, что часть задач enrich была **отклонена (`rejected`)** воркером и больше не будет обработана автоматически. Обычно это связано с недоступностью/ошибками LLM или проблемами валидации. В UI можно безопасно выполнить **Retry** (вернуть сообщения в основную очередь) после устранения причины.
 
 **REST API ASV** (базовый префикс `/api/asv` — см. `apps/api/src/routes/asv.controller.ts`):
 
@@ -107,7 +131,7 @@
 - **CISA KEV** — каталог известных эксплуатируемых CVE.
 - **EPSS** — ежедневный CSV.gz, пересчёт скоринга через очереди.
 - **Vendor advisories** — настраиваемый список RSS/Atom (или встроенный набор источников).
-- **ФСТЭК BDU** — парсинг Telegram‑ленты или RSS (переменные `FSTEC_*`).
+- **ФСТЭК BDU** — Telegram/RSS (`FSTEC_*`) + официальная выгрузка `vulxml.zip` с bdu.fstec.ru в `bdu_vuln` (`BDU_*`, ingest); BDU приклеивается к CVE или отдельной карточкой.
 - **Postgres** — основное хранилище.
 - **Redis** — кэш enrich, вспомогательные ключи.
 - **RabbitMQ** — события и воркеры.
@@ -212,16 +236,16 @@ rm -f .dev.lock
 
 ---
 
-## Запуск «всё в Docker» (демо)
+## Production deploy через Docker Compose
 
-Подходит для быстрого поднятия стенда (см. `infra/docker-compose.full.yml`):
+Для переноса на Linux-сервер используйте production compose:
 
 ```bash
-cp .env.example .env
-docker compose -f infra/docker-compose.full.yml up --build
+cp .env.production.example .env.production
+docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d --build
 ```
 
-Типичные порты (см. compose‑файл): web **3000**, API **4000**.
+Наружу публикуется только web (`WEB_PUBLISHED_PORT`, по умолчанию **3000**); API и зависимости остаются внутри Docker network. Подробная инструкция: `docs/deploy-linux-docker.md`.
 
 ---
 
@@ -275,7 +299,15 @@ docker compose -f infra/docker-compose.full.yml up --build
 - **Не коммитьте** файл `.env` (он в `.gitignore`). В репозитории только **`.env.example`** без секретов.  
 - Любой утёкший ключ — **немедленно отозвать** и ротировать.  
 - В production: надёжный `JWT_SECRET`, отключение лишних dev‑флагов (`AUTH_ALLOW_REGISTER` и т.д.).  
+- Сервисный **`INTERNAL_API_BEARER`**: в `NODE_ENV=production` не принимается, пока явно не задано **`ALLOW_INTERNAL_API_BEARER=true`** (иначе только JWT).  
+- CORS API в production: **`API_CORS_ORIGIN`** — список origin через запятую; без переменной CORS для браузера отключён (удобно при доступе к API только с того же хоста через reverse proxy).  
 - ASV и Nuclei способны генерировать **активный сетевой трафик** к указанным вами активам — используйте только **разрешённые** цели и профили; теги `intrusive` / `dos` в дополнительных аргументах Nuclei могут навредить инфраструктуре.
+
+### SAST / DAST (сканеры в репозитории)
+
+- Инвентаризация поверхности: `docs/SECURITY_SURFACE.md`.  
+- SAST: `pnpm security:sast` (pnpm audit по воркспейсу + Semgrep; отчёт `semgrep-out.json`, см. `docs/SECURITY_SAST_FINDINGS.md`). Строгий режим Semgrep: `SEMGREP_STRICT=1 pnpm security:sast`.  
+- Локальный DAST smoke + опционально ZAP baseline: `pnpm security:dast`; ZAP: `RUN_ZAP=1 pnpm security:dast` (нужен Docker).
 
 ---
 

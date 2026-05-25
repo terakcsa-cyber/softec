@@ -58,6 +58,9 @@ export class AuthService implements OnApplicationBootstrap {
     const email = process.env.AUTH_BOOTSTRAP_EMAIL?.trim().toLowerCase();
     const password = process.env.AUTH_BOOTSTRAP_PASSWORD;
     if (!email || !password) return;
+    if (password.length < 12) {
+      throw new Error("AUTH_BOOTSTRAP_PASSWORD must be at least 12 characters");
+    }
 
     const n = await this.db.query<{ c: string }>(
       `SELECT COUNT(*)::text AS c FROM auth_user`
@@ -81,6 +84,12 @@ export class AuthService implements OnApplicationBootstrap {
   async register(emailRaw: string, password: string) {
     if (process.env.AUTH_ALLOW_REGISTER?.trim() !== "true") {
       throw new ForbiddenException("Registration is disabled");
+    }
+    if (
+      process.env.NODE_ENV === "production" &&
+      process.env.AUTH_ALLOW_REGISTER_IN_PRODUCTION?.trim().toLowerCase() !== "true"
+    ) {
+      throw new ForbiddenException("Registration is disabled in production");
     }
     const email = emailRaw.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {

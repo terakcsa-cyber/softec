@@ -3,7 +3,6 @@ import { v4 as uuidv4 } from "uuid";
 import type { QueueEventEnvelope } from "@vuln-intel/shared";
 import {
   EnrichCveRequestedEventSchema,
-  getVulnContextLlmConfigFromEnv,
   isLikelyOllamaOpenAiEndpoint,
   isLlmNotConfiguredEnrichment,
   llmEndpointRequiresApiKey,
@@ -23,10 +22,11 @@ function coerceEnrichPayloadSource(payload: unknown): unknown {
   return { ...p, source: "other" };
 }
 
-/** Сообщения из backlog / повтор из DLQ не режем по окну published_at. */
+/** Сообщения из backlog / DLQ / ручного force не режем по окну published_at. */
 function shouldApplyQueuePublishedWindow(idempotencyKey: string): boolean {
   if (idempotencyKey.includes(":dlq:")) return false;
   if (idempotencyKey.startsWith("enrich:backlog:")) return false;
+  if (idempotencyKey.startsWith("enrich:manual:")) return false;
   return true;
 }
 
@@ -62,6 +62,19 @@ class LlmConcurrencyGate {
   }
 }
 
+function parseRetryFromIdempotencyKey(key: string | null | undefined): number {
+  if (!key) return 0;
+  const m = key.match(/:retry:(\d+)$/);
+  if (!m) return 0;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? Math.max(0, Math.min(50, Math.floor(n))) : 0;
+}
+
+function isTransientLlmTransportError(err: unknown): boolean {
+  const s = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  return /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNRESET|socket hang up|fetch failed/i.test(s);
+}
+
 @Injectable()
 export class EnrichmentWorker implements OnModuleInit {
   constructor(
@@ -74,7 +87,7 @@ export class EnrichmentWorker implements OnModuleInit {
   async onModuleInit() {
     await this.queue.ensureTopology();
     const ch = this.queue.channel!;
-    const llmCfgEarly = getVulnContextLlmConfigFromEnv();
+    const llmCfgEarly = await this.llm.getEffectiveLlmConfig();
     const defaultLlmParallel = isLikelyOllamaOpenAiEndpoint(llmCfgEarly.endpoint) ? 3 : 12;
     const llmMaxParallelForGate = Math.max(1, Number(process.env.LLM_MAX_PARALLEL ?? defaultLlmParallel));
     const llmGate = new LlmConcurrencyGate(llmMaxParallelForGate);
@@ -104,20 +117,28 @@ export class EnrichmentWorker implements OnModuleInit {
           maxAgeHours > 0 &&
           shouldApplyQueuePublishedWindow(env.idempotencyKey)
         ) {
-          const pub = await this.db.query<{ published_at: Date | null }>(
-            `SELECT published_at FROM cve WHERE cve_id = $1`,
+          const pub = await this.db.query<{ published_at: Date | null; raw: unknown }>(
+            `SELECT published_at, raw FROM cve WHERE cve_id = $1`,
             [payload.cveId]
           );
-          const publishedAt = pub.rows[0]?.published_at ?? null;
-          if (!publishedAt) {
+          const row = pub.rows[0];
+          const publishedAt =
+            row?.published_at ??
+            (row?.raw &&
+            typeof row.raw === "object" &&
+            !Array.isArray(row.raw) &&
+            typeof (row.raw as Record<string, unknown>).published === "string"
+              ? new Date(String((row.raw as Record<string, unknown>).published))
+              : null);
+          if (!publishedAt || Number.isNaN(publishedAt.getTime())) {
             // eslint-disable-next-line no-console
             console.log(
-              `[ai:enrich] skip queue job (no published_at in DB) cve=${payload.cveId} key=${env.idempotencyKey}`
+              `[ai:enrich] skip queue job (no published date) cve=${payload.cveId} key=${env.idempotencyKey}`
             );
             this.queue.ack(msg);
             return;
           }
-          const ageMs = Date.now() - new Date(publishedAt).getTime();
+          const ageMs = Date.now() - publishedAt.getTime();
           if (ageMs > maxAgeHours * 60 * 60 * 1000) {
             // eslint-disable-next-line no-console
             console.log(
@@ -248,13 +269,34 @@ export class EnrichmentWorker implements OnModuleInit {
         }
         // eslint-disable-next-line no-console
         console.error("[ai:enrich] failed", err);
-        // On error: reject to DLQ (no requeue) to avoid hot-looping.
+        // Transport errors to LLM are usually transient; retry with backoff instead of DLQ.
+        if (env?.type === QueueEventType.EnrichCveRequested && isTransientLlmTransportError(err)) {
+          const retry = parseRetryFromIdempotencyKey(env.idempotencyKey);
+          const maxRetries = Math.max(0, Math.min(12, Number(process.env.AI_ENRICH_MAX_RETRIES ?? 8)));
+          if (retry < maxRetries) {
+            const delayMs = Math.min(300_000, 5_000 * Math.pow(2, retry)); // 5s,10s,20s,... max 5m
+            // eslint-disable-next-line no-console
+            console.warn(`[ai:enrich] transient LLM error; retrying in ${delayMs}ms key=${env.idempotencyKey} retry=${retry + 1}/${maxRetries}`);
+            await new Promise((r) => setTimeout(r, delayMs));
+            const nextEnv: QueueEventEnvelope = {
+              ...env,
+              id: uuidv4(),
+              ts: new Date().toISOString(),
+              producer: { service: "ai", version: "0.0.1" },
+              idempotencyKey: `${env.idempotencyKey}:retry:${retry + 1}`
+            };
+            this.queue.publish("vuln.events", "vuln.enrich.requested.v1", nextEnv);
+            this.queue.ack(msg);
+            return;
+          }
+        }
+        // Non-transient errors: reject to DLQ (no requeue) to avoid hot-looping.
         this.queue.nack(msg, false);
       }
     });
 
     const pref = Math.max(1, Number(process.env.AI_ENRICH_PREFETCH ?? 10));
-    const cfg = getVulnContextLlmConfigFromEnv();
+    const cfg = await this.llm.getEffectiveLlmConfig();
     const needsKey = llmEndpointRequiresApiKey(cfg.endpoint);
     const keyOk = Boolean(cfg.apiKey?.length);
     // eslint-disable-next-line no-console
@@ -266,6 +308,13 @@ export class EnrichmentWorker implements OnModuleInit {
     console.log(
       `[ai:enrich] worker ready queue=ai.enrich prefetch=${pref} llmMaxParallel=${llmMaxParallelForGate} redisEnrichCache=${redisCache} queuePublishedMaxAgeHours=${queueMaxAgeHours <= 0 ? "off" : String(queueMaxAgeHours)} llmEndpoint=${cfg.endpoint} model=${cfg.model} needsApiKey=${needsKey} hasKey=${keyOk}`
     );
+    if (needsKey && !keyOk) {
+      // eslint-disable-next-line no-console
+      console.error(
+        "[ai:enrich] LLM: для выбранного endpoint нужен API-ключ (LLM_API_KEY / XAI_API_KEY / DASHSCOPE_API_KEY). " +
+          "Иначе в БД попадёт только заглушка «LLM не настроен». Для Ollama: LLM_ENDPOINT=http://<host>:11434/v1/chat/completions (127.0.0.1 или LAN IP) и LLM_MODEL=… (ключ не нужен)."
+      );
+    }
   }
 }
 

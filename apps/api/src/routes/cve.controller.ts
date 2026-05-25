@@ -9,7 +9,16 @@ import {
   Post,
   Query
 } from "@nestjs/common";
-import { isLlmEnrichFailureRow, isLlmNotConfiguredEnrichment } from "@vuln-intel/shared";
+import {
+  CVE_HOT_WINDOW_HOURS,
+  SQL_EFFECTIVE_PUBLISHED_AT,
+  extractNvdPublishedIso,
+  isLlmEnrichFailureRow,
+  isLlmNotConfiguredEnrichment,
+  isPublishedWithinHours,
+  parseNvdTimestampIso
+} from "@vuln-intel/shared";
+import { escapePgLikePattern } from "../pg-like.util.js";
 import { CveEnrichRunnerService } from "../services/cve-enrich-runner.service.js";
 import { DbService } from "../services/db.service.js";
 
@@ -62,10 +71,33 @@ function pickRowForEnrichCacheHit(rows: EnrichmentAiQueryRow[]): EnrichmentAiQue
   );
 }
 
-/** Экранирование для `LIKE ... ESCAPE '\\'` (совпадает с литеральным `strpos` по `%`, `_`, `\`). */
-function escapePgLikePattern(s: string): string {
-  return s.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+/**
+ * Разбор строки поиска: подстрока для ILIKE-подобного поиска, явные CVE и номера БДУ (для `ANY` по индексам).
+ */
+function parseVulnListSearch(qRaw: string): { qLowerForNeedle: string; bduIds: string[]; cveIds: string[] } {
+  const qTrim = qRaw.trim();
+  const qLower = qTrim.toLowerCase();
+  const norm = qLower.replace(/бду/g, "bdu");
+
+  const bduIds = new Set<string>();
+  for (const m of norm.matchAll(/bdu\s*:\s*(\d{4}-\d+)/gi)) {
+    const id = m[1];
+    if (id) bduIds.add(id);
+  }
+  const bare = norm.match(/^\s*(\d{4}-\d+)\s*$/);
+  if (bare?.[1] && !/^\s*cve-/i.test(qTrim)) bduIds.add(bare[1]);
+
+  const cveIds = [
+    ...new Set(
+      [...qRaw.matchAll(/\bCVE-\d{4}-\d+\b/gi)].map((m) => String(m[0]).trim().toUpperCase())
+    )
+  ];
+
+  return { qLowerForNeedle: norm, bduIds: [...bduIds], cveIds };
 }
+
+/** Агрегат номеров БДУ (без префикса «BDU:») для списка CVE. */
+const SQL_BDU_IDS_FOR_CVE_LIST = `(SELECT array_agg(l.bdu_id ORDER BY l.bdu_id) FROM cve_bdu_link l WHERE l.cve_id = c.cve_id) AS bdu_ids`;
 
 @Controller("cves")
 export class CveController {
@@ -111,6 +143,8 @@ export class CveController {
     const kevOnly = kevOnlyRaw === "1" || kevOnlyRaw === "true";
     const vendor = vendorRaw?.trim() ? vendorRaw.trim().toLowerCase() : null;
     const product = productRaw?.trim() ? productRaw.trim().toLowerCase() : null;
+    /** Полнотекстовый поиск: не сужать выборку пресетом вкладки (иначе по BDU/CVE не находятся «тихие» записи). */
+    const qPresent = Boolean(q?.trim());
 
     const rankExpr = `(COALESCE(c.cvss_base, 0) * 0.7 + COALESCE(es.score, 0) * 10 * 0.3)`;
     // Critical v2: deterministic ordering, no "empty" records.
@@ -121,7 +155,12 @@ export class CveController {
                                       GREATEST(COALESCE(es.score, 0) * 100, COALESCE(c.cvss_base, 0) * 10) DESC,
                                       c.published_at DESC NULLS LAST,
                                       c.cve_id ASC`;
+    const isLast24hView =
+      view === "last24h" || view === "last_24h" || view === "last-24h";
     const orderBy = (() => {
+      if (isLast24hView) {
+        return `ORDER BY ${SQL_EFFECTIVE_PUBLISHED_AT} DESC NULLS LAST, c.cve_id ASC`;
+      }
       if (sort === "risk") return `ORDER BY rs.score DESC NULLS LAST, c.published_at DESC NULLS LAST`;
       if (sort === "epss") return `ORDER BY es.score DESC NULLS LAST, c.published_at DESC NULLS LAST`;
       if (sort === "cvss") return `ORDER BY c.cvss_base DESC NULLS LAST, c.published_at DESC NULLS LAST`;
@@ -139,31 +178,38 @@ export class CveController {
     };
 
     if (kevOnly) filters.push(`k.cve_id IS NOT NULL`);
-    if (Number.isFinite(minCvss)) add(`c.cvss_base >= $1`, minCvss);
-    if (Number.isFinite(minEpss)) add(`es.score >= $1`, minEpss);
+    if (!qPresent) {
+      if (Number.isFinite(minCvss)) add(`c.cvss_base >= $1`, minCvss);
+      if (Number.isFinite(minEpss)) add(`es.score >= $1`, minEpss);
+    }
 
-    if (view === "kev") filters.push(`k.cve_id IS NOT NULL`);
-    if (view === "last24h" || view === "last_24h" || view === "last-24h") {
-      // "New" vulnerabilities by publish time (fast triage view).
-      filters.push(`c.published_at >= now() - interval '24 hours'`);
-    }
-    if (view === "critical") {
-      filters.push(
-        `(k.cve_id IS NOT NULL OR c.cvss_base >= 9.0 OR es.score >= 0.5) AND (k.cve_id IS NOT NULL OR c.cvss_base IS NOT NULL OR es.score IS NOT NULL)`
-      );
-    }
-    if (view === "critical_v2" || view === "critical-v2" || view === "criticalv2") {
-      // Default thresholds: epss >= 0.2 OR cvss >= 8.0 OR KEV
-      // Also allow overriding via minCvss/minEpss/kevOnly query params.
-      const epssMin = Number.isFinite(minEpss) ? (minEpss as number) : 0.2;
-      const cvssMin = Number.isFinite(minCvss) ? (minCvss as number) : 8.0;
-      params.push(epssMin);
-      const epssIdx = params.length;
-      params.push(cvssMin);
-      const cvssIdx = params.length;
-      filters.push(
-        `((k.cve_id IS NOT NULL) OR (es.score IS NOT NULL AND es.score >= $${epssIdx}) OR (c.cvss_base IS NOT NULL AND c.cvss_base >= $${cvssIdx}))`
-      );
+    if (!qPresent) {
+      if (view === "kev") filters.push(`k.cve_id IS NOT NULL`);
+      if (isLast24hView) {
+        // Только реальная дата публикации в NVD (колонка + паспорт raw), не lastModified и не время ingest.
+        filters.push(`${SQL_EFFECTIVE_PUBLISHED_AT} IS NOT NULL`);
+        filters.push(
+          `${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '${CVE_HOT_WINDOW_HOURS} hours'`
+        );
+      }
+      if (view === "critical") {
+        filters.push(
+          `(k.cve_id IS NOT NULL OR c.cvss_base >= 9.0 OR es.score >= 0.5) AND (k.cve_id IS NOT NULL OR c.cvss_base IS NOT NULL OR es.score IS NOT NULL)`
+        );
+      }
+      if (view === "critical_v2" || view === "critical-v2" || view === "criticalv2") {
+        // Default thresholds: epss >= 0.2 OR cvss >= 8.0 OR KEV
+        // Also allow overriding via minCvss/minEpss/kevOnly query params.
+        const epssMin = Number.isFinite(minEpss) ? (minEpss as number) : 0.2;
+        const cvssMin = Number.isFinite(minCvss) ? (minCvss as number) : 8.0;
+        params.push(epssMin);
+        const epssIdx = params.length;
+        params.push(cvssMin);
+        const cvssIdx = params.length;
+        filters.push(
+          `((k.cve_id IS NOT NULL) OR (es.score IS NOT NULL AND es.score >= $${epssIdx}) OR (c.cvss_base IS NOT NULL AND c.cvss_base >= $${cvssIdx}))`
+        );
+      }
     }
 
     const vendorJoin = vendor || product ? `JOIN cve_vendor_product vp ON vp.cve_id = c.cve_id` : ``;
@@ -180,14 +226,43 @@ export class CveController {
 
     if (q && q.trim().length > 0) {
       const qTrim = q.trim();
-      const qLower = qTrim.toLowerCase();
+      const { qLowerForNeedle, bduIds, cveIds } = parseVulnListSearch(qTrim);
       const isExactCveQuery = /^cve-\d{4}-\d{4,}$/i.test(qTrim);
-      /** Подстрока: `LIKE` + ESCAPE, чтобы работали GIN (pg_trgm); литералы как у `strpos`. */
-      const needleLike = escapePgLikePattern(qLower);
+      const needleLiteral = qLowerForNeedle;
+      const needleLike = escapePgLikePattern(qLowerForNeedle);
+      params.push(needleLiteral);
+      const literalIdx = params.length;
       params.push(needleLike);
       const needleIdx = params.length;
-      const exactCond = `lower(c.cve_id) = $${needleIdx}::text`;
+      const exactCond = `lower(c.cve_id) = $${literalIdx}::text`;
       const likeSuffix = `LIKE '%' || $${needleIdx}::text || '%' ESCAPE E'\\\\'`;
+
+      let cveAnyIdx = 0;
+      let bduAnyIdx = 0;
+      if (cveIds.length > 0) {
+        params.push(cveIds);
+        cveAnyIdx = params.length;
+      }
+      if (bduIds.length > 0) {
+        params.push(bduIds);
+        bduAnyIdx = params.length;
+      }
+
+      const exactParts: string[] = [`(${exactCond})`];
+      if (cveAnyIdx > 0) exactParts.push(`c.cve_id = ANY($${cveAnyIdx}::text[])`);
+      if (bduAnyIdx > 0) {
+        exactParts.push(
+          `EXISTS (SELECT 1 FROM cve_bdu_link cb_em WHERE cb_em.cve_id = c.cve_id AND cb_em.bdu_id = ANY($${bduAnyIdx}::text[]))`
+        );
+      }
+      const exactMatchExpr = `(${exactParts.join(" OR ")})`;
+
+      const idTokenSql =
+        (cveAnyIdx > 0 ? ` OR c.cve_id = ANY($${cveAnyIdx}::text[])` : "") +
+        (bduAnyIdx > 0
+          ? ` OR EXISTS (SELECT 1 FROM cve_bdu_link cb_any WHERE cb_any.cve_id = c.cve_id AND cb_any.bdu_id = ANY($${bduAnyIdx}::text[]))`
+          : "");
+
       const contextMatch = `(
         lower(c.cve_id) ${likeSuffix}
         OR lower(c.raw::text) ${likeSuffix}
@@ -209,6 +284,23 @@ export class CveController {
               OR lower(ea_q.output_json::text) ${likeSuffix}
             )
         )
+        OR EXISTS (
+          SELECT 1 FROM cve_bdu_link cb_q
+          WHERE cb_q.cve_id = c.cve_id
+            AND (
+              lower(cb_q.bdu_id) ${likeSuffix}
+              OR lower(('bdu:' || cb_q.bdu_id)::text) ${likeSuffix}
+            )
+        )
+        OR EXISTS (
+          SELECT 1 FROM risk_score rs_q
+          WHERE rs_q.cve_id = c.cve_id
+            AND (
+              lower(rs_q.factors::text) ${likeSuffix}
+              OR lower(rs_q.model_version) ${likeSuffix}
+            )
+        )
+        ${idTokenSql}
       )`;
       const whereFiltered = [contextMatch, ...filters].join(" AND ");
 
@@ -228,6 +320,64 @@ export class CveController {
                 rs.score AS risk_score,
                 es.score AS epss,
                 c.cvss_base AS cvss_base,
+                vp1.vendor AS vp_vendor,
+                vp1.product AS vp_product,
+                NULLIF(substring(regexp_replace(COALESCE(
+                  c.raw->'descriptions'->0->>'value',
+                  c.raw->'cve'->'descriptions'->0->>'value',
+                  c.raw->'cve'->'description'->'description_data'->0->>'value',
+                  c.raw->'description'->'description_data'->0->>'value',
+                  ''
+                ), E'\\s+', ' ', 'g') for 220), '') AS short_description,
+                NULLIF(substring(regexp_replace(COALESCE(
+                  ea1.output_json->>'title',
+                  ea1.output_json->>'summary',
+                  ea1.output_text,
+                  ''
+                ), E'\\s+', ' ', 'g') for 220), '') AS short_ru,
+                COALESCE((
+                  SELECT count(*)::int FROM vuln_task_cve l
+                  JOIN vuln_task t ON t.id = l.task_id
+                  WHERE l.cve_id = c.cve_id AND t.status <> 'closed'
+                ), 0) AS task_open_count,
+                (COALESCE(
+                  c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'attackVector',
+                  c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'attackVector',
+                  c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'attackVector'
+                ) = 'NETWORK') AS cvss_av_network,
+                (COALESCE(
+                  c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'privilegesRequired',
+                  c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'privilegesRequired',
+                  c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'privilegesRequired'
+                ) = 'NONE') AS cvss_pr_none,
+                (COALESCE(
+                  c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'userInteraction',
+                  c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'userInteraction',
+                  c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'userInteraction'
+                ) = 'NONE') AS cvss_ui_none,
+                (COALESCE(
+                  c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'attackComplexity',
+                  c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'attackComplexity',
+                  c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'attackComplexity'
+                ) = 'LOW') AS cvss_ac_low,
+                EXISTS (
+                  SELECT 1 FROM cve_vendor_product vp_p
+                  WHERE vp_p.cve_id = c.cve_id
+                    AND (
+                      vp_p.vendor_key IN (
+                        'microsoft','apache','nginx','openssl','openbsd','openssh','citrix','f5','paloaltonetworks',
+                        'fortinet','checkpoint','juniper','cisco','vmware','okta','redhat','oracle','ibm','sap'
+                      )
+                      OR vp_p.product_key_norm IN (
+                        'iis','http_server','nginx','openssl','openssh','netscaler','adc','big-ip','pan-os','fortios',
+                        'fortigate','pulse_connect_secure','globalprotect','vpn','sslvpn','gateway','reverse_proxy',
+                        'load_balancer','waf','firewall','identity','sso','keycloak','tomcat','jetty','spring'
+                      )
+                      OR lower(vp_p.product_key_norm) LIKE '%vpn%'
+                      OR lower(vp_p.product_key_norm) LIKE '%proxy%'
+                      OR lower(vp_p.product_key_norm) LIKE '%gateway%'
+                    )
+                ) AS perimeter_product,
                 (k.cve_id IS NOT NULL) AS exploit_known,
                 EXISTS (
                   SELECT 1 FROM enrichment_ai ea
@@ -245,10 +395,30 @@ export class CveController {
                   CASE WHEN c.cvss_base IS NOT NULL AND c.cvss_base >= 9.0 THEN 'CVSS>=9.0' ELSE NULL END,
                   CASE WHEN c.cvss_base IS NOT NULL AND c.cvss_base >= 8.0 AND c.cvss_base < 9.0 THEN 'CVSS>=8.0' ELSE NULL END
                 ], NULL) AS critical_reasons,
-                (${exactCond}) AS exact_match,
-                similarity(lower(c.cve_id), $${needleIdx}::text) AS cve_sim
+                ${SQL_BDU_IDS_FOR_CVE_LIST},
+                ${exactMatchExpr} AS exact_match,
+                similarity(lower(c.cve_id), $${literalIdx}::text) AS cve_sim
            FROM cve c
       ${vendorJoin}
+      LEFT JOIN LATERAL (
+        SELECT vp.vendor, vp.product
+          FROM cve_vendor_product vp
+         WHERE vp.cve_id = c.cve_id
+      ORDER BY vp.vendor_key ASC, vp.product_key_norm ASC
+         LIMIT 1
+      ) vp1 ON TRUE
+      LEFT JOIN LATERAL (
+        SELECT ea.output_json, ea.output_text
+          FROM enrichment_ai ea
+         WHERE ea.cve_id = c.cve_id
+           AND (ea.output_json->>'_enrich_error') IS DISTINCT FROM 'true'
+           AND NOT (
+             COALESCE(ea.output_text, '') = 'LLM not configured.'
+             OR COALESCE(ea.output_json->>'summary', '') LIKE 'LLM not configured%'
+           )
+      ORDER BY ea.created_at DESC
+         LIMIT 1
+      ) ea1 ON TRUE
       LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
       LEFT JOIN epss_score es ON es.cve_id = c.cve_id
       LEFT JOIN kev k ON k.cve_id = c.cve_id`;
@@ -266,7 +436,10 @@ export class CveController {
             ${baseSelect}
             WHERE NOT (${exactCond}) AND ${whereFiltered}
           )
-          SELECT cve_id, published_at, modified_at, risk_score, epss, cvss_base, exploit_known, ai_ready, critical_reasons
+          SELECT cve_id, published_at, modified_at, risk_score, epss, cvss_base,
+                 vp_vendor, vp_product, short_description, short_ru,
+                 cvss_av_network, cvss_pr_none, cvss_ui_none, cvss_ac_low, perimeter_product,
+                 exploit_known, ai_ready, critical_reasons, bdu_ids
             FROM hits
            ${searchOrderBy}
            LIMIT $${limitIdx}`
@@ -288,6 +461,64 @@ export class CveController {
               rs.score AS risk_score,
               es.score AS epss,
               c.cvss_base AS cvss_base,
+              vp1.vendor AS vp_vendor,
+              vp1.product AS vp_product,
+              NULLIF(substring(regexp_replace(COALESCE(
+                c.raw->'descriptions'->0->>'value',
+                c.raw->'cve'->'descriptions'->0->>'value',
+                c.raw->'cve'->'description'->'description_data'->0->>'value',
+                c.raw->'description'->'description_data'->0->>'value',
+                ''
+              ), E'\\s+', ' ', 'g') for 220), '') AS short_description,
+              NULLIF(substring(regexp_replace(COALESCE(
+                ea1.output_json->>'title',
+                ea1.output_json->>'summary',
+                ea1.output_text,
+                ''
+              ), E'\\s+', ' ', 'g') for 220), '') AS short_ru,
+              COALESCE((
+                SELECT count(*)::int FROM vuln_task_cve l
+                JOIN vuln_task t ON t.id = l.task_id
+                WHERE l.cve_id = c.cve_id AND t.status <> 'closed'
+              ), 0) AS task_open_count,
+              (COALESCE(
+                c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'attackVector',
+                c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'attackVector',
+                c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'attackVector'
+              ) = 'NETWORK') AS cvss_av_network,
+              (COALESCE(
+                c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'privilegesRequired',
+                c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'privilegesRequired',
+                c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'privilegesRequired'
+              ) = 'NONE') AS cvss_pr_none,
+              (COALESCE(
+                c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'userInteraction',
+                c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'userInteraction',
+                c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'userInteraction'
+              ) = 'NONE') AS cvss_ui_none,
+              (COALESCE(
+                c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'attackComplexity',
+                c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'attackComplexity',
+                c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'attackComplexity'
+              ) = 'LOW') AS cvss_ac_low,
+              EXISTS (
+                SELECT 1 FROM cve_vendor_product vp_p
+                WHERE vp_p.cve_id = c.cve_id
+                  AND (
+                    vp_p.vendor_key IN (
+                      'microsoft','apache','nginx','openssl','openbsd','openssh','citrix','f5','paloaltonetworks',
+                      'fortinet','checkpoint','juniper','cisco','vmware','okta','redhat','oracle','ibm','sap'
+                    )
+                    OR vp_p.product_key_norm IN (
+                      'iis','http_server','nginx','openssl','openssh','netscaler','adc','big-ip','pan-os','fortios',
+                      'fortigate','pulse_connect_secure','globalprotect','vpn','sslvpn','gateway','reverse_proxy',
+                      'load_balancer','waf','firewall','identity','sso','keycloak','tomcat','jetty','spring'
+                    )
+                    OR lower(vp_p.product_key_norm) LIKE '%vpn%'
+                    OR lower(vp_p.product_key_norm) LIKE '%proxy%'
+                    OR lower(vp_p.product_key_norm) LIKE '%gateway%'
+                  )
+              ) AS perimeter_product,
               (k.cve_id IS NOT NULL) AS exploit_known,
               EXISTS (
                 SELECT 1 FROM enrichment_ai ea
@@ -304,9 +535,29 @@ export class CveController {
                 CASE WHEN es.score IS NOT NULL AND es.score >= 0.2 AND es.score < 0.5 THEN 'EPSS>=0.20' ELSE NULL END,
                 CASE WHEN c.cvss_base IS NOT NULL AND c.cvss_base >= 9.0 THEN 'CVSS>=9.0' ELSE NULL END,
                 CASE WHEN c.cvss_base IS NOT NULL AND c.cvss_base >= 8.0 AND c.cvss_base < 9.0 THEN 'CVSS>=8.0' ELSE NULL END
-              ], NULL) AS critical_reasons
+              ], NULL) AS critical_reasons,
+              ${SQL_BDU_IDS_FOR_CVE_LIST}
          FROM cve c
    ${vendorJoin}
+    LEFT JOIN LATERAL (
+      SELECT vp.vendor, vp.product
+        FROM cve_vendor_product vp
+       WHERE vp.cve_id = c.cve_id
+    ORDER BY vp.vendor_key ASC, vp.product_key_norm ASC
+       LIMIT 1
+    ) vp1 ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT ea.output_json, ea.output_text
+        FROM enrichment_ai ea
+       WHERE ea.cve_id = c.cve_id
+         AND (ea.output_json->>'_enrich_error') IS DISTINCT FROM 'true'
+         AND NOT (
+           COALESCE(ea.output_text, '') = 'LLM not configured.'
+           OR COALESCE(ea.output_json->>'summary', '') LIKE 'LLM not configured%'
+         )
+    ORDER BY ea.created_at DESC
+       LIMIT 1
+    ) ea1 ON TRUE
     LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
     LEFT JOIN epss_score es ON es.cve_id = c.cve_id
     LEFT JOIN kev k ON k.cve_id = c.cve_id
@@ -331,7 +582,7 @@ export class CveController {
           .filter((id) => /^CVE-\d{4}-\d+$/.test(id))
       )
     ];
-    if (normalized.length > 400) normalized.length = 400;
+    if (normalized.length > 2500) normalized.length = 2500;
     if (normalized.length === 0) return { present: [] as string[] };
 
     const r = await this.db.query<{ cve_id: string }>(
@@ -339,6 +590,50 @@ export class CveController {
       [normalized]
     );
     return { present: r.rows.map((row) => row.cve_id) };
+  }
+
+  /**
+   * Сохраняет пары БДУ↔CVE из ленты ФСТЭК (только если `cve_id` уже есть в `cve`).
+   * Идемпотентно: повторные пары игнорируются.
+   */
+  @Post("bdu-links")
+  @HttpCode(200)
+  async upsertBduLinks(@Body() body: { pairs?: unknown }) {
+    const raw = body?.pairs;
+    const arr = Array.isArray(raw) ? raw : [];
+    const cveRe = /^CVE-\d{4}-\d+$/i;
+    const bduRe = /^\d{4}-\d+$/;
+    const seen = new Set<string>();
+    const pairs: { cveId: string; bduId: string }[] = [];
+    for (const row of arr) {
+      if (pairs.length >= 500) break;
+      if (row == null || typeof row !== "object") continue;
+      const o = row as { cveId?: unknown; bduId?: unknown };
+      const cveId = String(o.cveId ?? "").trim().toUpperCase();
+      const bduId = String(o.bduId ?? "").trim();
+      if (!cveRe.test(cveId) || !bduRe.test(bduId)) continue;
+      const k = `${cveId}|${bduId}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      pairs.push({ cveId, bduId: bduId });
+    }
+    if (pairs.length === 0) return { ok: true, inserted: 0 };
+
+    const valuesSql = pairs.map((_, i) => `($${i * 2 + 1}, $${i * 2 + 2})`).join(", ");
+    const flatParams: string[] = [];
+    for (const p of pairs) {
+      flatParams.push(p.cveId, p.bduId);
+    }
+
+    const ins = await this.db.query(
+      `INSERT INTO cve_bdu_link (cve_id, bdu_id)
+       SELECT v.cve_id, v.bdu_id
+         FROM (VALUES ${valuesSql}) AS v(cve_id, bdu_id)
+         JOIN cve c ON c.cve_id = v.cve_id
+    ON CONFLICT (cve_id, bdu_id) DO NOTHING`,
+      flatParams
+    );
+    return { ok: true, inserted: ins.rowCount ?? 0 };
   }
 
   /** Queue AI enrichment for a CVE (intended when user opens the detail modal). Idempotent per CVE revision unless force=1. */
@@ -349,10 +644,28 @@ export class CveController {
         "On-demand AI enrichment is disabled. Set ALLOW_MANUAL_ENRICH=true (or unset) to enable POST /cves/:id/enrich."
       );
     }
-    const r = await this.db.query(`SELECT 1 FROM cve WHERE cve_id = $1 LIMIT 1`, [cveId]);
+    const r = await this.db.query<{ published_at: Date | null; raw: unknown }>(
+      `SELECT published_at, raw FROM cve WHERE cve_id = $1 LIMIT 1`,
+      [cveId]
+    );
     if ((r.rowCount ?? 0) === 0) throw new NotFoundException("CVE not found");
 
     const forceOn = force === "true" || force === "1";
+    const cveRow = r.rows[0]!;
+    const publishedIso =
+      (cveRow.published_at ? parseNvdTimestampIso(cveRow.published_at.toISOString()) : undefined) ??
+      extractNvdPublishedIso(cveRow.raw);
+    const inHotWindow = isPublishedWithinHours(publishedIso, CVE_HOT_WINDOW_HOURS);
+
+    if (!forceOn && !inHotWindow) {
+      return {
+        ok: true,
+        status: "skipped_outside_hot_window" as const,
+        cveId,
+        publishedAt: publishedIso ?? null,
+        hotWindowHours: CVE_HOT_WINDOW_HOURS
+      };
+    }
 
     const latestAi = await this.db.query<EnrichmentAiQueryRow>(
       `SELECT output_text, output_json, model, prompt_version, created_at
@@ -380,7 +693,8 @@ export class CveController {
               rs.score AS risk_score, rs.factors AS risk_factors, rs.model_version,
               es.score AS epss,
               c.cvss_base AS cvss_base,
-              (k.cve_id IS NOT NULL) AS exploit_known
+              (k.cve_id IS NOT NULL) AS exploit_known,
+              (SELECT array_agg(l.bdu_id ORDER BY l.bdu_id) FROM cve_bdu_link l WHERE l.cve_id = c.cve_id) AS bdu_ids
          FROM cve c
     LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
     LEFT JOIN epss_score es ON es.cve_id = c.cve_id
@@ -408,6 +722,32 @@ export class CveController {
       [cveId]
     );
 
+    const vendorProducts = await this.db.query<{
+      vendor: string | null;
+      product: string | null;
+      source: string | null;
+      cve_updated_at: Date | null;
+    }>(
+      `SELECT vendor, product, source, cve_updated_at
+         FROM cve_vendor_product
+        WHERE cve_id = $1
+     ORDER BY vendor NULLS LAST, product NULLS LAST
+        LIMIT 250`,
+      [cveId]
+    );
+
+    const advisoryMeta = await this.db.query<{
+      total: number;
+      with_cves: number;
+      last_fetched_at: Date | null;
+    }>(
+      `SELECT
+          count(*)::int AS total,
+          count(*) FILTER (WHERE COALESCE(array_length(cve_ids, 1), 0) > 0)::int AS with_cves,
+          max(fetched_at) AS last_fetched_at
+         FROM vendor_advisory`
+    );
+
     const ai = await this.db.query<EnrichmentAiQueryRow>(
       `SELECT model, prompt_version, output_json, output_text, created_at
          FROM enrichment_ai
@@ -432,6 +772,19 @@ export class CveController {
         publishedAt: r.published_at ? new Date(r.published_at).toISOString() : null,
         fetchedAt: new Date(r.fetched_at).toISOString()
       })),
+      vendorProducts: vendorProducts.rows.map((r) => ({
+        vendor: r.vendor,
+        product: r.product,
+        source: r.source,
+        cveUpdatedAt: r.cve_updated_at ? new Date(r.cve_updated_at).toISOString() : null
+      })),
+      vendorAdvisoriesMeta: {
+        total: advisoryMeta.rows[0]?.total ?? 0,
+        withCves: advisoryMeta.rows[0]?.with_cves ?? 0,
+        lastFetchedAt: advisoryMeta.rows[0]?.last_fetched_at
+          ? new Date(advisoryMeta.rows[0].last_fetched_at).toISOString()
+          : null
+      },
       ai: aiPayload
     };
   }

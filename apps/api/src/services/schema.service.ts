@@ -107,6 +107,100 @@ export class SchemaService implements OnModuleInit {
       )`
     );
 
+    /** Связки БДУ ФСТЭК ↔ CVE (накапливаются при обогащении ленты, если CVE уже в `cve`). */
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS cve_bdu_link (
+        cve_id TEXT NOT NULL REFERENCES cve(cve_id) ON DELETE CASCADE,
+        bdu_id TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (cve_id, bdu_id)
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS cve_bdu_link_bdu_idx ON cve_bdu_link (bdu_id)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS bdu_vuln (
+        bdu_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT,
+        software_names TEXT,
+        vendors TEXT,
+        cve_ids TEXT[] NOT NULL DEFAULT '{}',
+        severity TEXT,
+        severity_level INT NOT NULL DEFAULT 0,
+        cvss_score DOUBLE PRECISION,
+        cvss_vector TEXT,
+        identify_date TEXT,
+        publication_date TEXT,
+        last_upd_date TEXT,
+        identify_year INT,
+        solution TEXT,
+        status TEXT,
+        exploit_status TEXT,
+        fix_status TEXT,
+        has_exploit BOOLEAN NOT NULL DEFAULT false,
+        has_fix BOOLEAN NOT NULL DEFAULT false,
+        sources TEXT,
+        fstec_url TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_year_idx ON bdu_vuln (identify_year DESC NULLS LAST)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_cvss_idx ON bdu_vuln (cvss_score DESC NULLS LAST)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_cve_ids_gin ON bdu_vuln USING gin (cve_ids)`);
+    await this.db.query(`DROP INDEX IF EXISTS bdu_vuln_publication_ts_idx`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS enrichment_bdu (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        bdu_id TEXT NOT NULL REFERENCES bdu_vuln(bdu_id) ON DELETE CASCADE,
+        model TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        output_json JSONB NOT NULL,
+        output_text TEXT,
+        tokens_input INT,
+        tokens_output INT,
+        cost_usd NUMERIC(10, 6),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (bdu_id, model, prompt_version, input_hash)
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS enrichment_bdu_bdu_id_idx ON enrichment_bdu (bdu_id)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS fstec_bulletin (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title TEXT,
+        reference_no TEXT,
+        source_filename TEXT,
+        plain_text TEXT NOT NULL,
+        parsed_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        status TEXT NOT NULL DEFAULT 'parsed',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS fstec_bulletin_created_idx ON fstec_bulletin (created_at DESC)`
+    );
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS fstec_bulletin_analysis (
+        bulletin_id UUID PRIMARY KEY REFERENCES fstec_bulletin(id) ON DELETE CASCADE,
+        output_json JSONB,
+        output_text TEXT,
+        model TEXT,
+        prompt_version TEXT,
+        input_hash TEXT,
+        tokens_input INT,
+        tokens_output INT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error_text TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+
     await this.db.query(
       `CREATE TABLE IF NOT EXISTS vendor_advisory (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -134,6 +228,236 @@ export class SchemaService implements OnModuleInit {
     );
 
     await this.seedVendorAdvisoryDemoRows();
+
+    // --- Vulnerability task tracker (CVE tasks) ---
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS vuln_task (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'new'
+          CHECK (status IN ('new','in_progress','closed')),
+        priority_local TEXT NOT NULL DEFAULT 'medium'
+          CHECK (priority_local IN ('low','medium','high','critical')),
+        owner TEXT,
+        due_date TIMESTAMPTZ,
+        review_date TIMESTAMPTZ,
+        vendor_key TEXT NOT NULL,
+        vendor_display TEXT NOT NULL,
+        product_key_norm TEXT NOT NULL DEFAULT '',
+        product_display TEXT NOT NULL DEFAULT '',
+        notes_md TEXT NOT NULL DEFAULT '',
+        decision TEXT,
+        decision_notes TEXT,
+        evidence TEXT,
+        closed_at TIMESTAMPTZ,
+        -- cached scoring (recomputed on write)
+        score_raw INT NOT NULL DEFAULT 0 CHECK (score_raw >= 0 AND score_raw <= 100),
+        score_final INT NOT NULL DEFAULT 0 CHECK (score_final >= 0 AND score_final <= 100),
+        score_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+        stats JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `UPDATE vuln_task
+          SET status = CASE
+            WHEN status IN ('needs_info', 'fixing', 'mitigated') THEN 'in_progress'
+            WHEN status IN ('risk_accepted', 'not_applicable', 'closed') THEN 'closed'
+            ELSE 'new'
+          END
+        WHERE status NOT IN ('new', 'in_progress', 'closed')`
+    );
+    await this.db.query(
+      `UPDATE vuln_task
+          SET closed_at = CASE
+            WHEN status = 'closed' THEN COALESCE(closed_at, now())
+            ELSE NULL
+          END`
+    );
+    await this.db.query(`ALTER TABLE vuln_task DROP CONSTRAINT IF EXISTS vuln_task_status_check`);
+    await this.db.query(
+      `ALTER TABLE vuln_task
+         ADD CONSTRAINT vuln_task_status_check CHECK (status IN ('new', 'in_progress', 'closed'))`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_updated_idx ON vuln_task (updated_at DESC)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_status_idx ON vuln_task (status)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_vendor_product_idx ON vuln_task (vendor_key, product_key_norm)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_score_final_idx ON vuln_task (score_final DESC, updated_at DESC)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS vuln_task_cve (
+        task_id UUID NOT NULL REFERENCES vuln_task(id) ON DELETE CASCADE,
+        cve_id TEXT NOT NULL REFERENCES cve(cve_id) ON DELETE CASCADE,
+        added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        note TEXT,
+        PRIMARY KEY (task_id, cve_id)
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_cve_cve_idx ON vuln_task_cve (cve_id)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_cve_task_idx ON vuln_task_cve (task_id)`);
+    await this.db.query(
+      `WITH extracted AS (
+         SELECT DISTINCT t.id AS task_id,
+                upper((m.match)[1]) AS cve_id,
+                t.vendor_display,
+                t.vendor_key,
+                t.product_display,
+                t.product_key_norm
+           FROM vuln_task t
+     CROSS JOIN LATERAL regexp_matches(
+                concat_ws(' ', t.title, t.notes_md, t.evidence),
+                '(CVE-[0-9]{4}-[0-9]{4,})',
+                'gi'
+              ) AS m(match)
+          WHERE NOT EXISTS (SELECT 1 FROM vuln_task_cve l WHERE l.task_id = t.id)
+       )
+       INSERT INTO cve (cve_id, source, raw)
+       SELECT e.cve_id,
+              'task.backfill',
+              jsonb_build_object(
+                'source', 'task.backfill',
+                'placeholder', true,
+                'cve', jsonb_build_object('id', e.cve_id)
+              )
+         FROM extracted e
+       ON CONFLICT (cve_id) DO NOTHING`
+    );
+    await this.db.query(
+      `WITH extracted AS (
+         SELECT DISTINCT t.id AS task_id,
+                upper((m.match)[1]) AS cve_id
+           FROM vuln_task t
+     CROSS JOIN LATERAL regexp_matches(
+                concat_ws(' ', t.title, t.notes_md, t.evidence),
+                '(CVE-[0-9]{4}-[0-9]{4,})',
+                'gi'
+              ) AS m(match)
+          WHERE NOT EXISTS (SELECT 1 FROM vuln_task_cve l WHERE l.task_id = t.id)
+       )
+       INSERT INTO vuln_task_cve (task_id, cve_id, note)
+       SELECT task_id, cve_id, 'auto-linked from task text'
+         FROM extracted
+       ON CONFLICT DO NOTHING`
+    );
+    await this.db.query(
+      `WITH extracted AS (
+         SELECT DISTINCT upper((m.match)[1]) AS cve_id,
+                t.vendor_display,
+                t.vendor_key,
+                t.product_display,
+                t.product_key_norm
+           FROM vuln_task t
+     CROSS JOIN LATERAL regexp_matches(
+                concat_ws(' ', t.title, t.notes_md, t.evidence),
+                '(CVE-[0-9]{4}-[0-9]{4,})',
+                'gi'
+              ) AS m(match)
+          WHERE t.vendor_display <> '' AND t.vendor_key <> ''
+       )
+       INSERT INTO cve_vendor_product (cve_id, vendor, product, vendor_key, product_key, product_key_norm, source)
+       SELECT e.cve_id, e.vendor_display, NULLIF(e.product_display, ''), e.vendor_key, NULLIF(e.product_display, ''), e.product_key_norm, 'task.backfill'
+         FROM extracted e
+       ON CONFLICT (cve_id, vendor_key, product_key_norm) DO NOTHING`
+    );
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS vuln_task_event (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        task_id UUID NOT NULL REFERENCES vuln_task(id) ON DELETE CASCADE,
+        ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+        actor TEXT,
+        action TEXT NOT NULL,
+        before JSONB,
+        after JSONB,
+        meta JSONB NOT NULL DEFAULT '{}'::jsonb
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_event_task_ts_idx ON vuln_task_event (task_id, ts DESC)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS app_integration_settings (
+        key TEXT PRIMARY KEY,
+        value JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS mpvm_asset (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        external_id TEXT NOT NULL,
+        hostname TEXT,
+        ip_address TEXT,
+        os_name TEXT,
+        os_version TEXT,
+        display_name TEXT NOT NULL,
+        raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_synced_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        UNIQUE (external_id)
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS mpvm_asset_last_synced_idx ON mpvm_asset (last_synced_at DESC)`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS mpvm_asset_ip_idx ON mpvm_asset (ip_address) WHERE ip_address IS NOT NULL`
+    );
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS mpvm_asset_software (
+        asset_external_id TEXT NOT NULL REFERENCES mpvm_asset(external_id) ON DELETE CASCADE,
+        software_key TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'software' CHECK (kind IN ('software', 'package')),
+        name TEXT NOT NULL,
+        version TEXT,
+        vendor TEXT,
+        install_path TEXT,
+        raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (asset_external_id, software_key)
+      )`
+    );
+    await this.db.query(
+      `ALTER TABLE mpvm_asset_software
+       ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'software'`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS mpvm_asset_software_name_idx ON mpvm_asset_software (lower(name))`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS mpvm_asset_software_asset_idx ON mpvm_asset_software (asset_external_id)`
+    );
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS mpvm_asset_vulnerability (
+        asset_external_id TEXT NOT NULL REFERENCES mpvm_asset(external_id) ON DELETE CASCADE,
+        vuln_key TEXT NOT NULL,
+        cve_id TEXT,
+        title TEXT,
+        severity TEXT,
+        cvss_score DOUBLE PRECISION,
+        status TEXT,
+        fix_available BOOLEAN,
+        solution TEXT,
+        affected_software_key TEXT,
+        affected_software_name TEXT,
+        affected_software_version TEXT,
+        raw_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+        first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (asset_external_id, vuln_key)
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS mpvm_asset_vulnerability_cve_idx ON mpvm_asset_vulnerability (cve_id) WHERE cve_id IS NOT NULL`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS mpvm_asset_vulnerability_asset_idx ON mpvm_asset_vulnerability (asset_external_id)`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS mpvm_asset_vulnerability_software_idx ON mpvm_asset_vulnerability (lower(affected_software_name)) WHERE affected_software_name IS NOT NULL`
+    );
 
     // --- ASV / External attack surface management (assets + scan runs + findings) ---
     await this.db.query(
@@ -382,6 +706,60 @@ export class SchemaService implements OnModuleInit {
     await this.db.query(
       `CREATE INDEX IF NOT EXISTS asv_scan_artifact_scan_idx ON asv_scan_artifact (scan_run_id, created_at DESC)`
     );
+
+    // --- ASV manual validation runs: Metasploit (manual only; no auto-exploit) ---
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_msf_run (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        finding_id UUID NOT NULL REFERENCES asv_finding(id) ON DELETE CASCADE,
+        scan_run_id UUID REFERENCES asv_scan_run(id) ON DELETE SET NULL,
+        asset_id UUID REFERENCES asv_asset(id) ON DELETE SET NULL,
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','running','completed','failed','cancelled')),
+        mode TEXT NOT NULL DEFAULT 'safe' CHECK (mode IN ('safe','exploit')),
+        action TEXT NOT NULL DEFAULT 'check' CHECK (action IN ('search','check','run','exploit')),
+        module TEXT,
+        options JSONB NOT NULL DEFAULT '{}'::jsonb,
+        ack_risks BOOLEAN NOT NULL DEFAULT false,
+        summary TEXT NOT NULL DEFAULT '',
+        error TEXT,
+        created_by TEXT,
+        started_at TIMESTAMPTZ,
+        ended_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_msf_run_finding_idx ON asv_msf_run (finding_id, created_at DESC)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_msf_run_status_idx ON asv_msf_run (status, updated_at DESC)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_msf_run_scan_run_idx ON asv_msf_run (scan_run_id, created_at DESC)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_msf_artifact (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        run_id UUID NOT NULL REFERENCES asv_msf_run(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('msf.stdout','msf.stderr','msf.rc','msf.meta')),
+        bytes INT NOT NULL DEFAULT 0,
+        sha256 TEXT,
+        storage TEXT NOT NULL DEFAULT 'inline' CHECK (storage IN ('inline')),
+        content_text TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_msf_artifact_run_idx ON asv_msf_artifact (run_id, created_at DESC)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS asv_msf_event (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        run_id UUID NOT NULL REFERENCES asv_msf_run(id) ON DELETE CASCADE,
+        ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+        actor TEXT,
+        action TEXT NOT NULL,
+        before JSONB,
+        after JSONB,
+        meta JSONB NOT NULL DEFAULT '{}'::jsonb
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS asv_msf_event_run_ts_idx ON asv_msf_event (run_id, ts DESC)`);
 
     await this.db.query(
       `CREATE TABLE IF NOT EXISTS asv_nuclei_template (

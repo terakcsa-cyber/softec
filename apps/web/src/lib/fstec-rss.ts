@@ -6,6 +6,14 @@ export type FstecLocalBduLink = {
   bduId: string;
 };
 
+/** Запись из локального реестра `bdu_vuln` (полная выгрузка ФСТЭК). */
+export type FstecRegistryBduLink = {
+  bduId: string;
+  name: string;
+  cveIds: string[];
+  linkedCveIds: string[];
+};
+
 export type FstecFeedItem = {
   id: string;
   title: string;
@@ -13,6 +21,8 @@ export type FstecFeedItem = {
   pubDate: string | null;
   descriptionText: string;
   localBduLinks?: FstecLocalBduLink[];
+  /** БДУ из реестра, если в посте нет пары с CVE в нашей БД. */
+  registryBduLinks?: FstecRegistryBduLink[];
 };
 
 const xmlParser = new XMLParser({

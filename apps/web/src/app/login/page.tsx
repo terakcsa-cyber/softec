@@ -50,8 +50,8 @@ export default function LoginPage() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-bg text-muted">
-        …
+      <div className="flex min-h-screen flex-col items-center justify-center gap-2 bg-bg text-muted">
+        <span className="text-sm">Проверка сессии…</span>
       </div>
     );
   }

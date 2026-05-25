@@ -194,9 +194,12 @@ function ProductCards({ products }: { products: ProductRow[] }) {
 export function VendorLandscape({
   windowHours,
   sampledCves,
+  sampledBdu,
+  sampledTotal,
   method,
   usedCpe,
   usedFallback,
+  usedBdu,
   vendors,
   products,
   onVendorSelect,
@@ -204,9 +207,12 @@ export function VendorLandscape({
 }: {
   windowHours: number;
   sampledCves: number;
+  sampledBdu?: number;
+  sampledTotal?: number;
   method?: string;
   usedCpe?: number;
   usedFallback?: number;
+  usedBdu?: number;
   vendors: VendorRow[];
   products: ProductRow[];
   onVendorSelect?: (vendor: string) => void;
@@ -223,16 +229,23 @@ export function VendorLandscape({
             Ландшафт вендоров за {windowHours}ч
           </div>
           <p className="mt-1 max-w-2xl text-[12px] text-muted">
-            Доля по числу CVE в выборке (агрегация по vendor_key). Клик по строке — фильтр списка уязвимостей.
+            Доля по CVE (NVD/CPE) и записям БДУ ФСТЭК за окно публикации. Клик — фильтр списка CVE.
           </p>
         </div>
         <div className="text-right text-[10px] text-muted">
-          <div>выборка: {sampledCves.toLocaleString()} CVE</div>
+          <div>
+            выборка:{" "}
+            {(sampledTotal ?? sampledCves).toLocaleString()}
+            {typeof sampledBdu === "number" && sampledBdu > 0
+              ? ` (CVE ${sampledCves.toLocaleString()} + БДУ ${sampledBdu.toLocaleString()})`
+              : ` CVE`}
+          </div>
           {method ? (
             <div className="text-muted/80">
               {method}
               {typeof usedCpe === "number" ? ` · CPE ${usedCpe}` : ""}
               {typeof usedFallback === "number" ? ` · fb ${usedFallback}` : ""}
+              {typeof usedBdu === "number" && usedBdu > 0 ? ` · БДУ ${usedBdu}` : ""}
             </div>
           ) : null}
         </div>

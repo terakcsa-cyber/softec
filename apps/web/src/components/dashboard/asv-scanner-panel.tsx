@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Copy, ExternalLink, FileDown, Loader2, Play, Plus, Radar, RefreshCw } from "lucide-react";
+import { AlertTriangle, Copy, ExternalLink, FileDown, Loader2, Play, Plus, Radar, RefreshCw } from "lucide-react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "../ui/cn";
@@ -59,6 +59,47 @@ type AsvFinding = {
   evidence?: unknown;
   status: string;
   last_seen: string;
+};
+
+type AsvMsfRun = {
+  id: string;
+  finding_id: string;
+  scan_run_id: string | null;
+  asset_id: string | null;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  mode: "safe" | "exploit";
+  action: "search" | "check" | "run" | "exploit";
+  module: string | null;
+  options: Record<string, unknown>;
+  ack_risks: boolean;
+  summary: string;
+  error: string | null;
+  created_by: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type AsvMsfArtifact = {
+  id: string;
+  run_id: string;
+  kind: "msf.stdout" | "msf.stderr" | "msf.rc" | "msf.meta";
+  bytes: number;
+  sha256: string | null;
+  storage: "inline";
+  created_at: string;
+};
+
+type AsvMsfEvent = {
+  id: string;
+  run_id: string;
+  ts: string;
+  actor: string | null;
+  action: string;
+  before: unknown;
+  after: unknown;
+  meta: unknown;
 };
 
 type AsvNucleiTemplate = {
@@ -269,6 +310,44 @@ function fmtTs(iso: string | null | undefined): string {
   return d.toLocaleString();
 }
 
+function parseTargetHintsFromFinding(f: AsvFinding): {
+  rhosts: string | null;
+  rport: number | null;
+  ssl: boolean | null;
+  targetUri: string | null;
+  vhost: string | null;
+} {
+  const aff = f.affected && typeof f.affected === "object" ? (f.affected as Record<string, unknown>) : {};
+  const urlRaw =
+    (typeof aff.url === "string" ? aff.url : null) ||
+    (typeof aff.matchedAt === "string" ? aff.matchedAt : null) ||
+    null;
+
+  const candidate = urlRaw?.trim() || "";
+  if (!candidate) return { rhosts: null, rport: null, ssl: null, targetUri: null, vhost: null };
+
+  // Try URL parse first (scheme://host:port/path).
+  try {
+    const u = new URL(candidate.includes("://") ? candidate : `http://${candidate}`);
+    const host = u.hostname;
+    const port =
+      u.port && /^\d{1,5}$/.test(u.port) ? Math.max(1, Math.min(65535, Number(u.port))) : null;
+    const ssl = u.protocol === "https:" ? true : u.protocol === "http:" ? false : null;
+    const targetUri = u.pathname && u.pathname !== "" ? u.pathname : "/";
+    const rhosts = host || null;
+    const rport = port;
+    return { rhosts, rport, ssl, targetUri, vhost: null };
+  } catch {
+    // ignore
+  }
+
+  // Fallback: host:port
+  const m = candidate.match(/^([^/\\s:]+)(?::(\\d{1,5}))?$/);
+  const host = m?.[1] ? String(m[1]) : null;
+  const port = m?.[2] ? Math.max(1, Math.min(65535, Number(m[2]))) : null;
+  return { rhosts: host, rport: Number.isFinite(port) ? port : null, ssl: null, targetUri: null, vhost: null };
+}
+
 export function AsvScannerPanel() {
   const [type, setType] = useState<AssetType>("domain");
   const [key, setKey] = useState("");
@@ -291,6 +370,20 @@ export function AsvScannerPanel() {
   const [artifactId, setArtifactId] = useState<string | null>(null);
   const [msfOpen, setMsfOpen] = useState(false);
   const [msfText, setMsfText] = useState<string>("");
+  const [msfFindingId, setMsfFindingId] = useState<string | null>(null);
+  const [msfMode, setMsfMode] = useState<"safe" | "exploit">("safe");
+  const [msfAction, setMsfAction] = useState<"search" | "check" | "run" | "exploit">("check");
+  const [msfModule, setMsfModule] = useState<string>("");
+  const [msfAck, setMsfAck] = useState(false);
+  const [msfOptRhosts, setMsfOptRhosts] = useState("");
+  const [msfOptRport, setMsfOptRport] = useState<string>("443");
+  const [msfOptSsl, setMsfOptSsl] = useState(true);
+  const [msfOptTargetUri, setMsfOptTargetUri] = useState<string>("/");
+  const [msfOptVhost, setMsfOptVhost] = useState<string>("");
+  const [msfSelectedRunId, setMsfSelectedRunId] = useState<string | null>(null);
+  const [msfArtifactOpen, setMsfArtifactOpen] = useState(false);
+  const [msfArtifactTitle, setMsfArtifactTitle] = useState<string>("");
+  const [msfArtifactText, setMsfArtifactText] = useState<string>("");
   const [issueAiOpen, setIssueAiOpen] = useState(false);
   const [issueAiId, setIssueAiId] = useState<string | null>(null);
   const [triagePollUntilMs, setTriagePollUntilMs] = useState<number>(0);
@@ -325,6 +418,103 @@ export function AsvScannerPanel() {
     staleTime: 5_000,
     refetchInterval: 5_000
   });
+
+  const msfRunsQuery = useQuery({
+    queryKey: ["asv", "msfRunsByFinding", msfFindingId],
+    enabled: Boolean(msfFindingId) && msfOpen,
+    queryFn: async () => {
+      const res = await apiFetch(`/api/asv/findings/${encodeURIComponent(msfFindingId!)}/msf-runs`, {
+        cache: "no-store"
+      });
+      const body = (await res.json()) as { items?: AsvMsfRun[]; message?: string };
+      if (!res.ok) throw new Error(body.message ?? `msf-runs (${res.status})`);
+      return body.items ?? [];
+    },
+    staleTime: 1_500,
+    refetchInterval: 2_500
+  });
+
+  const msfRunQuery = useQuery({
+    queryKey: ["asv", "msfRun", msfSelectedRunId],
+    enabled: Boolean(msfSelectedRunId) && msfOpen,
+    queryFn: async () => {
+      const res = await apiFetch(`/api/asv/msf-runs/${encodeURIComponent(msfSelectedRunId!)}`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`msf-run (${res.status})`);
+      return (await res.json()) as AsvMsfRun;
+    },
+    staleTime: 1_500,
+    refetchInterval: 2_500
+  });
+
+  const msfArtifactsQuery = useQuery({
+    queryKey: ["asv", "msfArtifacts", msfSelectedRunId],
+    enabled: Boolean(msfSelectedRunId) && msfOpen,
+    queryFn: async () => {
+      const res = await apiFetch(`/api/asv/msf-runs/${encodeURIComponent(msfSelectedRunId!)}/artifacts`, {
+        cache: "no-store"
+      });
+      const body = (await res.json()) as { items?: AsvMsfArtifact[]; message?: string };
+      if (!res.ok) throw new Error(body.message ?? `msf-artifacts (${res.status})`);
+      return body.items ?? [];
+    },
+    staleTime: 1_500,
+    refetchInterval: 2_500
+  });
+
+  const msfEventsQuery = useQuery({
+    queryKey: ["asv", "msfEvents", msfSelectedRunId],
+    enabled: Boolean(msfSelectedRunId) && msfOpen,
+    queryFn: async () => {
+      const res = await apiFetch(`/api/asv/msf-runs/${encodeURIComponent(msfSelectedRunId!)}/events`, {
+        cache: "no-store"
+      });
+      const body = (await res.json()) as { items?: AsvMsfEvent[]; message?: string };
+      if (!res.ok) throw new Error(body.message ?? `msf-events (${res.status})`);
+      return body.items ?? [];
+    },
+    staleTime: 3_000,
+    refetchInterval: 5_000
+  });
+
+  const msfConclusion = useMemo(() => {
+    const items = msfEventsQuery.data ?? [];
+    const latestDone = items.find((e) => e.action === "completed" || e.action === "failed");
+    const meta =
+      latestDone && latestDone.meta && typeof latestDone.meta === "object" ? (latestDone.meta as Record<string, unknown>) : null;
+    if (!meta) return null;
+    const best = meta.best && typeof meta.best === "object" ? (meta.best as Record<string, unknown>) : null;
+    const verdict = typeof best?.verdict === "string" ? best.verdict : typeof meta.verdict === "string" ? meta.verdict : null;
+    const conclusion =
+      typeof best?.conclusion === "string" ? best.conclusion : typeof meta.conclusion === "string" ? meta.conclusion : null;
+    const sessionsHint =
+      typeof best?.sessionsHint === "string" ? best.sessionsHint : typeof meta.sessionsHint === "string" ? meta.sessionsHint : null;
+    const lootHint = typeof best?.lootHint === "string" ? best.lootHint : typeof meta.lootHint === "string" ? meta.lootHint : null;
+    const highlights = Array.isArray(best?.highlights)
+      ? best!.highlights.map(String).filter(Boolean).slice(0, 24)
+      : Array.isArray(meta.highlights)
+        ? meta.highlights.map(String).filter(Boolean).slice(0, 24)
+        : [];
+    return { verdict, conclusion, sessionsHint, lootHint, highlights };
+  }, [msfEventsQuery.data]);
+
+  const msfSteps = useMemo(() => {
+    const events = msfEventsQuery.data ?? [];
+    const steps = events
+      .filter((e) => e.action === "step_completed")
+      .map((e) => (e.meta && typeof e.meta === "object" ? (e.meta as Record<string, unknown>) : null))
+      .filter(Boolean)
+      .map((m) => ({
+        step: typeof m!.step === "number" ? m!.step : null,
+        label: typeof m!.label === "string" ? m!.label : "",
+        module: typeof m!.module === "string" ? m!.module : "",
+        verdict: typeof m!.verdict === "string" ? m!.verdict : "",
+        conclusion: typeof m!.conclusion === "string" ? m!.conclusion : "",
+        sessionsHint: typeof m!.sessionsHint === "string" ? m!.sessionsHint : null,
+        lootHint: typeof m!.lootHint === "string" ? m!.lootHint : null
+      }))
+      .sort((a, b) => (a.step ?? 999) - (b.step ?? 999));
+    return steps.slice(0, 10);
+  }, [msfEventsQuery.data]);
 
   const profilesQuery = useQuery({
     queryKey: ["asv", "profiles"],
@@ -1813,6 +2003,18 @@ export function AsvScannerPanel() {
                           if (t?.name) lines.push(`- ${t.name}`);
 
                           setMsfText(lines.join("\n"));
+                          setMsfFindingId(f.id);
+                          const hints = parseTargetHintsFromFinding(f);
+                          setMsfOptRhosts(hints.rhosts ?? "");
+                          setMsfOptRport(String(hints.rport ?? 443));
+                          setMsfOptSsl(hints.ssl ?? true);
+                          setMsfOptTargetUri(hints.targetUri ?? "/");
+                          setMsfOptVhost(hints.vhost ?? "");
+                          setMsfMode("safe");
+                          setMsfAction("check");
+                          setMsfModule("");
+                          setMsfAck(false);
+                          setMsfSelectedRunId(null);
                           setMsfOpen(true);
                         }}
                         title="Открыть Metasploit helper (docker)"
@@ -2130,7 +2332,7 @@ export function AsvScannerPanel() {
             <div className="glass rounded-2xl p-5">
               <div className="flex items-start justify-between gap-4">
                 <div className="min-w-0">
-                  <Dialog.Title className="truncate text-sm font-semibold tracking-tight">Нахождение</Dialog.Title>
+                  <Dialog.Title className="truncate text-sm font-semibold tracking-tight">Находка</Dialog.Title>
                   <Dialog.Description className="mt-1 text-xs text-muted">
                     {selectedFinding ? (
                       <>
@@ -2143,11 +2345,50 @@ export function AsvScannerPanel() {
                     )}
                   </Dialog.Description>
                 </div>
-                <Dialog.Close asChild>
-                  <button className="rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/30 dark:hover:bg-black/40">
-                    Закрыть
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={!selectedFinding}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-fg/80 hover:bg-slate-100 disabled:opacity-50 dark:border-border dark:bg-black/30 dark:hover:bg-black/40"
+                    onClick={() => {
+                      if (!selectedFinding) return;
+                      const hints = parseTargetHintsFromFinding(selectedFinding);
+                      setMsfText([
+                        "## Metasploit (Docker)",
+                        "Run interactive console:",
+                        "docker run --rm -it metasploitframework/metasploit-framework msfconsole",
+                        "",
+                        "Inside msfconsole (search only, no auto-exploit):",
+                        "search type:auxiliary name:scanner",
+                        "",
+                        "Context:",
+                        `- finding: ${selectedFinding.id}`,
+                        `- tool: ${selectedFinding.tool}`,
+                        `- severity: ${selectedFinding.severity}`
+                      ].join("\\n"));
+                      setMsfFindingId(selectedFinding.id);
+                      setMsfOptRhosts(hints.rhosts ?? "");
+                      setMsfOptRport(String(hints.rport ?? 443));
+                      setMsfOptSsl(hints.ssl ?? true);
+                      setMsfOptTargetUri(hints.targetUri ?? "/");
+                      setMsfOptVhost(hints.vhost ?? "");
+                      setMsfMode("safe");
+                      setMsfAction("check");
+                      setMsfModule("");
+                      setMsfAck(false);
+                      setMsfSelectedRunId(null);
+                      setMsfOpen(true);
+                    }}
+                    title="Открыть Metasploit помощник и запустить ручную проверку"
+                  >
+                    Metasploit <ExternalLink className="h-3 w-3" />
                   </button>
-                </Dialog.Close>
+                  <Dialog.Close asChild>
+                    <button className="rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/30 dark:hover:bg-black/40">
+                      Закрыть
+                    </button>
+                  </Dialog.Close>
+                </div>
               </div>
 
               {selectedFinding ? (
@@ -2492,7 +2733,7 @@ export function AsvScannerPanel() {
                 <div className="min-w-0">
                   <Dialog.Title className="truncate text-sm font-semibold tracking-tight">Metasploit помощник</Dialog.Title>
                   <Dialog.Description className="mt-1 text-xs text-muted">
-                    Команды для запуска Metasploit через Docker и поиска модулей. Эксплойт автоматически не запускаем.
+                    Ручная проверка через контейнер Metasploit: по умолчанию безопасный режим. Эксплойт — только по явному подтверждению.
                   </Dialog.Description>
                 </div>
                 <Dialog.Close asChild>
@@ -2501,6 +2742,393 @@ export function AsvScannerPanel() {
                   </button>
                 </Dialog.Close>
               </div>
+
+              <div className="mt-4 grid grid-cols-1 gap-3 lg:grid-cols-2">
+                <div className="rounded-xl border border-slate-200 bg-white/70 p-3 text-xs dark:border-border dark:bg-black/10">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-medium text-fg/90">Запуск проверки</div>
+                      <div className="mt-1 text-[11px] text-muted">
+                        Одна кнопка: система сама подберёт модуль (по CVE/порту/контексту), выполнит check/run и даст итог.
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!msfFindingId}
+                      onClick={async () => {
+                        if (!msfFindingId) return;
+                        setBusy(true);
+                        setErr(null);
+                        try {
+                          const payload = {
+                            mode: msfMode,
+                            action: msfMode === "exploit" ? "exploit" : "check",
+                            module: null,
+                            autoPick: true,
+                            ackRisks: msfMode === "exploit" ? msfAck : false,
+                            options: {
+                              RHOSTS: msfOptRhosts.trim() ? msfOptRhosts.trim() : undefined,
+                              RPORT: Number(msfOptRport) || undefined,
+                              SSL: Boolean(msfOptSsl),
+                              TARGETURI: msfOptTargetUri.trim() ? msfOptTargetUri.trim() : undefined,
+                              VHOST: msfOptVhost.trim() ? msfOptVhost.trim() : undefined
+                            }
+                          };
+                          const res = await apiFetch(`/api/asv/findings/${encodeURIComponent(msfFindingId)}/msf-runs`, {
+                            method: "POST",
+                            headers: { "content-type": "application/json" },
+                            body: JSON.stringify(payload),
+                            cache: "no-store"
+                          });
+                          const body = (await res.json()) as { id?: string; message?: string };
+                          if (!res.ok) throw new Error(body.message ?? `msf create (${res.status})`);
+                          if (body.id) setMsfSelectedRunId(body.id);
+                          await msfRunsQuery.refetch();
+                        } catch (e) {
+                          setErr(e instanceof Error ? e.message : String(e));
+                        } finally {
+                          setBusy(false);
+                        }
+                      }}
+                      className={cn(
+                        "inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs",
+                        "border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
+                      )}
+                      title="Запустить контейнер Metasploit для валидации"
+                    >
+                      <Play className="h-4 w-4" />
+                      Проверить применимость
+                    </button>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <label className="block">
+                      <div className="text-[11px] text-muted">Режим</div>
+                      <select
+                        value={msfMode}
+                        onChange={(e) => {
+                          const v = e.target.value === "exploit" ? "exploit" : "safe";
+                          setMsfMode(v);
+                          if (v === "exploit") setMsfAction("exploit");
+                        }}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-border dark:bg-black/20"
+                      >
+                        <option value="safe">safe (detector/check)</option>
+                        <option value="exploit">exploit (требует подтверждения)</option>
+                      </select>
+                    </label>
+
+                    <div className="block sm:col-span-1">
+                      <div className="text-[11px] text-muted">Module</div>
+                      <div className="mt-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] text-fg/80 dark:border-border dark:bg-black/20">
+                        подбирается автоматически
+                      </div>
+                    </div>
+
+                    <label className="block">
+                      <div className="text-[11px] text-muted">RHOSTS</div>
+                      <input
+                        value={msfOptRhosts}
+                        onChange={(e) => setMsfOptRhosts(e.target.value)}
+                        placeholder="1.2.3.4 или host"
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-mono dark:border-border dark:bg-black/20"
+                      />
+                    </label>
+                    <label className="block">
+                      <div className="text-[11px] text-muted">RPORT</div>
+                      <input
+                        value={msfOptRport}
+                        onChange={(e) => setMsfOptRport(e.target.value)}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-mono dark:border-border dark:bg-black/20"
+                      />
+                    </label>
+
+                    <label className="block">
+                      <div className="text-[11px] text-muted">SSL</div>
+                      <select
+                        value={msfOptSsl ? "1" : "0"}
+                        onChange={(e) => setMsfOptSsl(e.target.value === "1")}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-border dark:bg-black/20"
+                      >
+                        <option value="1">true</option>
+                        <option value="0">false</option>
+                      </select>
+                    </label>
+                    <label className="block">
+                      <div className="text-[11px] text-muted">TARGETURI</div>
+                      <input
+                        value={msfOptTargetUri}
+                        onChange={(e) => setMsfOptTargetUri(e.target.value)}
+                        placeholder="/"
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-mono dark:border-border dark:bg-black/20"
+                      />
+                    </label>
+
+                    <label className="block sm:col-span-2">
+                      <div className="text-[11px] text-muted">VHOST (опционально)</div>
+                      <input
+                        value={msfOptVhost}
+                        onChange={(e) => setMsfOptVhost(e.target.value)}
+                        placeholder="host.example.com"
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs font-mono dark:border-border dark:bg-black/20"
+                      />
+                    </label>
+                  </div>
+
+                  {msfMode === "exploit" ? (
+                    <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-[11px] text-amber-950 dark:border-amber-900/40 dark:bg-amber-950/20 dark:text-amber-200">
+                      <div className="flex items-start gap-2">
+                        <AlertTriangle className="mt-0.5 h-4 w-4" />
+                        <div className="min-w-0">
+                          <div className="font-medium">Exploit mode</div>
+                          <div className="mt-1 opacity-90">
+                            Запуск exploit может повлиять на целевую систему. Используйте только на разрешённых целях.
+                          </div>
+                          <label className="mt-2 flex items-center gap-2">
+                            <input type="checkbox" checked={msfAck} onChange={(e) => setMsfAck(e.target.checked)} />
+                            <span>Понимаю риски и подтверждаю запуск exploit</span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {err ? <div className="mt-3 text-[11px] text-rose-600 dark:text-rose-300">{err}</div> : null}
+                </div>
+
+                <div className="rounded-xl border border-slate-200 bg-white/70 p-3 text-xs dark:border-border dark:bg-black/10">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="font-medium text-fg/90">История запусков</div>
+                      <div className="mt-1 text-[11px] text-muted">Последние ручные проверки по этой находке.</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void msfRunsQuery.refetch()}
+                      disabled={!msfFindingId}
+                      className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
+                    >
+                      <RefreshCw className={cn("h-4 w-4", msfRunsQuery.isFetching ? "animate-spin" : "")} /> Обновить
+                    </button>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    {msfRunsQuery.isLoading ? (
+                      <div className="flex items-center gap-2 text-[11px] text-muted">
+                        <Loader2 className="h-4 w-4 animate-spin" /> загружаю…
+                      </div>
+                    ) : msfRunsQuery.data && msfRunsQuery.data.length ? (
+                      msfRunsQuery.data.slice(0, 10).map((r) => (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => setMsfSelectedRunId(r.id)}
+                          className={cn(
+                            "w-full rounded-xl border p-2 text-left text-[11px] hover:bg-slate-50 dark:hover:bg-black/30",
+                            r.id === msfSelectedRunId
+                              ? "border-indigo-200 bg-indigo-50 dark:border-indigo-900/40 dark:bg-indigo-950/20"
+                              : "border-slate-200 bg-white dark:border-border dark:bg-black/20"
+                          )}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0 truncate font-mono">{r.id.slice(0, 8)}</div>
+                            <div className="shrink-0">
+                              <span
+                                className={cn(
+                                  "rounded-md px-2 py-0.5",
+                                  r.status === "completed"
+                                    ? "bg-emerald-100 text-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200"
+                                    : r.status === "failed"
+                                      ? "bg-rose-100 text-rose-900 dark:bg-rose-950/30 dark:text-rose-200"
+                                      : r.status === "running"
+                                        ? "bg-amber-100 text-amber-900 dark:bg-amber-950/30 dark:text-amber-200"
+                                        : "bg-slate-100 text-slate-800 dark:bg-black/30 dark:text-slate-200"
+                                )}
+                              >
+                                {r.status}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="mt-1 text-muted">
+                            {fmtTs(r.created_at)} · {r.mode}/{r.action}
+                            {r.module ? <span className="ml-2 font-mono text-fg/80">· {r.module}</span> : null}
+                          </div>
+                          {r.summary ? <div className="mt-1 truncate text-fg/80">{r.summary}</div> : null}
+                          {r.error ? <div className="mt-1 truncate text-rose-600 dark:text-rose-300">{r.error}</div> : null}
+                        </button>
+                      ))
+                    ) : (
+                      <div className="text-[11px] text-muted">Пока запусков не было.</div>
+                    )}
+                  </div>
+
+                  {msfSelectedRunId ? (
+                    <div className="mt-3 space-y-2">
+                      <div className="rounded-xl border border-slate-200 bg-white p-3 text-[11px] dark:border-border dark:bg-black/20">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-[10px] font-medium text-muted">Итог</div>
+                            <div className="mt-1 text-fg/90">
+                              {msfConclusion?.conclusion ?? msfRunQuery.data?.summary ?? "—"}
+                            </div>
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                              {msfConclusion?.verdict ? (
+                                <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] text-slate-800 dark:bg-black/30 dark:text-slate-200">
+                                  verdict {msfConclusion.verdict}
+                                </span>
+                              ) : null}
+                              {msfConclusion?.sessionsHint ? (
+                                <span className="rounded-md bg-emerald-50 px-2 py-0.5 text-[10px] text-emerald-900 dark:bg-emerald-950/30 dark:text-emerald-200">
+                                  sessions: {msfConclusion.sessionsHint.slice(0, 120)}
+                                </span>
+                              ) : null}
+                              {msfConclusion?.lootHint ? (
+                                <span className="rounded-md bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-900 dark:bg-indigo-950/30 dark:text-indigo-200">
+                                  loot: {msfConclusion.lootHint.slice(0, 120)}
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                        {msfSteps.length ? (
+                          <div className="mt-3">
+                            <div className="text-[10px] font-medium text-muted">Цепочка (шаги)</div>
+                            <div className="mt-2 space-y-2">
+                              {msfSteps.map((s) => (
+                                <div
+                                  key={`${s.step ?? "?"}-${s.module}`}
+                                  className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-[10px] text-fg/85 dark:border-border dark:bg-black/30"
+                                >
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="rounded-md bg-white px-2 py-0.5 font-mono text-[10px] dark:bg-black/30">
+                                      шаг {s.step ?? "?"}
+                                    </span>
+                                    <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[10px] dark:bg-black/30">
+                                      {s.label || "—"}
+                                    </span>
+                                    {s.verdict ? (
+                                      <span className="rounded-md bg-indigo-50 px-2 py-0.5 text-[10px] text-indigo-900 dark:bg-indigo-950/30 dark:text-indigo-200">
+                                        {s.verdict}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <div className="mt-1 font-mono text-[10px] text-fg/80">{s.module || "—"}</div>
+                                  {s.conclusion ? <div className="mt-1 text-fg/80">{s.conclusion}</div> : null}
+                                  <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted">
+                                    {s.sessionsHint ? <span>sessions: {s.sessionsHint.slice(0, 80)}</span> : null}
+                                    {s.lootHint ? <span>loot: {s.lootHint.slice(0, 80)}</span> : null}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                        {msfConclusion?.highlights?.length ? (
+                          <pre className="mt-3 max-h-40 overflow-auto rounded-lg border border-slate-200 bg-slate-50 p-2 text-[10px] text-fg/85 dark:border-border dark:bg-black/30">
+                            {msfConclusion.highlights.join("\n")}
+                          </pre>
+                        ) : (
+                          <div className="mt-2 text-[10px] text-muted">Highlights появятся после завершения run (completed/failed).</div>
+                        )}
+                      </div>
+
+                      <div className="text-[11px] font-medium">Артефакты</div>
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        {(msfArtifactsQuery.data ?? []).map((a) => (
+                          <button
+                            key={a.id}
+                            type="button"
+                            onClick={async () => {
+                              setBusy(true);
+                              setErr(null);
+                              try {
+                                const res = await apiFetch(
+                                  `/api/asv/msf-runs/${encodeURIComponent(msfSelectedRunId)}/artifacts/${encodeURIComponent(a.id)}`,
+                                  { cache: "no-store" }
+                                );
+                                const body = (await res.json()) as { content_text?: string; message?: string };
+                                if (!res.ok) throw new Error(body.message ?? `artifact (${res.status})`);
+                                setMsfArtifactTitle(`${a.kind} · ${a.bytes}B`);
+                                setMsfArtifactText(body.content_text ?? "");
+                                setMsfArtifactOpen(true);
+                              } catch (e) {
+                                setErr(e instanceof Error ? e.message : String(e));
+                              } finally {
+                                setBusy(false);
+                              }
+                            }}
+                            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-left text-[11px] hover:bg-slate-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
+                          >
+                            <div className="font-mono">{a.kind}</div>
+                            <div className="mt-1 text-muted">{a.bytes}B · {fmtTs(a.created_at)}</div>
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="mt-3 text-[11px] font-medium">События</div>
+                      <div className="max-h-40 overflow-auto rounded-xl border border-slate-200 bg-white p-2 text-[11px] dark:border-border dark:bg-black/20">
+                        {(msfEventsQuery.data ?? []).slice(0, 50).map((ev) => (
+                          <div key={ev.id} className="flex items-center justify-between gap-2 border-b border-slate-100 py-1 last:border-b-0 dark:border-border/40">
+                            <div className="min-w-0 truncate">
+                              <span className="font-mono">{fmtTs(ev.ts)}</span>
+                              <span className="ml-2">{ev.action}</span>
+                              {ev.actor ? <span className="ml-2 text-muted">· {ev.actor}</span> : null}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              <Dialog.Root open={msfArtifactOpen} onOpenChange={setMsfArtifactOpen}>
+                <Dialog.Portal>
+                  <Dialog.Overlay className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm" />
+                  <Dialog.Content
+                    className={cn(
+                      "fixed left-1/2 top-1/2 z-[60] w-[min(980px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2",
+                      "rounded-2xl border border-border bg-white shadow-2xl backdrop-blur-xl dark:bg-black/60",
+                      "outline-none"
+                    )}
+                  >
+                    <div className="glass rounded-2xl p-5">
+                      <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0">
+                          <Dialog.Title className="truncate text-sm font-semibold tracking-tight">MSF artifact</Dialog.Title>
+                          <Dialog.Description className="mt-1 text-xs text-muted">{msfArtifactTitle}</Dialog.Description>
+                        </div>
+                        <Dialog.Close asChild>
+                          <button className="rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/30 dark:hover:bg-black/40">
+                            Закрыть
+                          </button>
+                        </Dialog.Close>
+                      </div>
+
+                      <div className="mt-4 flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void copyText(msfArtifactText)}
+                          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs hover:bg-slate-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
+                        >
+                          <Copy className="h-4 w-4" /> Копировать
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => downloadText(`msf-${Date.now()}.txt`, msfArtifactText)}
+                          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs hover:bg-slate-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
+                        >
+                          <FileDown className="h-4 w-4" /> Скачать
+                        </button>
+                      </div>
+
+                      <pre className="mt-4 max-h-[70vh] overflow-auto rounded-xl border border-slate-200 bg-slate-50 p-3 text-[11px] text-fg/85 dark:border-border dark:bg-black/30">
+                        {msfArtifactText || "—"}
+                      </pre>
+                    </div>
+                  </Dialog.Content>
+                </Dialog.Portal>
+              </Dialog.Root>
 
               <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
                 <button

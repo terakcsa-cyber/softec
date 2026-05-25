@@ -2,6 +2,11 @@ import { NextResponse } from "next/server";
 import { forwardAuthHeaders } from "../../../lib/upstream-proxy";
 import { getUpstreamApiBase } from "../../../lib/upstream-api";
 
+const UPSTREAM_PROXY_TIMEOUT_MS = (() => {
+  const n = Number(process.env.UPSTREAM_PROXY_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 120_000) : 60_000;
+})();
+
 export async function proxyToUpstream(req: Request, upstreamPath: string) {
   const url = new URL(req.url);
   const base = getUpstreamApiBase();
@@ -22,7 +27,8 @@ export async function proxyToUpstream(req: Request, upstreamPath: string) {
     method,
     headers,
     body,
-    cache: "no-store"
+    cache: "no-store",
+    signal: AbortSignal.timeout(UPSTREAM_PROXY_TIMEOUT_MS)
   });
 
   const outBody = await res.text();
