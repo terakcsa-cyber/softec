@@ -3,7 +3,8 @@ import type { ConsumeMessage } from "amqplib";
 import { randomUUID } from "node:crypto";
 import { QueueService } from "../services/queue.service.js";
 import { DbService } from "../services/db.service.js";
-import { getVulnContextLlmConfigFromEnv, sha256Hex, stableJsonStringify } from "@vuln-intel/shared";
+import { LlmService } from "../services/llm.service.js";
+import { sha256Hex, stableJsonStringify } from "@vuln-intel/shared";
 
 type Envelope = {
   id?: string;
@@ -27,7 +28,8 @@ function extractTextFromChatCompletions(data: any): string | null {
 export class AsvPriorityWorker implements OnModuleInit {
   constructor(
     private readonly db: DbService,
-    private readonly queue: QueueService
+    private readonly queue: QueueService,
+    private readonly llm: LlmService
   ) {}
 
   async onModuleInit() {
@@ -79,7 +81,7 @@ export class AsvPriorityWorker implements OnModuleInit {
           return;
         }
 
-        const cfg = getVulnContextLlmConfigFromEnv();
+        const cfg = await this.llm.getEffectiveLlmConfig();
 
         const input = {
           kind: "asv_issue_priority_v1",
@@ -184,7 +186,7 @@ export class AsvPriorityWorker implements OnModuleInit {
       }
     });
 
-    const cfg = getVulnContextLlmConfigFromEnv();
+    const cfg = await this.llm.getEffectiveLlmConfig();
     // eslint-disable-next-line no-console
     console.log(`[ai:asv-priority] worker ready queue=ai.asv-priority model=${cfg.model} endpoint=${cfg.endpoint}`);
   }

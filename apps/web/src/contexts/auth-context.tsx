@@ -35,6 +35,18 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+const AUTH_FETCH_TIMEOUT_MS = 12_000;
+
+async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response> {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), AUTH_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: ac.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
@@ -47,7 +59,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     let res: Response;
     try {
-      res = await fetch(`${AUTH_BFF_PREFIX}/me`, {
+      res = await fetchWithTimeout(`${AUTH_BFF_PREFIX}/me`, {
         headers: { authorization: `Bearer ${access}`, accept: "application/json" },
         cache: "no-store"
       });
@@ -62,7 +74,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         access = getStoredAccessToken();
         if (access) {
           try {
-            res = await fetch(`${AUTH_BFF_PREFIX}/me`, {
+            res = await fetchWithTimeout(`${AUTH_BFF_PREFIX}/me`, {
               headers: { authorization: `Bearer ${access}`, accept: "application/json" },
               cache: "no-store"
             });
@@ -96,7 +108,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (email: string, password: string) => {
     let res: Response;
     try {
-      res = await fetch(`${AUTH_BFF_PREFIX}/login`, {
+      res = await fetchWithTimeout(`${AUTH_BFF_PREFIX}/login`, {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify({ email, password }),
@@ -133,7 +145,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (pendingToken: string, code: string) => {
       let res: Response;
       try {
-        res = await fetch(`${AUTH_BFF_PREFIX}/login/totp`, {
+        res = await fetchWithTimeout(`${AUTH_BFF_PREFIX}/login/totp`, {
           method: "POST",
           headers: { "content-type": "application/json", accept: "application/json" },
           body: JSON.stringify({ pendingToken, code }),

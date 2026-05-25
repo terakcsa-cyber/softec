@@ -21,7 +21,10 @@ export class JwtAuthGuard extends AuthGuard("jwt") {
     const req = context.switchToHttp().getRequest<Request>();
     const internal = process.env.INTERNAL_API_BEARER?.trim();
     const auth = req.headers.authorization?.trim();
-    if (internal && auth === `Bearer ${internal}`) {
+    const allowInternalBearer =
+      process.env.NODE_ENV !== "production" ||
+      process.env.ALLOW_INTERNAL_API_BEARER?.trim().toLowerCase() === "true";
+    if (allowInternalBearer && internal && auth === `Bearer ${internal}`) {
       (req as Request & { user: AuthUser }).user = {
         userId: "internal",
         email: "internal@system"

@@ -1,8 +1,14 @@
+import { createHash } from "node:crypto";
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
 import {
   QueueEventType,
+  SQL_EFFECTIVE_PUBLISHED_AT,
+  extractNvdPublishedIso,
   extractVendorProductPairsFromCveRaw,
+  isPublishedWithinHours,
+  parseNvdTimestampIso,
+  resolveNvdPubSyncWindow,
   stableJsonStringify,
   sha256Hex
 } from "@vuln-intel/shared";
@@ -15,24 +21,60 @@ type NvdApiItem = {
 
 @Injectable()
 export class NvdIngestJob implements OnModuleInit {
+  /** Сериализуем запросы к NVD (pub-hot и lastMod не бьют rate limit параллельно). */
+  private nvdApiChain: Promise<unknown> = Promise.resolve();
+  /** После HTTP 404 с apiKey — не слать ключ снова, пока ключ не сменился (БД / .env). */
+  private nvdApiKeyRejected = false;
+  private nvdApiKeyFingerprint: string | null = null;
+
   constructor(
     @Inject(DbService) private readonly db: DbService,
     @Inject(QueueService) private readonly queue: QueueService
   ) {}
 
+  private withNvdApiLock<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.nvdApiChain.then(fn, fn);
+    this.nvdApiChain = next.catch(() => undefined);
+    return next;
+  }
+
   async onModuleInit() {
+    if (!process.env.NVD_API_KEY?.trim()) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[ingest:nvd] NVD_API_KEY пуст — запросы к NVD 2.0 возможны, но лимиты жёстче. Ключ: https://nvd.nist.gov/developers/request-an-api-key"
+      );
+    }
+
     const intervalMs = Number(process.env.NVD_POLL_INTERVAL_MS ?? 15 * 60 * 1000);
-    const initialDelayMs = Number(process.env.NVD_INITIAL_DELAY_MS ?? 3_000);
+    const initialDelayMs = Number(process.env.NVD_INITIAL_DELAY_MS ?? 12_000);
 
     setTimeout(() => {
       this.runForever(intervalMs).catch((e) => {
         // eslint-disable-next-line no-console
-        console.error(e);
-        process.exit(1);
+        console.error("[ingest:nvd] runForever crashed — restarting loop in 30s", e);
+        setTimeout(() => {
+          this.runForever(intervalMs).catch((err) => {
+            // eslint-disable-next-line no-console
+            console.error("[ingest:nvd] runForever crashed again", err);
+          });
+        }, 30_000);
       });
     }, initialDelayMs);
 
-    const sweepOnStartMs = Number(process.env.HOT24_AI_SWEEP_ON_START_MS ?? 8_000);
+    const pubHotOnStartMs = Number(process.env.NVD_PUB_HOT_SYNC_ON_START_MS ?? 2_000);
+    if (pubHotOnStartMs > 0 && process.env.NVD_PUB_HOT_SYNC !== "false") {
+      setTimeout(() => {
+        this.syncPublishedHotWindow()
+          .then(() => this.sweepHotWindowEnrich())
+          .catch((e) => {
+            // eslint-disable-next-line no-console
+            console.error("[ingest:nvd] published hot-window sync on start failed", e);
+          });
+      }, pubHotOnStartMs);
+    }
+
+    const sweepOnStartMs = Number(process.env.HOT24_AI_SWEEP_ON_START_MS ?? 45_000);
     if (sweepOnStartMs > 0 && process.env.HOT24_AI_SWEEP !== "false") {
       setTimeout(() => {
         this.sweepHotWindowEnrich().catch((e) => {
@@ -94,51 +136,133 @@ export class NvdIngestJob implements OnModuleInit {
     }
   }
 
-  /** Окно «горячих» CVE на дашборде: published за последние 24 часа (как view=last24h в API). */
-  static isPublishedInDashboardHotWindow(publishedAtIso: string | null | undefined): boolean {
-    if (!publishedAtIso) return false;
-    const t = new Date(publishedAtIso).getTime();
-    if (Number.isNaN(t)) return false;
-    return t >= Date.now() - 24 * 60 * 60 * 1000;
+  private scoreFanoutHotOnly(): boolean {
+    return process.env.NVD_FANOUT_SCORE_HOT_ONLY !== "false";
+  }
+
+  private fingerprintNvdApiKey(key?: string): string | null {
+    if (!key?.trim()) return null;
+    return createHash("sha256").update(key.trim()).digest("hex").slice(0, 16);
+  }
+
+  private async resolveNvdApiKey(): Promise<string | undefined> {
+    let fromDb: string | undefined;
+    try {
+      const r = await this.db.query<{ value: unknown }>(
+        `SELECT value FROM app_integration_settings WHERE key = 'nvd' LIMIT 1`
+      );
+      const v = r.rows[0]?.value as { apiKey?: string } | undefined;
+      const k = v?.apiKey;
+      if (typeof k === "string" && k.trim()) fromDb = k.trim();
+    } catch {
+      // table may not exist on very first boot before API migrations
+    }
+    const key = fromDb ?? process.env.NVD_API_KEY?.trim() ?? undefined;
+    const fp = this.fingerprintNvdApiKey(key);
+    if (fp !== this.nvdApiKeyFingerprint) {
+      this.nvdApiKeyFingerprint = fp;
+      this.nvdApiKeyRejected = false;
+    }
+    if (this.nvdApiKeyRejected) return undefined;
+    return key;
   }
 
   private async runOnce() {
-    const apiKey = process.env.NVD_API_KEY;
+    await this.repairPublishedAtFromRaw();
+
+    if (process.env.NVD_PUB_HOT_SYNC !== "false") {
+      await this.syncPublishedHotWindow();
+    }
+
+    const apiKey = await this.resolveNvdApiKey();
     const baseUrl = process.env.NVD_API_BASE ?? "https://services.nvd.nist.gov/rest/json/cves/2.0";
 
-    // Watermark stored in DB (audit_log used as lightweight kv for now).
+    const overlapMs = Number(process.env.NVD_WATERMARK_OVERLAP_MS ?? 120_000);
     const last = await this.db.query<{ metadata: any }>(
       `SELECT metadata FROM audit_log
         WHERE action = 'nvd.watermark'
+          AND COALESCE((metadata->>'processed')::int, 0) > 0
      ORDER BY ts DESC
         LIMIT 1`
     );
 
-    const sinceIso =
-      (last.rowCount ?? 0) > 0 && last.rows[0]?.metadata?.modifiedStart
-        ? String(last.rows[0]?.metadata?.modifiedStart)
-        : // First run: backfill a longer window to ensure we get data.
-          new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const lastEnd =
+      (last.rowCount ?? 0) > 0 && last.rows[0]?.metadata?.modifiedEnd
+        ? String(last.rows[0].metadata.modifiedEnd)
+        : null;
+
+    const sinceIso = lastEnd
+      ? new Date(Math.max(0, new Date(lastEnd).getTime() - overlapMs)).toISOString()
+      : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
 
     const nowIso = new Date().toISOString();
-    // Overlap a bit to avoid missing late-arriving updates / clock skew.
-    const overlapMs = Number(process.env.NVD_WATERMARK_OVERLAP_MS ?? 120_000);
-    const nextStartIso = new Date(Date.now() - Math.max(0, overlapMs)).toISOString();
+    if (new Date(sinceIso).getTime() >= new Date(nowIso).getTime()) {
+      // eslint-disable-next-line no-console
+      console.log(`[ingest:nvd] skip: watermark window empty (${sinceIso} >= ${nowIso})`);
+      return;
+    }
 
     let startIndex = 0;
-    const resultsPerPage = 2000;
+    const resultsPerPage = Math.max(
+      20,
+      Math.min(2000, Number(process.env.NVD_RESULTS_PER_PAGE ?? 100))
+    );
     let processed = 0;
+    let syncComplete = true;
+    let partialSync = false;
+    const pageSleepMs = this.resolveNvdPageSleepMs(apiKey);
+    const maxEmptyRetries = Number(process.env.NVD_EMPTY_PAGE_RETRIES ?? 12);
+    let emptyRetries = 0;
 
     for (;;) {
+      if (startIndex > 0 || emptyRetries > 0) {
+        await new Promise((r) => setTimeout(r, pageSleepMs));
+      }
+
       const url = new URL(baseUrl);
       url.searchParams.set("lastModStartDate", sinceIso);
       url.searchParams.set("lastModEndDate", nowIso);
       url.searchParams.set("startIndex", String(startIndex));
       url.searchParams.set("resultsPerPage", String(resultsPerPage));
 
-      const page: any = await this.fetchJson(url.toString(), apiKey);
+      const page: any = await this.withNvdApiLock(() => this.fetchJson(url.toString(), apiKey));
       const vulnerabilities = (page?.vulnerabilities ?? []) as NvdApiItem[];
       const totalResults = Number(page?.totalResults ?? vulnerabilities.length);
+
+      if (vulnerabilities.length === 0 && startIndex < totalResults) {
+        emptyRetries++;
+        if (emptyRetries > maxEmptyRetries) {
+          if (processed > 0) {
+            partialSync = true;
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[ingest:nvd] partial sync: NVD returned empty at startIndex=${startIndex} totalResults=${totalResults} after ${processed} upserts — advancing watermark (API cap or rate limit)`
+            );
+            break;
+          }
+          if (startIndex === 0) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[ingest:nvd] empty incremental window (total=${totalResults}) after retries — advancing watermark with processed=0`
+            );
+            break;
+          }
+          syncComplete = false;
+          // eslint-disable-next-line no-console
+          console.error(
+            `[ingest:nvd] empty page at startIndex=${startIndex} totalResults=${totalResults} — watermark not advanced`
+          );
+          break;
+        }
+        const emptySleepMs = Number(process.env.NVD_EMPTY_PAGE_SLEEP_MS ?? Math.max(pageSleepMs, 6000));
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ingest:nvd] empty page (NVD rate limit?) startIndex=${startIndex} total=${totalResults} retry=${emptyRetries}/${maxEmptyRetries} sleep=${emptySleepMs}ms`
+        );
+        await new Promise((r) => setTimeout(r, emptySleepMs));
+        continue;
+      }
+      emptyRetries = 0;
 
       for (const item of vulnerabilities) {
         const cveId = String(item?.cve?.id ?? "");
@@ -159,28 +283,40 @@ export class NvdIngestJob implements OnModuleInit {
       }
 
       startIndex += vulnerabilities.length;
-      if (startIndex >= totalResults || vulnerabilities.length === 0) break;
-      await new Promise((r) => setTimeout(r, Number(process.env.NVD_PAGE_SLEEP_MS ?? 900)));
+      if (startIndex >= totalResults) break;
     }
 
+    if (partialSync && processed > 0) syncComplete = true;
+
     // eslint-disable-next-line no-console
-    console.log(`[ingest:nvd] processed=${processed} window=${sinceIso}..${nowIso} nextStart=${nextStartIso}`);
+    console.log(
+      `[ingest:nvd] processed=${processed} complete=${syncComplete} partial=${partialSync} window=${sinceIso}..${nowIso}`
+    );
 
     await this.backfillCvssBase();
-
     await this.sweepHotWindowEnrich();
 
-    await this.db.query(
-      `INSERT INTO audit_log(actor_type, action, metadata)
-       VALUES ('system', 'nvd.watermark', $1)`,
-      [
-        JSON.stringify({
-          modifiedStart: nextStartIso,
-          modifiedEnd: nowIso,
-          processed
-        })
-      ]
-    );
+    if (syncComplete) {
+      await this.db.query(
+        `INSERT INTO audit_log(actor_type, action, metadata)
+         VALUES ('system', 'nvd.watermark', $1)`,
+        [
+          JSON.stringify({
+            modifiedStart: sinceIso,
+            modifiedEnd: nowIso,
+            processed,
+            partial: partialSync
+          })
+        ]
+      );
+    }
+  }
+
+  /** NVD: без apiKey — 5 req / 30s; с ключом — 50 req / 30s. */
+  private resolveNvdPageSleepMs(apiKey?: string): number {
+    const configured = Number(process.env.NVD_PAGE_SLEEP_MS);
+    if (Number.isFinite(configured) && configured > 0) return configured;
+    return apiKey ? 6500 : 6000;
   }
 
   private async upsertCveAndFanout(input: {
@@ -190,8 +326,9 @@ export class NvdIngestJob implements OnModuleInit {
     publishedAt?: string;
     modifiedAt?: string;
   }) {
-    const publishedAtIso = this.toIsoZ(input.publishedAt);
-    const modifiedAtIso = this.toIsoZ(input.modifiedAt);
+    const publishedAtIso =
+      parseNvdTimestampIso(input.publishedAt) ?? extractNvdPublishedIso(input.raw);
+    const modifiedAtIso = parseNvdTimestampIso(input.modifiedAt);
     const cvss = this.extractCvssBaseScore(input.raw);
 
     const inserted = await this.db.query(
@@ -200,7 +337,10 @@ export class NvdIngestJob implements OnModuleInit {
        ON CONFLICT (cve_id)
        DO UPDATE SET raw = EXCLUDED.raw,
                      source = EXCLUDED.source,
-                     published_at = COALESCE(EXCLUDED.published_at, cve.published_at),
+                     published_at = CASE
+                       WHEN EXCLUDED.published_at IS NOT NULL THEN EXCLUDED.published_at
+                       ELSE cve.published_at
+                     END,
                      modified_at = COALESCE(EXCLUDED.modified_at, cve.modified_at),
                      cvss_base = COALESCE(EXCLUDED.cvss_base, cve.cvss_base),
                      updated_at = now()
@@ -230,7 +370,7 @@ export class NvdIngestJob implements OnModuleInit {
 
     // Фоновое ИИ: только CVE за последние 24ч (как view=last24h). Остальные — по открытию в UI (POST /enrich).
     // Отключить весь fanout: NVD_FANOUT_ENRICH=false.
-    if (process.env.NVD_FANOUT_ENRICH !== "false" && NvdIngestJob.isPublishedInDashboardHotWindow(publishedAtIso)) {
+    if (process.env.NVD_FANOUT_ENRICH !== "false" && isPublishedWithinHours(publishedAtIso)) {
       this.queue.publish(
         "vuln.events",
         "vuln.enrich.requested.v1",
@@ -250,20 +390,160 @@ export class NvdIngestJob implements OnModuleInit {
       );
     }
 
-    // Score request (EPSS/KEV enrichment comes later)
-    this.queue.publish("vuln.events", "vuln.score.requested.v1", {
-      id: uuidv4(),
-      type: QueueEventType.ScoreCveRequested,
-      ts: new Date().toISOString(),
-      producer: { service: "ingest", version: "0.0.1" },
-      idempotencyKey: `score:${idempotencyKey}`,
-      payload: {
-        cveId: input.cveId,
-        cvss,
-        publishedAt: publishedAtIso,
-        modifiedAt: modifiedAtIso
-      }
+    // Score: по умолчанию только CVE из окна 24ч по published (не весь catch-up lastModified).
+    const scoreHotOnly = this.scoreFanoutHotOnly();
+    if (!scoreHotOnly || isPublishedWithinHours(publishedAtIso)) {
+      this.queue.publish("vuln.events", "vuln.score.requested.v1", {
+        id: uuidv4(),
+        type: QueueEventType.ScoreCveRequested,
+        ts: new Date().toISOString(),
+        producer: { service: "ingest", version: "0.0.1" },
+        idempotencyKey: `score:${idempotencyKey}`,
+        payload: {
+          cveId: input.cveId,
+          cvss,
+          publishedAt: publishedAtIso,
+          modifiedAt: modifiedAtIso
+        }
+      });
+    }
+  }
+
+  /**
+   * Отдельный проход NVD по pubStart/pubEnd — только реально опубликованные за окно.
+   * Не смешивается с watermark lastModified (после простоя не «заливает» блок 24ч).
+   */
+  private async syncPublishedHotWindow() {
+    const maxRow = await this.db.query<{ max_pub: Date | null }>(
+      `SELECT MAX(published_at) AS max_pub FROM cve`
+    );
+    const maxPublishedAt = maxRow.rows[0]?.max_pub ?? null;
+    const { pubStartIso, pubEndIso, reason } = resolveNvdPubSyncWindow({
+      maxPublishedAt,
+      hotHours: Number(process.env.NVD_PUB_HOT_HOURS ?? 27),
+      maxGapBackfillDays: Number(process.env.NVD_PUB_GAP_BACKFILL_DAYS ?? 21),
+      overlapMs: Number(process.env.NVD_PUB_HOT_OVERLAP_MS ?? 3_600_000)
     });
+
+    const apiKey = await this.resolveNvdApiKey();
+    const baseUrl = process.env.NVD_API_BASE ?? "https://services.nvd.nist.gov/rest/json/cves/2.0";
+    const resultsPerPage = Math.max(
+      20,
+      Math.min(2000, Number(process.env.NVD_RESULTS_PER_PAGE ?? 100))
+    );
+    const pageSleepMs = this.resolveNvdPageSleepMs(apiKey);
+    let startIndex = 0;
+    let processed = 0;
+    const maxEmptyRetries = Number(process.env.NVD_EMPTY_PAGE_RETRIES ?? 12);
+    let emptyRetries = 0;
+
+    // eslint-disable-next-line no-console
+    console.log(
+      `[ingest:nvd] pub-hot sync window=${pubStartIso}..${pubEndIso} reason=${reason} maxPublished=${maxPublishedAt?.toISOString() ?? "none"}`
+    );
+
+    for (;;) {
+      if (startIndex > 0 || emptyRetries > 0) {
+        await new Promise((r) => setTimeout(r, pageSleepMs));
+      }
+
+      const url = new URL(baseUrl);
+      url.searchParams.set("pubStartDate", pubStartIso);
+      url.searchParams.set("pubEndDate", pubEndIso);
+      url.searchParams.set("startIndex", String(startIndex));
+      url.searchParams.set("resultsPerPage", String(resultsPerPage));
+
+      const page: any = await this.withNvdApiLock(() => this.fetchJson(url.toString(), apiKey));
+      const vulnerabilities = (page?.vulnerabilities ?? []) as NvdApiItem[];
+      const totalResults = Number(page?.totalResults ?? vulnerabilities.length);
+
+      if (vulnerabilities.length === 0 && startIndex < totalResults) {
+        emptyRetries++;
+        if (emptyRetries <= maxEmptyRetries) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[ingest:nvd] pub-hot empty page startIndex=${startIndex} total=${totalResults} retry=${emptyRetries}/${maxEmptyRetries}`
+          );
+          continue;
+        }
+        // eslint-disable-next-line no-console
+        console.error(
+          `[ingest:nvd] pub-hot giving up empty page startIndex=${startIndex} total=${totalResults}`
+        );
+        break;
+      }
+      emptyRetries = 0;
+      if (vulnerabilities.length === 0) break;
+
+      for (const item of vulnerabilities) {
+        const cveId = String(item?.cve?.id ?? "");
+        if (!cveId.startsWith("CVE-")) continue;
+        try {
+          await this.upsertCveAndFanout({
+            cveId,
+            source: "nvd",
+            raw: item.cve,
+            publishedAt: item?.cve?.published,
+            modifiedAt: item?.cve?.lastModified
+          });
+          processed++;
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.error(`[ingest:nvd] pub-hot failed cve=${cveId}`, e);
+        }
+      }
+
+      startIndex += vulnerabilities.length;
+      if (startIndex >= totalResults) break;
+    }
+
+    await this.db.query(
+      `INSERT INTO audit_log(actor_type, action, metadata)
+       VALUES ('system', 'nvd.pub_sync', $1)`,
+      [
+        JSON.stringify({
+          pubStart: pubStartIso,
+          pubEnd: pubEndIso,
+          processed,
+          reason,
+          maxPublishedBefore: maxPublishedAt?.toISOString() ?? null
+        })
+      ]
+    );
+
+    if (processed > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[ingest:nvd] pub-hot sync processed=${processed}`);
+    } else {
+      // eslint-disable-next-line no-console
+      console.log(`[ingest:nvd] pub-hot sync processed=0 (NVD returned no rows in window)`);
+    }
+  }
+
+  /** Заполнить published_at из паспорта NVD, если колонка пустая. */
+  private async repairPublishedAtFromRaw() {
+    const limit = Math.max(1, Math.min(5000, Number(process.env.NVD_PUBLISHED_REPAIR_LIMIT ?? 500)));
+    const r = await this.db.query(
+      `WITH pick AS (
+         SELECT cve_id
+           FROM cve
+          WHERE published_at IS NULL
+            AND raw->>'published' IS NOT NULL
+            AND (NULLIF(TRIM(BOTH FROM raw->>'published'), ''))::timestamptz IS NOT NULL
+          LIMIT $1
+       )
+       UPDATE cve c
+          SET published_at = (NULLIF(TRIM(BOTH FROM c.raw->>'published'), ''))::timestamptz,
+              updated_at = now()
+         FROM pick
+        WHERE c.cve_id = pick.cve_id`,
+      [limit]
+    );
+    const n = r.rowCount ?? 0;
+    if (n > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[ingest:nvd] published_at repair updated=${n}`);
+    }
   }
 
   private async upsertVendorProductIndex(cveId: string, raw: any) {
@@ -304,13 +584,6 @@ export class NvdIngestJob implements OnModuleInit {
                      updated_at = now()`,
       params
     );
-  }
-
-  private toIsoZ(value?: string): string | undefined {
-    if (!value) return undefined;
-    const d = new Date(value);
-    if (Number.isNaN(d.getTime())) return undefined;
-    return d.toISOString();
   }
 
   private extractCvssBaseScore(raw: any): number | undefined {
@@ -381,20 +654,23 @@ export class NvdIngestJob implements OnModuleInit {
         ORDER BY created_at DESC
            LIMIT 1
          ) latest ON true
-        WHERE c.published_at >= now() - interval '24 hours'
+        WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '24 hours'
           AND (
             latest.output_text IS NULL
             OR latest.output_text = 'LLM not configured.'
             OR COALESCE(latest.output_json->>'summary', '') LIKE 'LLM not configured%'
             OR (latest.output_json @> '{"_enrich_error": true}'::jsonb)
           )
-     ORDER BY c.published_at DESC NULLS LAST
+     ORDER BY ${SQL_EFFECTIVE_PUBLISHED_AT} DESC NULLS LAST
         LIMIT $1`,
       [limit]
     );
 
     let n = 0;
     for (const row of r.rows) {
+      const publishedIso = extractNvdPublishedIso(row.raw);
+      if (!isPublishedWithinHours(publishedIso)) continue;
+
       const raw = row.raw;
       const rawObj =
         raw != null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
@@ -487,20 +763,56 @@ export class NvdIngestJob implements OnModuleInit {
   }
 
   private async fetchJson(url: string, apiKey?: string) {
+    try {
+      return await this.fetchJsonWithKey(url, apiKey);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (apiKey && /\b404\b/.test(msg)) {
+        this.nvdApiKeyRejected = true;
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[ingest:nvd] NVD API key rejected (HTTP 404) — falling back to unauthenticated requests (check NVD_API_KEY)"
+        );
+        return await this.fetchJsonWithKey(url, undefined);
+      }
+      throw e;
+    }
+  }
+
+  private async fetchJsonWithKey(url: string, apiKey?: string) {
     const headers: Record<string, string> = { accept: "application/json" };
     if (apiKey) headers["apiKey"] = apiKey;
 
-    const maxAttempts = Number(process.env.NVD_FETCH_RETRIES ?? 4);
+    const maxAttempts = Number(process.env.NVD_FETCH_RETRIES ?? 6);
+    const timeoutMs = Number(process.env.NVD_FETCH_TIMEOUT_MS ?? 120_000);
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const res = await fetch(url, { headers });
-      if (res.ok) return res.json();
-      const retryAfter = res.headers.get("retry-after");
-      const backoffMs = retryAfter ? Number(retryAfter) * 1000 : 250 * attempt * attempt;
-      if (attempt === maxAttempts) {
-        const text = await res.text().catch(() => "");
-        throw new Error(`NVD fetch failed: ${res.status} ${res.statusText} ${text}`);
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { headers, signal: ac.signal });
+        if (res.ok) return res.json();
+        const retryAfter = res.headers.get("retry-after");
+        const backoffMs = retryAfter
+          ? Number(retryAfter) * 1000
+          : Math.min(60_000, 2000 * attempt * attempt);
+        if (attempt === maxAttempts) {
+          const text = await res.text().catch(() => "");
+          throw new Error(`NVD fetch failed: ${res.status} ${res.statusText} ${text} url=${url}`);
+        }
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ingest:nvd] fetch retry ${attempt}/${maxAttempts} status=${res.status} sleep=${backoffMs}ms`
+        );
+        await new Promise((r) => setTimeout(r, backoffMs));
+      } catch (e) {
+        if (attempt === maxAttempts) throw e;
+        const backoffMs = Math.min(60_000, 2000 * attempt * attempt);
+        // eslint-disable-next-line no-console
+        console.warn(`[ingest:nvd] fetch error retry ${attempt}/${maxAttempts} sleep=${backoffMs}ms`, e);
+        await new Promise((r) => setTimeout(r, backoffMs));
+      } finally {
+        clearTimeout(t);
       }
-      await new Promise((r) => setTimeout(r, backoffMs));
     }
     throw new Error("unreachable");
   }

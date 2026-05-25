@@ -1,6 +1,36 @@
 import { Injectable, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import amqplib, { Channel, ChannelModel, Options } from "amqplib";
 
+function redactAmqpUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (u.password) u.password = "****";
+    return u.toString();
+  } catch {
+    return url.replace(/:\/\/([^:]+):([^@]+)@/, "://$1:****@");
+  }
+}
+
+async function connectAmqpWithRetry(url: string): Promise<ChannelModel> {
+  const maxAttempts = Math.max(1, Math.min(200, Number(process.env.RABBITMQ_CONNECT_RETRIES ?? 60)));
+  const delayMs = Math.max(100, Math.min(30_000, Number(process.env.RABBITMQ_CONNECT_RETRY_MS ?? 2000)));
+  let last: unknown;
+  for (let i = 1; i <= maxAttempts; i++) {
+    try {
+      return await amqplib.connect(url);
+    } catch (e) {
+      last = e;
+      // eslint-disable-next-line no-console
+      console.error(
+        `[api:amqp] connect failed ${i}/${maxAttempts} ${redactAmqpUrl(url)}`,
+        e instanceof Error ? e.message : e
+      );
+      if (i < maxAttempts) await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw last;
+}
+
 function msgToStringSafe(msg: any): string {
   try {
     return msg?.content?.toString?.("utf8") ?? "";
@@ -16,7 +46,7 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     const url = process.env.RABBITMQ_URL ?? "amqp://vuln:vuln@localhost:5672/";
-    this.conn = await amqplib.connect(url);
+    this.conn = await connectAmqpWithRetry(url);
     this.channel = await this.conn.createChannel();
     /** Must run before any publish: unrouted messages are dropped if no queue is bound yet. */
     await this.ensureTopology();

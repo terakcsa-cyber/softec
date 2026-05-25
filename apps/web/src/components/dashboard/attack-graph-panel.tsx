@@ -83,7 +83,7 @@ function Inner({
         <div>
           <div className="text-sm font-medium">Схема атаки</div>
           <div className="text-xs text-muted">
-            {graph ? "Из LLM-графа" : attackFlow.length > 0 ? "Можно построить из Attack flow" : "Выберите CVE"}
+            {graph ? "Из LLM-графа" : attackFlow.length > 0 ? "Можно построить из Attack flow" : "Нет данных графа"}
           </div>
         </div>
         <div className="flex items-center gap-3">

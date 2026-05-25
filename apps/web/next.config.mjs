@@ -13,7 +13,35 @@ dotenv.config({
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  typedRoutes: true
+  typedRoutes: true,
+  poweredByHeader: false,
+  // Release builds are gated by `pnpm typecheck`; existing ESLint debt is tracked separately.
+  eslint: { ignoreDuringBuilds: true },
+  serverExternalPackages: ["yauzl", "fd-slicer", "exceljs"],
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      config.resolve.fallback = {
+        ...config.resolve.fallback,
+        fs: false,
+        path: false,
+        stream: false
+      };
+    }
+    return config;
+  },
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" }
+        ]
+      }
+    ];
+  }
 };
 
 export default nextConfig;

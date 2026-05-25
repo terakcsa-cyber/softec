@@ -1,14 +1,21 @@
 import { Injectable } from "@nestjs/common";
-import { getVulnContextLlmConfigFromEnv, runVulnContextLlm } from "@vuln-intel/shared";
+import { runVulnContextLlm } from "@vuln-intel/shared";
+import { IntegrationSettingsService } from "./integration-settings.service.js";
 
 @Injectable()
 export class LlmService {
-  /** Читаем env на каждый вызов: конфиг не должен «залипать» при старте до load-env / смене .env. */
+  constructor(private readonly integration: IntegrationSettingsService) {}
+
   getPromptVersion() {
-    return getVulnContextLlmConfigFromEnv().promptVersion;
+    return this.integration.getPromptVersionCached();
+  }
+
+  async getEffectiveLlmConfig() {
+    return this.integration.getEffectiveLlmConfig();
   }
 
   async generateVulnContext(input: { cveId: string; raw: Record<string, unknown> }) {
-    return runVulnContextLlm(input.cveId, input.raw, getVulnContextLlmConfigFromEnv());
+    const cfg = await this.integration.getEffectiveLlmConfig();
+    return runVulnContextLlm(input.cveId, input.raw, cfg);
   }
 }

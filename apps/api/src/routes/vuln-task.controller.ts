@@ -29,6 +29,7 @@ export class VulnTaskController {
       priorityLocal?: VulnTaskPriorityLocal;
       cveIds?: string[];
       notesMd?: string | null;
+      evidence?: string | null;
     }
   ) {
     return this.tasks.create(body);
@@ -45,7 +46,7 @@ export class VulnTaskController {
     @Body()
     body: Partial<{
       title: string;
-      status: VulnTaskStatus;
+      status: VulnTaskStatus | string;
       priorityLocal: VulnTaskPriorityLocal;
       owner: string | null;
       dueDate: string | null;

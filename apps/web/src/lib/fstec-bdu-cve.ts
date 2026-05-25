@@ -67,3 +67,12 @@ export function extractBduCvePairs(text: string): { bduId: string; cveId: string
   }
   return out;
 }
+
+/** Все номера БДУ из текста. */
+export function extractBduIds(text: string): string[] {
+  const ids = new Set<string>();
+  for (const m of text.matchAll(/(?:BDU|bdu|БДУ|бду)\s*:\s*(\d{4}-\d+)/gi)) {
+    if (m[1]) ids.add(m[1]);
+  }
+  return [...ids];
+}

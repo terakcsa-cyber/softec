@@ -44,6 +44,23 @@ export function getVulnContextLlmConfigFromEnv(): VulnContextLlmConfig {
   };
 }
 
+/** Слияние env-базы с переопределениями из БД (активный профиль в админке). */
+export function mergeVulnContextLlmConfig(
+  base: VulnContextLlmConfig,
+  patch: Partial<VulnContextLlmConfig> | null | undefined
+): VulnContextLlmConfig {
+  if (!patch) return base;
+  return {
+    endpoint: typeof patch.endpoint === "string" && patch.endpoint.trim().length > 0 ? patch.endpoint.trim() : base.endpoint,
+    apiKey: patch.apiKey !== undefined ? patch.apiKey : base.apiKey,
+    model: typeof patch.model === "string" && patch.model.trim().length > 0 ? patch.model.trim() : base.model,
+    promptVersion:
+      typeof patch.promptVersion === "string" && patch.promptVersion.trim().length > 0
+        ? patch.promptVersion.trim()
+        : base.promptVersion
+  };
+}
+
 type LlmJson = Record<string, unknown>;
 
 type LlmGraph = {
@@ -541,6 +558,14 @@ export type VulnContextLlmResult = {
   promptVersion: string;
 };
 
+export type LlmAnalysisKind = "cve" | "bdu";
+
+export type LlmAnalysisPromptOpts = {
+  kind?: LlmAnalysisKind;
+  /** Для БДУ — номер без префикса (2026-07273). */
+  entityId?: string;
+};
+
 /**
  * OpenAI-compatible chat completion → structured CVE context JSON.
  * Used by the `ai` worker and (for reliability) the API inline enrich path.
@@ -548,10 +573,17 @@ export type VulnContextLlmResult = {
 export async function runVulnContextLlm(
   cveId: string,
   raw: Record<string, unknown>,
-  config: VulnContextLlmConfig
+  config: VulnContextLlmConfig,
+  promptOpts?: LlmAnalysisPromptOpts
 ): Promise<VulnContextLlmResult> {
+  const kind: LlmAnalysisKind = promptOpts?.kind ?? "cve";
+  const subjectLabel =
+    kind === "bdu"
+      ? `записи БДУ ФСТЭК ${promptOpts?.entityId ?? cveId.replace(/^BDU:/i, "")}`
+      : cveId;
   const payload = {
     cveId,
+    kind,
     raw,
     promptVersion: config.promptVersion
   };
@@ -626,7 +658,10 @@ export async function runVulnContextLlm(
   }
 
   const userContent =
-    `Сгенерируй КОМПЛЕКСНЫЙ АНАЛИЗ УЯЗВИМОСТИ для ${cveId} по шаблону банка.\n` +
+    (kind === "bdu"
+      ? `Сгенерируй КОМПЛЕКСНЫЙ АНАЛИЗ УЯЗВИМОСТИ для ${subjectLabel} (реестр БДУ ФСТЭК России) по шаблону банка.\n` +
+        `Используй поля raw (описание, CVSS, эксплуатация, ПО, связанные CVE). Не выдумывай CVE — только из raw.linkedCves / raw.cveIds.\n`
+      : `Сгенерируй КОМПЛЕКСНЫЙ АНАЛИЗ УЯЗВИМОСТИ для ${subjectLabel} по шаблону банка.\n`) +
     `Цель: человекочитаемый отчёт + структурированные поля для автоматизации.\n` +
     `Все текстовые поля пиши НА РУССКОМ. Верни ТОЛЬКО raw JSON (без markdown, без \`\`\`, без пояснений).\n` +
     `Top-level объект ДОЛЖЕН совпадать с формой и ключами ниже:\n${JSON.stringify(schemaHint, null, 2)}\n\n` +
@@ -640,9 +675,10 @@ export async function runVulnContextLlm(
     `- attackFlow: обязательно 4–10 коротких шагов от входной точки до воздействия.\n` +
     `- graph: построй простой граф (attacker→vector→service/asset→impact). Узлы с понятными label.\n` +
     `- remediation: конкретные шаги фикса/минимизации.\n` +
+    `- Если raw.mpvmContext есть: используй реальные активы, установленное ПО/пакеты и версии из MaxPatrol VM. В remediation указывай конкретные версии/пакеты/активы для патчинга и не давай общие рекомендации вместо доступного inventory-контекста.\n` +
     `- nextSteps: что делать прямо сейчас (аудит/проверки/сбор фактов/создание заявки).\n` +
     `- questions: если не хватает данных (версия, модуль, конфигурация) — задай 3–8 вопросов.\n` +
-    `- sources: заполни ссылками, которые нашёл в raw.references/источниках (если есть). Не выдумывай ссылки.\n\n` +
+    `- sources: заполни ссылками из raw (fstecUrl, linked CVE NVD, advisories). Не выдумывай ссылки.\n\n` +
     `Пример (упрощённый):\n` +
     `{\n` +
     `  \"title\": \"Критическая уязвимость в ...\",\n` +
@@ -660,7 +696,7 @@ export async function runVulnContextLlm(
     `  \"graph\": { \"nodes\": [{\"id\":\"attacker\",\"label\":\"Злоумышленник\",\"type\":\"attacker\"}], \"edges\": [] },\n` +
     `  \"uncertainties\": []\n` +
     `}\n\n` +
-    `Неверифицированный CVE-ввод:\n${JSON.stringify(raw).slice(0, effectiveRawJsonMaxChars(config.endpoint))}`;
+    `${kind === "bdu" ? "Данные реестра БДУ" : "Неверифицированный CVE-ввод"}:\n${JSON.stringify(raw).slice(0, effectiveRawJsonMaxChars(config.endpoint))}`;
 
   const useXaiResponses = isXaiResponsesEndpoint(config.endpoint);
   const ollama = isLikelyOllamaOpenAiEndpoint(config.endpoint);
@@ -788,13 +824,21 @@ export async function runVulnContextLlm(
 
   const attackFlow = (outputJson as { attackFlow?: unknown }).attackFlow;
   if (Array.isArray(attackFlow) && attackFlow.length === 0) {
-    const metrics = (raw as any)?.metrics;
+    const metrics = (raw as { metrics?: unknown })?.metrics as
+      | {
+          cvssMetricV31?: Array<{ cvssData?: { attackVector?: string } }>;
+          cvssMetricV30?: Array<{ cvssData?: { attackVector?: string } }>;
+          cvssMetricV2?: Array<{ cvssData?: { accessVector?: string } }>;
+        }
+      | undefined;
     const av =
       metrics?.cvssMetricV31?.[0]?.cvssData?.attackVector ??
       metrics?.cvssMetricV30?.[0]?.cvssData?.attackVector ??
       metrics?.cvssMetricV2?.[0]?.cvssData?.accessVector ??
       null;
-    const viaNetwork = String(av ?? "").toUpperCase().includes("NETWORK");
+    const bduHasExploit = kind === "bdu" && (raw as { hasExploit?: boolean }).hasExploit === true;
+    const viaNetwork =
+      bduHasExploit || String(av ?? "").toUpperCase().includes("NETWORK");
     outputJson = {
       ...outputJson,
       attackFlow: viaNetwork
@@ -845,6 +889,217 @@ export async function runVulnContextLlm(
     inputHash,
     outputJson,
     outputText: outputJson?.summary as string | undefined,
+    tokensInput: inTok,
+    tokensOutput: outTok,
+    model: config.model,
+    promptVersion: config.promptVersion
+  };
+}
+
+/** ИИ-анализ записи БДУ ФСТЭК (тот же JSON-шаблон, что и для CVE). */
+export async function runBduContextLlm(
+  bduId: string,
+  raw: Record<string, unknown>,
+  config: VulnContextLlmConfig
+): Promise<VulnContextLlmResult> {
+  return runVulnContextLlm(`BDU:${bduId}`, raw, config, { kind: "bdu", entityId: bduId });
+}
+
+const FSTEC_BULLETIN_SCHEMA_HINT = {
+  title: "string — заголовок отчёта",
+  executiveSummary: "string — 3–5 предложений для руководства: суть письма ФСТЭК, масштаб, срочность",
+  keyFindings: ["string — 4–7 маркеров «что важно знать»"],
+  overallRiskRating: "'critical'|'high'|'medium'|'low'|'mixed'",
+  bulletinContext: "string — контекст: кому адресовано, правовая база, цель бюллетеня",
+  regulatoryObligations: ["string — обязательные действия для оператора КИИ"],
+  itemSummaries: [
+    {
+      ordinal: "number",
+      bduId: "YYYY-NNNNN",
+      priority: "1–5 (1 = срочнее всего)",
+      headline: "string",
+      summary: "string — 2–4 предложения: суть, затронутое ПО, эффект",
+      businessImpact: "string — влияние на КИИ/бизнес одним абзацем",
+      cvssFromBulletin: "string",
+      registryCvss: "number | null",
+      exploitUrgency: "'immediate'|'soon'|'planned'|'monitor'",
+      attackFlow: ["4–6 коротких шагов цепочки атаки"],
+      remediation: ["конкретные шаги устранения"],
+      compensatingIfAny: ["компенсирующие меры или []"],
+      linkedCves: ["CVE-… только из analysisContext"]
+    }
+  ],
+  crossCuttingThemes: ["string — общие паттерны: стек, вектор, тип уязвимости"],
+  priorityOrder: ["BDU:YYYY-NNNNN — от срочных к отложенным"],
+  combinedRemediationPlan: ["string — пошаговый план: 0–72ч, неделя, месяц"],
+  timelinePhases: [
+    {
+      phase: "string — например «0–72 часа»",
+      horizon: "string",
+      actions: ["string"]
+    }
+  ],
+  riskMatrix: {
+    itemCount: "number",
+    highOrCriticalCount: "number",
+    withPublicExploit: "number",
+    needsImmediatePatch: "number"
+  },
+  combinedGraph: {
+    nodes: [{ id: "string", label: "string", type: "attacker|vector|asset|service|impact" }],
+    edges: [{ from: "nodeId", to: "nodeId", label: "string" }]
+  },
+  managementBrief: "string — 1 абзац для CISO/руководства",
+  technicalBrief: "string — 2–3 абзаца для инженеров ИБ",
+  uncertainties: ["string — что проверить дополнительно"]
+};
+
+/**
+ * Сводный ИИ-анализ официального бюллетеня ФСТЭК (несколько BDU в одном документе).
+ */
+export async function runFstecBulletinAnalysisLlm(
+  bulletinId: string,
+  raw: Record<string, unknown>,
+  config: VulnContextLlmConfig
+): Promise<VulnContextLlmResult> {
+  const subjectId = `FSTEC-BULLETIN:${bulletinId}`;
+  const payload = { bulletinId, raw, promptVersion: config.promptVersion };
+  const inputHash = await sha256Hex(stableJsonStringify(payload));
+  const logLlm = process.env.LLM_LOG_REQUESTS !== "false";
+
+  if (!config.apiKey && requiresApiKey(config.endpoint)) {
+    return {
+      inputHash,
+      model: config.model,
+      promptVersion: config.promptVersion,
+      outputJson: {
+        title: "ИИ не настроен (LLM not configured)",
+        executiveSummary: `${LLM_NOT_CONFIGURED_SUMMARY_PREFIX} (настройте LLM_API_KEY / XAI_API_KEY / DASHSCOPE_API_KEY).`,
+        overallRiskRating: "mixed",
+        bulletinContext: "",
+        itemSummaries: [],
+        crossCuttingThemes: [],
+        priorityOrder: [],
+        combinedRemediationPlan: [],
+        riskMatrix: {
+          itemCount: 0,
+          highOrCriticalCount: 0,
+          withPublicExploit: 0,
+          needsImmediatePatch: 0
+        },
+        combinedGraph: { nodes: [], edges: [] },
+        managementBrief: "",
+        technicalBrief: "",
+        uncertainties: []
+      },
+      outputText: LLM_NOT_CONFIGURED_OUTPUT_TEXT
+    };
+  }
+
+  const userContent =
+    `Ты — аналитик ИБ банка/оператора КИИ. Сформируй ЗРЕЛЫЙ СВОДНЫЙ ОТЧЁТ по официальному бюллетеню ФСТЭК (${subjectId}).\n\n` +
+    `Вход: объект analysisContext (позиции BDU, CVSS, эксплуатация, CVE, urgencyScore, выдержки текста). ` +
+    `Используй precomputedPriorityOrder как основу для priorityOrder, но можешь уточнить с обоснованием в summary.\n` +
+    `ЗАПРЕЩЕНО: выдумывать CVE, BDU, версии ПО — только из analysisContext.items[].linkedCves и bduId.\n` +
+    `Стиль: деловой русский, без воды, без markdown, без «как ИИ».\n` +
+    `Верни ТОЛЬКО JSON (один объект), ключи строго как в схеме.\n\n` +
+    `Схема:\n${JSON.stringify(FSTEC_BULLETIN_SCHEMA_HINT, null, 2)}\n\n` +
+    `Качество (обязательно):\n` +
+    `1) itemSummaries — РОВНО по одной записи на каждый элемент analysisContext.items (все ${(raw as { analysisContext?: { stats?: { totalItems?: number } } }).analysisContext?.stats?.totalItems ?? "?"} позиций).\n` +
+    `2) attackFlow в каждой позиции — 4–6 шагов от входа до воздействия; не дублируй один шаблон для всех.\n` +
+    `3) actionPlan сервер дополнит автоматически; сфокусируйся на itemSummaries.remediation и compensatingIfAny.\n` +
+    `4) timelinePhases — опционально; не дублируй расплывчатый combinedRemediationPlan списком без BDU.\n` +
+    `5) combinedGraph — 8–14 узлов, цепочка attacker→vector→asset/service→impact; label на русском.\n` +
+    `6) keyFindings — отдельно от executiveSummary; короткие маркеры для слайда руководству.\n` +
+    `7) regulatoryObligations — что оператор КИИ должен сделать по смыслу бюллетеня ФСТЭК.\n` +
+    `8) uncertainties — 3–6 вопросов к инвентаризации (версии, экспозиция, сегменты сети).\n\n` +
+    `analysisContext:\n${JSON.stringify((raw as { analysisContext?: unknown }).analysisContext ?? raw).slice(0, effectiveRawJsonMaxChars(config.endpoint))}`;
+
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (config.apiKey.length > 0) headers.authorization = `Bearer ${config.apiKey}`;
+
+  const useXaiResponses = isXaiResponsesEndpoint(config.endpoint);
+  const ollama = isLikelyOllamaOpenAiEndpoint(config.endpoint);
+  const requestBody = useXaiResponses
+    ? {
+        model: config.model,
+        temperature: 0,
+        max_output_tokens: 8192,
+        store: false,
+        input: [
+          { role: "system" as const, content: DEFAULT_SYSTEM_POLICY },
+          { role: "user" as const, content: userContent }
+        ]
+      }
+    : {
+        model: config.model,
+        temperature: 0,
+        messages: [
+          { role: "system" as const, content: DEFAULT_SYSTEM_POLICY },
+          { role: "user" as const, content: userContent }
+        ],
+        ...(ollama
+          ? ({
+              stream: false as const,
+              max_tokens: Math.max(effectiveOllamaMaxOutputTokens(), 12_000)
+            } as const)
+          : {})
+      };
+
+  const timeoutMs = Math.max(effectiveLlmTimeoutMs(config.endpoint), 180_000);
+  const maxAttempts = Math.max(1, Math.min(5, Number(process.env.LLM_HTTP_RETRIES ?? 2)));
+  let res: Response | undefined;
+  let lastErr: Error | null = null;
+  const useOllamaUndici = ollama && process.env.LLM_OLLAMA_UNDICI !== "false";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const init = {
+        method: "POST" as const,
+        headers,
+        body: JSON.stringify(requestBody),
+        signal: AbortSignal.timeout(timeoutMs)
+      };
+      const fetched: Response = useOllamaUndici
+        ? ((await undiciFetch(config.endpoint, {
+            ...init,
+            dispatcher: getOllamaUndiciAgent(timeoutMs)
+          })) as unknown as Response)
+        : await fetch(config.endpoint, init);
+      res = fetched;
+      if (fetched.ok) break;
+      const text = await fetched.text().catch(() => "");
+      lastErr = new Error(`LLM request failed: ${fetched.status} ${text.slice(0, 2500)}`);
+      const retryable = [500, 502, 503, 504, 429].includes(fetched.status);
+      if (!retryable || attempt === maxAttempts) throw lastErr;
+      await new Promise((r) => setTimeout(r, 2000));
+    } catch (err) {
+      lastErr = new Error(formatLlmTransportError(err));
+      if (attempt === maxAttempts) throw lastErr;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+  if (!res?.ok) throw lastErr ?? new Error("LLM request failed");
+
+  const data = (await res.json()) as unknown;
+  const content = extractModelText(data, config.endpoint);
+  if (!content?.length) throw new Error("LLM response missing assistant content");
+
+  const parsed = tryParseLlmJson(content);
+  let outputJson = normalizeOutputJson(parsed, content);
+  const { inTok, outTok } = readTokenUsage((data as { usage?: unknown }).usage);
+
+  const summary =
+    typeof (outputJson as { executiveSummary?: unknown }).executiveSummary === "string"
+      ? (outputJson as { executiveSummary: string }).executiveSummary
+      : typeof (outputJson as { summary?: unknown }).summary === "string"
+        ? (outputJson as { summary: string }).summary
+        : undefined;
+
+  return {
+    inputHash,
+    outputJson,
+    outputText: summary,
     tokensInput: inTok,
     tokensOutput: outTok,
     model: config.model,

@@ -9,13 +9,22 @@ import { StatsController } from "../routes/stats.controller.js";
 import { VendorAdvisoryController } from "../routes/vendor-advisory.controller.js";
 import { AsvController } from "../routes/asv.controller.js";
 import { VulnTaskController } from "../routes/vuln-task.controller.js";
+import { IntegrationSettingsController } from "../routes/integration-settings.controller.js";
+import { BduController } from "../routes/bdu.controller.js";
+import { FstecBulletinController } from "../routes/fstec-bulletin.controller.js";
+import { TelegramController } from "../routes/telegram.controller.js";
+import { FstecBulletinService } from "../services/fstec-bulletin.service.js";
+import { MpvmSyncService } from "../services/mpvm-sync.service.js";
+import { TelegramPostService } from "../services/telegram-post.service.js";
 import { DbModule } from "./db.module.js";
 import { QueueModule } from "./queue.module.js";
+import { BduEnrichRunnerService } from "../services/bdu-enrich-runner.service.js";
 import { CveEnrichRunnerService } from "../services/cve-enrich-runner.service.js";
 import { RedisEnrichCacheService } from "../services/redis-enrich-cache.service.js";
 import { SchemaService } from "../services/schema.service.js";
 import { CveVendorIndexService } from "../services/cve-vendor-index.service.js";
 import { VulnTaskService } from "../services/vuln-task.service.js";
+import { IntegrationSettingsService } from "../services/integration-settings.service.js";
 
 @Module({
   imports: [
@@ -30,11 +39,27 @@ import { VulnTaskService } from "../services/vuln-task.service.js";
       }
     ])
   ],
-  controllers: [HealthController, CveController, StatsController, VendorAdvisoryController, AsvController, VulnTaskController],
+  controllers: [
+    HealthController,
+    CveController,
+    StatsController,
+    VendorAdvisoryController,
+    AsvController,
+    VulnTaskController,
+    IntegrationSettingsController,
+    BduController,
+    FstecBulletinController,
+    TelegramController
+  ],
   providers: [
     SchemaService,
+    FstecBulletinService,
+    MpvmSyncService,
+    TelegramPostService,
     RedisEnrichCacheService,
+    IntegrationSettingsService,
     CveEnrichRunnerService,
+    BduEnrichRunnerService,
     CveVendorIndexService,
     VulnTaskService,
     { provide: APP_GUARD, useClass: JwtAuthGuard }

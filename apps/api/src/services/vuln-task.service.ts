@@ -1,15 +1,8 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { escapePgLikePattern } from "../pg-like.util.js";
 import { DbService } from "./db.service.js";
 
-export type VulnTaskStatus =
-  | "new"
-  | "in_progress"
-  | "needs_info"
-  | "fixing"
-  | "mitigated"
-  | "closed"
-  | "not_applicable"
-  | "risk_accepted";
+export type VulnTaskStatus = "new" | "in_progress" | "closed";
 
 export type VulnTaskPriorityLocal = "low" | "medium" | "high" | "critical";
 
@@ -121,13 +114,24 @@ function aggregateTaskScore(urgencies: Array<{ cveId: string; urgency: number; r
   return { raw, max, top3: Math.round(top3), top10: Math.round(top10), top: us[0] ?? null };
 }
 
+function normalizeTaskStatus(raw: unknown, fallback: VulnTaskStatus = "new"): VulnTaskStatus {
+  const s = String(raw ?? "").trim();
+  if (s === "new" || s === "in_progress" || s === "closed") return s;
+  if (s === "needs_info" || s === "fixing" || s === "mitigated") return "in_progress";
+  if (s === "risk_accepted" || s === "not_applicable") return "closed";
+  return fallback;
+}
+
+function normalizeCveIds(cveIds: unknown): string[] {
+  if (!Array.isArray(cveIds)) return [];
+  return [...new Set(cveIds.map((x) => String(x).trim().toUpperCase()))].filter((x) =>
+    /^CVE-\d{4}-\d{4,}$/.test(x)
+  );
+}
+
 function statusMultiplier(st: VulnTaskStatus): number {
   if (st === "new" || st === "in_progress") return 1.0;
-  if (st === "needs_info") return 0.9;
-  if (st === "fixing") return 0.8;
-  if (st === "mitigated") return 0.7;
-  if (st === "risk_accepted") return 0.3;
-  return 0.0; // closed / not_applicable
+  return 0.0;
 }
 
 @Injectable()
@@ -135,6 +139,17 @@ export class VulnTaskService {
   constructor(private readonly db: DbService) {}
 
   private validatePatch(input: Partial<{
+    title: string;
+    status: VulnTaskStatus | string;
+    priorityLocal: VulnTaskPriorityLocal;
+    owner: string | null;
+    dueDate: string | null;
+    reviewDate: string | null;
+    notesMd: string;
+    decision: string | null;
+    decisionNotes: string | null;
+    evidence: string | null;
+  }>): Partial<{
     title: string;
     status: VulnTaskStatus;
     priorityLocal: VulnTaskPriorityLocal;
@@ -145,51 +160,29 @@ export class VulnTaskService {
     decision: string | null;
     decisionNotes: string | null;
     evidence: string | null;
-  }>) {
-    const status = input.status;
-    const hasText = (s: unknown) => typeof s === "string" && s.trim().length > 0;
-    const evidenceOk = hasText(input.evidence) || hasText(input.decisionNotes);
-    const reviewOk = input.reviewDate != null && String(input.reviewDate).trim().length > 0;
-
-    if (status === "closed") {
-      if (!evidenceOk) {
-        throw new BadRequestException(
-          "For status=closed you must provide evidence or decisionNotes (patch proof / verification)."
-        );
-      }
+  }> {
+    if (input.status === undefined) {
+      const patch = { ...input } as Partial<{
+        title: string;
+        status: VulnTaskStatus;
+        priorityLocal: VulnTaskPriorityLocal;
+        owner: string | null;
+        dueDate: string | null;
+        reviewDate: string | null;
+        notesMd: string;
+        decision: string | null;
+        decisionNotes: string | null;
+        evidence: string | null;
+      }>;
+      delete patch.status;
+      return patch;
     }
-    if (status === "not_applicable") {
-      if (!hasText(input.decision) && !hasText(input.decisionNotes)) {
-        throw new BadRequestException(
-          "For status=not_applicable you must provide decision and/or decisionNotes (reason)."
-        );
-      }
-      if (!evidenceOk) {
-        throw new BadRequestException("For status=not_applicable you must provide evidence (how we know).");
-      }
-    }
-    if (status === "risk_accepted") {
-      if (!hasText(input.decision) && !hasText(input.decisionNotes)) {
-        throw new BadRequestException(
-          "For status=risk_accepted you must provide decision and/or decisionNotes (why accepted)."
-        );
-      }
-      if (!reviewOk) {
-        throw new BadRequestException("For status=risk_accepted you must provide reviewDate (when to revisit).");
-      }
-    }
-    if (status === "needs_info") {
-      if (!reviewOk) {
-        throw new BadRequestException("For status=needs_info you must provide reviewDate (avoid stuck tasks).");
-      }
-    }
+    return { ...input, status: normalizeTaskStatus(input.status, "new") };
   }
 
   private async loadCveSignals(cveIds: string[]): Promise<CveScoreRow[]> {
     if (cveIds.length === 0) return [];
-    const ids = [...new Set(cveIds.map((x) => String(x).trim().toUpperCase()))].filter((x) =>
-      /^CVE-\d{4}-\d{4,}$/.test(x)
-    );
+    const ids = normalizeCveIds(cveIds);
     if (ids.length === 0) return [];
 
     const r = await this.db.query<CveScoreRow>(
@@ -246,6 +239,75 @@ export class VulnTaskService {
     return r.rows;
   }
 
+  private async buildAutoEvidence(input: {
+    vendorDisplay: string;
+    productDisplay?: string | null;
+    cveIds?: string[];
+    notesMd?: string | null;
+  }): Promise<string> {
+    const cveIds = normalizeCveIds(input.cveIds ?? []);
+    const product = input.productDisplay ? `${input.vendorDisplay} / ${input.productDisplay}` : input.vendorDisplay;
+    const cveText = cveIds.length > 0 ? cveIds.slice(0, 5).join(", ") : "связанные CVE";
+    const lines = [
+      `Проверить применимость ${cveText} к ${product}.`,
+      "Проверить наличие уязвимой версии в инвентаре/на периметре.",
+      "Проверить наличие патча, workaround или vendor advisory.",
+      "Проверить признаки эксплуатации и необходимость срочной реакции.",
+      "Зафиксировать результат проверки: версия, ссылка на тикет/advisory или причина неприменимости."
+    ];
+    if (cveIds.length > 5) lines[0] = `Проверить применимость ${cveText} и ещё ${cveIds.length - 5} CVE к ${product}.`;
+    return lines.join("\n");
+  }
+
+  private async ensureCvesExist(
+    cveIds: string[],
+    opts?: {
+      vendorDisplay?: string;
+      vendorKey?: string;
+      productDisplay?: string | null;
+      productKeyNorm?: string | null;
+      source?: string;
+    }
+  ): Promise<void> {
+    const ids = normalizeCveIds(cveIds);
+    if (ids.length === 0) return;
+    const source = opts?.source ?? "task";
+    await this.db.query(
+      `INSERT INTO cve (cve_id, source, raw)
+       SELECT x.cve_id,
+              $2::text,
+              jsonb_build_object(
+                'source', $2::text,
+                'placeholder', true,
+                'cve', jsonb_build_object('id', x.cve_id),
+                'descriptions', jsonb_build_array(
+                  jsonb_build_object('lang', 'en', 'value', 'Placeholder CVE row created from vulnerability task source.')
+                )
+              )
+         FROM unnest($1::text[]) AS x(cve_id)
+       ON CONFLICT (cve_id) DO NOTHING`,
+      [ids, source]
+    );
+
+    const vendorDisplay = opts?.vendorDisplay?.trim();
+    const vendorKey = opts?.vendorKey?.trim().toLowerCase();
+    if (!vendorDisplay || !vendorKey) return;
+    const productDisplay = opts?.productDisplay?.trim() || null;
+    const productKeyNorm = opts?.productKeyNorm?.trim().toLowerCase() ?? "";
+    await this.db.query(
+      `INSERT INTO cve_vendor_product (cve_id, vendor, product, vendor_key, product_key, product_key_norm, source)
+       SELECT x.cve_id, $2::text, $3::text, $4::text, $5::text, $6::text, $7::text
+         FROM unnest($1::text[]) AS x(cve_id)
+       ON CONFLICT (cve_id, vendor_key, product_key_norm) DO UPDATE
+         SET vendor = EXCLUDED.vendor,
+             product = EXCLUDED.product,
+             product_key = EXCLUDED.product_key,
+             source = EXCLUDED.source,
+             updated_at = now()`,
+      [ids, vendorDisplay, productDisplay, vendorKey, productDisplay, productKeyNorm, source]
+    );
+  }
+
   private async recomputeTask(taskId: string): Promise<void> {
     const links = await this.db.query<{ cve_id: string }>(
       `SELECT cve_id FROM vuln_task_cve WHERE task_id = $1 ORDER BY added_at ASC`,
@@ -265,7 +327,7 @@ export class VulnTaskService {
       [taskId]
     );
     if ((t.rowCount ?? 0) === 0) throw new NotFoundException("Task not found");
-    const st = t.rows[0]!.status;
+    const st = normalizeTaskStatus(t.rows[0]!.status, "new");
     const final = clamp(Math.round(agg.raw * statusMultiplier(st)), 0, 100);
 
     const kevCount = rows.filter((r) => r.exploit_known).length;
@@ -311,8 +373,20 @@ export class VulnTaskService {
       filters.push(cond.replace(/\$(\d+)/g, () => `$${params.length}`));
     };
     const q = opts.q?.trim() ? opts.q.trim().toLowerCase() : null;
-    if (q) add(`(lower(title) LIKE '%' || $1 || '%' OR lower(vendor_display) LIKE '%' || $1 || '%' OR lower(product_display) LIKE '%' || $1 || '%')`, q);
-    const st = opts.status?.trim() ? opts.status.trim() : null;
+    if (q) {
+      const needle = escapePgLikePattern(q);
+      params.push(needle);
+      const ni = params.length;
+      const like = `'%' || $${ni}::text || '%' ESCAPE E'\\\\'`;
+      filters.push(
+        `(lower(title) LIKE ${like} OR lower(vendor_display) LIKE ${like} OR lower(product_display) LIKE ${like})`
+      );
+    }
+    const rawStatus = opts.status?.trim() ?? "";
+    const st =
+      rawStatus && /^(new|in_progress|closed|needs_info|fixing|mitigated|risk_accepted|not_applicable)$/.test(rawStatus)
+        ? normalizeTaskStatus(rawStatus, "new")
+        : null;
     if (st) add(`status = $1`, st);
     const where = filters.length ? `WHERE ${filters.join(" AND ")}` : `WHERE TRUE`;
     const sort = (opts.sort ?? "score").toLowerCase();
@@ -384,6 +458,7 @@ export class VulnTaskService {
     priorityLocal?: VulnTaskPriorityLocal;
     cveIds?: string[];
     notesMd?: string | null;
+    evidence?: string | null;
   }) {
     const vendorKey = String(input.vendorKey ?? "").trim().toLowerCase();
     const vendorDisplay = String(input.vendorDisplay ?? "").trim();
@@ -393,10 +468,24 @@ export class VulnTaskService {
     const title =
       (input.title?.trim() || null) ??
       `${vendorDisplay}${productDisplay ? ` / ${productDisplay}` : ""} — кампания по уязвимостям`;
+    const normalizedCveIds = normalizeCveIds(input.cveIds ?? []);
+    await this.ensureCvesExist(normalizedCveIds, {
+      vendorDisplay,
+      vendorKey,
+      productDisplay,
+      productKeyNorm,
+      source: "task.create"
+    });
+    const evidence = input.evidence?.trim() || (await this.buildAutoEvidence({
+      vendorDisplay,
+      productDisplay,
+      cveIds: normalizedCveIds,
+      notesMd: input.notesMd
+    }));
 
     const r = await this.db.query<{ id: string }>(
-      `INSERT INTO vuln_task (title, vendor_key, vendor_display, product_key_norm, product_display, owner, due_date, priority_local, notes_md)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      `INSERT INTO vuln_task (title, vendor_key, vendor_display, product_key_norm, product_display, owner, due_date, priority_local, notes_md, evidence)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        RETURNING id`,
       [
         title,
@@ -407,31 +496,30 @@ export class VulnTaskService {
         input.owner?.trim() || null,
         input.dueDate ? new Date(input.dueDate) : null,
         input.priorityLocal ?? "medium",
-        input.notesMd ?? ""
+        input.notesMd ?? "",
+        evidence
       ]
     );
     const id = r.rows[0]!.id;
 
-    const cveIds = Array.isArray(input.cveIds) ? input.cveIds : [];
-    if (cveIds.length > 0) {
-      const normalized = [...new Set(cveIds.map((x) => String(x).trim().toUpperCase()))].filter((x) =>
-        /^CVE-\d{4}-\d{4,}$/.test(x)
+    let linkedCveCount = 0;
+    let ignoredCveCount = 0;
+    if (normalizedCveIds.length > 0) {
+      const inserted = await this.db.query(
+        `INSERT INTO vuln_task_cve (task_id, cve_id)
+         SELECT $1, x.cve_id
+           FROM unnest($2::text[]) AS x(cve_id)
+         ON CONFLICT DO NOTHING`,
+        [id, normalizedCveIds]
       );
-      if (normalized.length > 0) {
-        await this.db.query(
-          `INSERT INTO vuln_task_cve (task_id, cve_id)
-           SELECT $1, x.cve_id
-             FROM unnest($2::text[]) AS x(cve_id)
-           ON CONFLICT DO NOTHING`,
-          [id, normalized]
-        );
-      }
+      linkedCveCount = inserted.rowCount ?? 0;
+      ignoredCveCount = Math.max(0, normalizedCveIds.length - linkedCveCount);
     }
 
     await this.db.query(
       `INSERT INTO vuln_task_event (task_id, action, after)
        VALUES ($1, 'task.created', $2::jsonb)`,
-      [id, JSON.stringify({ title, vendorKey, productKeyNorm, cveCount: cveIds.length })]
+      [id, JSON.stringify({ title, vendorKey, productKeyNorm, cveCount: linkedCveCount, ignoredCveCount, evidenceAuto: true })]
     );
 
     await this.recomputeTask(id);
@@ -440,7 +528,7 @@ export class VulnTaskService {
 
   async patch(taskId: string, input: Partial<{
     title: string;
-    status: VulnTaskStatus;
+    status: VulnTaskStatus | string;
     priorityLocal: VulnTaskPriorityLocal;
     owner: string | null;
     dueDate: string | null;
@@ -450,7 +538,7 @@ export class VulnTaskService {
     decisionNotes: string | null;
     evidence: string | null;
   }>) {
-    this.validatePatch(input);
+    const patch = this.validatePatch(input);
     const before = await this.db.query(`SELECT * FROM vuln_task WHERE id = $1 LIMIT 1`, [taskId]);
     if ((before.rowCount ?? 0) === 0) throw new NotFoundException("Task not found");
 
@@ -459,16 +547,16 @@ export class VulnTaskService {
       if (v === undefined) return;
       upd[k] = v;
     };
-    set("title", input.title?.trim());
-    set("status", input.status);
-    set("priority_local", input.priorityLocal);
-    set("owner", input.owner === undefined ? undefined : input.owner?.trim() || null);
-    set("due_date", input.dueDate === undefined ? undefined : input.dueDate ? new Date(input.dueDate) : null);
-    set("review_date", input.reviewDate === undefined ? undefined : input.reviewDate ? new Date(input.reviewDate) : null);
-    set("notes_md", input.notesMd);
-    set("decision", input.decision === undefined ? undefined : input.decision);
-    set("decision_notes", input.decisionNotes === undefined ? undefined : input.decisionNotes);
-    set("evidence", input.evidence === undefined ? undefined : input.evidence);
+    set("title", patch.title?.trim());
+    set("status", patch.status);
+    set("priority_local", patch.priorityLocal);
+    set("owner", patch.owner === undefined ? undefined : patch.owner?.trim() || null);
+    set("due_date", patch.dueDate === undefined ? undefined : patch.dueDate ? new Date(patch.dueDate) : null);
+    set("review_date", patch.reviewDate === undefined ? undefined : patch.reviewDate ? new Date(patch.reviewDate) : null);
+    set("notes_md", patch.notesMd);
+    set("decision", patch.decision === undefined ? undefined : patch.decision);
+    set("decision_notes", patch.decisionNotes === undefined ? undefined : patch.decisionNotes);
+    set("evidence", patch.evidence === undefined ? undefined : patch.evidence);
 
     const keys = Object.keys(upd);
     if (keys.length === 0) return { ok: true };
@@ -482,10 +570,10 @@ export class VulnTaskService {
     sets.push(`updated_at = now()`);
 
     // auto closed_at
-    if (input.status === "closed" || input.status === "not_applicable") {
+    if (patch.status === "closed") {
       sets.push(`closed_at = COALESCE(closed_at, now())`);
     }
-    if (input.status && input.status !== "closed" && input.status !== "not_applicable") {
+    if (patch.status && patch.status !== "closed") {
       sets.push(`closed_at = NULL`);
     }
 
@@ -502,10 +590,23 @@ export class VulnTaskService {
   }
 
   async addCves(taskId: string, cveIds: string[]) {
-    const normalized = [...new Set((cveIds ?? []).map((x) => String(x).trim().toUpperCase()))].filter((x) =>
-      /^CVE-\d{4}-\d{4,}$/.test(x)
-    );
+    const normalized = normalizeCveIds(cveIds ?? []);
     if (normalized.length === 0) throw new BadRequestException("No CVEs");
+
+    const task = await this.db.query<{
+      vendor_display: string;
+      product_display: string | null;
+      notes_md: string | null;
+      evidence: string | null;
+    }>(`SELECT vendor_display, product_display, notes_md, evidence FROM vuln_task WHERE id = $1 LIMIT 1`, [taskId]);
+    if ((task.rowCount ?? 0) === 0) throw new NotFoundException("Task not found");
+    await this.ensureCvesExist(normalized, {
+      vendorDisplay: task.rows[0]?.vendor_display ?? "vendor",
+      vendorKey: String(task.rows[0]?.vendor_display ?? "vendor").toLowerCase(),
+      productDisplay: task.rows[0]?.product_display ?? "",
+      productKeyNorm: String(task.rows[0]?.product_display ?? "").toLowerCase().replace(/\s+/g, "_"),
+      source: "task.add_cves"
+    });
 
     await this.db.query(
       `INSERT INTO vuln_task_cve (task_id, cve_id)
@@ -514,6 +615,16 @@ export class VulnTaskService {
        ON CONFLICT DO NOTHING`,
       [taskId, normalized]
     );
+
+    if (!String(task.rows[0]?.evidence ?? "").trim()) {
+      const evidence = await this.buildAutoEvidence({
+        vendorDisplay: task.rows[0]?.vendor_display ?? "vendor",
+        productDisplay: task.rows[0]?.product_display ?? "",
+        cveIds: normalized,
+        notesMd: task.rows[0]?.notes_md ?? ""
+      });
+      await this.db.query(`UPDATE vuln_task SET evidence = $2, updated_at = now() WHERE id = $1`, [taskId, evidence]);
+    }
 
     await this.db.query(
       `INSERT INTO vuln_task_event (task_id, action, after)

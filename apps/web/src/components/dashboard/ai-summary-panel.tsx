@@ -25,8 +25,11 @@ export function AiSummaryPanel({
 }) {
   const d = (data ?? null) as null | {
     cve?: { cve_id?: string | null } | null;
+    bdu?: { bduId?: string | null } | null;
     ai?: { output_json?: Record<string, unknown> | null; output_text?: unknown } | null;
   };
+  const entityId = d?.cve?.cve_id ?? d?.bdu?.bduId ?? null;
+  const entityLabel = d?.cve?.cve_id ? "CVE" : d?.bdu?.bduId ? "БДУ" : "запись";
   const out = parseAiOutputJson(d?.ai?.output_json ?? null);
   const get = (k: string): unknown => (out ? out[k] : undefined);
   const enrichError = Boolean(get("_enrich_error"));
@@ -44,7 +47,7 @@ export function AiSummaryPanel({
   const nextSteps = get("nextSteps") ?? null;
   const questions = get("questions") ?? null;
 
-  const canRefresh = Boolean(manualEnrichAllowed && onRequestEnrich && d?.cve?.cve_id && data);
+  const canRefresh = Boolean(manualEnrichAllowed && onRequestEnrich && entityId && data);
 
   return (
     <div className="glass rounded-2xl p-5">
@@ -72,7 +75,7 @@ export function AiSummaryPanel({
                     ? "Ошибка LLM"
                     : data
                       ? "Готово"
-                      : "Выберите CVE"}
+                      : `Выберите ${entityLabel}`}
           </div>
         </div>
       </div>
@@ -98,21 +101,21 @@ export function AiSummaryPanel({
             <div className="mt-2 text-sm leading-relaxed">
               {summaryText ??
                 (aiPending
-                  ? "Генерируем сводку по CVE (воркер + LLM). Обычно занимает несколько секунд."
+                  ? `Генерируем сводку по ${entityLabel} (LLM). Обычно занимает несколько секунд.`
                   : aiStalled
                     ? manualEnrichAllowed
-                      ? "За несколько минут не пришла ИИ‑сводка (локальный LLM может дольше). Проверьте Ollama/сеть, RabbitMQ и `LLM_*` / `LLM_TIMEOUT_MS`. Закройте панель и откройте CVE снова или нажмите «Повторить»."
-                      : "ИИ‑сводка ещё не готова или воркер недоступен. Обогащение идёт в фоне — страница обновляется сама."
+                      ? "За несколько минут не пришла ИИ‑сводка. Проверьте Ollama/сеть и `LLM_*`. Закройте карточку и откройте снова или нажмите «Повторить»."
+                      : "ИИ‑сводка ещё не готова. Обогащение идёт в фоне — страница обновляется сама."
                     : manualEnrichAllowed
-                      ? "ИИ‑данных пока нет. Свежие CVE (24ч) подхватывает фон из ingest; старше 24ч — только кнопкой ниже."
-                      : "ИИ‑данных пока нет. Обогащение в фоне для свежих CVE; для остальных — когда сервер разрешит on-demand enrich.")}
+                      ? `ИИ‑данных пока нет. Свежие записи (24ч) можно запросить кнопкой ниже.`
+                      : "ИИ‑данных пока нет. Обогащение в фоне для свежих записей; для остальных — когда сервер разрешит on-demand enrich.")}
             </div>
-            {!aiPending && manualEnrichAllowed && d?.cve?.cve_id && onRequestEnrich ? (
+            {!aiPending && manualEnrichAllowed && entityId && onRequestEnrich ? (
               <div className="mt-3 flex flex-wrap gap-2">
                 {(enrichError || !summaryText) ? (
                   <button
                     type="button"
-                    onClick={() => onRequestEnrich(enrichError ? { force: true } : undefined)}
+                    onClick={() => onRequestEnrich({ force: true })}
                     className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs text-fg/90 hover:bg-slate-100 dark:border-border dark:bg-black/30 dark:hover:bg-black/40"
                   >
                     {enrichError ? "Повторить ИИ‑обогащение" : "Запросить ИИ‑обогащение"}

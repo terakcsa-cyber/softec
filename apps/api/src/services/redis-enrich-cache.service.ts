@@ -29,6 +29,16 @@ export class RedisEnrichCacheService implements OnModuleDestroy {
     }
   }
 
+  async invalidateForBdu(bduId: string, promptVersion: string): Promise<void> {
+    if (!this.client || process.env.API_REDIS_ENRICH_INVALIDATE === "false") return;
+    const key = `ai:enrich:BDU:${bduId}:${promptVersion}`;
+    try {
+      await this.client.del(key);
+    } catch {
+      // ignore
+    }
+  }
+
   onModuleDestroy() {
     this.client?.disconnect();
   }

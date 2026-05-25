@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -108,18 +109,33 @@ for (let attempt = 1; attempt <= maxDevRetries; attempt++) {
 
   const apiBase = `http://${API_HOST}:${apiPort}/api`;
   // eslint-disable-next-line no-console
+  const webUrl = `http://${WEB_HOST}:${webPort}`;
   console.log(
     [
       `Using ports (attempt ${attempt}/${maxDevRetries}):`,
       `- API: ${apiPort} (${apiBase})`,
-      `- Web: ${webPort} (http://${WEB_HOST}:${webPort})`,
+      `- Web: ${webPort} (${webUrl})`,
       ``
     ].join("\n")
   );
+  try {
+    fs.writeFileSync(
+      path.join(process.cwd(), ".dev-ports.json"),
+      JSON.stringify({ webUrl, apiBase, webPort, apiPort, startedAt: new Date().toISOString() }, null, 2),
+      "utf8"
+    );
+  } catch {
+    // ignore
+  }
 
   const jwtSecret =
     process.env.JWT_SECRET?.trim() ||
     "dev-only-change-me-min-32-chars-for-jwt-secret!!";
+
+  /** Один токен для Nest и Next: лента ФСТЭК / lookup / BDU-sync без JWT в браузере. */
+  const internalApiBearer =
+    process.env.INTERNAL_API_BEARER?.trim() ||
+    crypto.createHash("sha256").update(`vip-dev-internal|${jwtSecret}|${apiPort}`).digest("hex");
 
   const env = sanitizeNodeOptions({
     ...process.env,
@@ -129,6 +145,7 @@ for (let attempt = 1; attempt <= maxDevRetries; attempt++) {
     WEB_PORT: String(webPort),
     UPSTREAM_API_BASE: apiBase,
     JWT_SECRET: jwtSecret,
+    INTERNAL_API_BEARER: internalApiBearer,
     /**
      * Всегда как у поднятого API (`apiBase`). Не брать из `.env`: там часто зашит 4001,
      * а `findFreePort` мог выбрать другой порт — иначе BFF и браузер расходятся с Nest.

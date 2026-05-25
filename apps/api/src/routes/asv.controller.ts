@@ -14,6 +14,8 @@ import { randomUUID } from "node:crypto";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
 import { sha256Hex, stableJsonStringify } from "@vuln-intel/shared";
+import { CurrentUser } from "../auth/current-user.decorator.js";
+import type { AuthUser } from "../auth/jwt.strategy.js";
 
 type AssetType = "domain" | "ip" | "cidr" | "url";
 
@@ -314,6 +316,153 @@ export class AsvController {
       [id]
     );
     return { item: n.rows[0] ?? null };
+  }
+
+  @Get("findings/:id/msf-runs")
+  async listMsfRunsByFinding(@Param("id") findingId: string) {
+    const r = await this.db.query(
+      `SELECT id, finding_id, scan_run_id, asset_id, status, mode, action, module, options, ack_risks, summary, error,
+              created_by, started_at, ended_at, created_at, updated_at
+         FROM asv_msf_run
+        WHERE finding_id = $1
+     ORDER BY created_at DESC
+        LIMIT 50`,
+      [findingId]
+    );
+    return { items: r.rows };
+  }
+
+  @Post("findings/:id/msf-runs")
+  async createMsfRun(
+    @Param("id") findingId: string,
+    @CurrentUser() user: AuthUser,
+    @Body()
+    body: {
+      mode?: "safe" | "exploit";
+      action?: "search" | "check" | "run" | "exploit";
+      module?: string | null;
+      options?: Record<string, unknown> | null;
+      ackRisks?: boolean;
+      autoPick?: boolean;
+    }
+  ) {
+    const mode = body.mode === "exploit" ? "exploit" : "safe";
+    const actionRaw = String(body.action ?? "check").trim().toLowerCase();
+    const action =
+      actionRaw === "search" || actionRaw === "run" || actionRaw === "exploit" || actionRaw === "check"
+        ? (actionRaw as "search" | "check" | "run" | "exploit")
+        : "check";
+
+    const module = typeof body.module === "string" ? body.module.trim() : "";
+    const options = body.options && typeof body.options === "object" ? body.options : {};
+    const ackRisks = Boolean(body.ackRisks === true);
+    const autoPick = Boolean(body.autoPick === true);
+
+    if (mode === "exploit" && !ackRisks) {
+      throw new BadRequestException("exploit mode requires ackRisks=true");
+    }
+    if (action === "exploit" && mode !== "exploit") {
+      throw new BadRequestException("action=exploit requires mode=exploit");
+    }
+    if (autoPick && action === "search") {
+      throw new BadRequestException("autoPick requires a validation action (check/run/exploit), not search");
+    }
+
+    const f = await this.db.query<{ id: string; scan_run_id: string | null; asset_id: string }>(
+      `SELECT id, scan_run_id, asset_id FROM asv_finding WHERE id = $1`,
+      [findingId]
+    );
+    const fr = f.rows[0];
+    if (!fr) throw new NotFoundException("finding not found");
+
+    const r = await this.db.query(
+      `INSERT INTO asv_msf_run (finding_id, scan_run_id, asset_id, status, mode, action, module, options, ack_risks, created_by)
+       VALUES ($1,$2,$3,'queued',$4,$5,$6,$7::jsonb,$8,$9)
+       RETURNING id, finding_id, scan_run_id, asset_id, status, mode, action, module, options, ack_risks, summary, error, created_by,
+                 started_at, ended_at, created_at, updated_at`,
+      [
+        findingId,
+        fr.scan_run_id ?? null,
+        fr.asset_id ?? null,
+        mode,
+        action,
+        module.length ? module : null,
+        JSON.stringify({ ...options, autoPick: autoPick || undefined }),
+        ackRisks,
+        user?.email ?? null
+      ]
+    );
+    const row = r.rows[0];
+    if (!row?.id) throw new Error("failed to create msf run");
+
+    await this.db.query(
+      `INSERT INTO asv_msf_event (run_id, actor, action, before, after, meta)
+       VALUES ($1,$2,'created',NULL,$3::jsonb,$4::jsonb)`,
+      [row.id, user?.email ?? null, JSON.stringify({ status: "queued" }), JSON.stringify({ mode, action })]
+    );
+
+    await this.queue.publish("vuln.events", "asv.msf.requested.v1", {
+      id: randomUUID(),
+      type: "asv.msf.requested.v1",
+      ts: new Date().toISOString(),
+      producer: { service: "api" },
+      idempotencyKey: `asv:msf:${row.id}`,
+      payload: { runId: row.id }
+    });
+
+    return row;
+  }
+
+  @Get("msf-runs/:id")
+  async getMsfRun(@Param("id") id: string) {
+    const r = await this.db.query(
+      `SELECT id, finding_id, scan_run_id, asset_id, status, mode, action, module, options, ack_risks, summary, error,
+              created_by, started_at, ended_at, created_at, updated_at
+         FROM asv_msf_run
+        WHERE id = $1`,
+      [id]
+    );
+    const row = r.rows[0];
+    if (!row) throw new NotFoundException();
+    return row;
+  }
+
+  @Get("msf-runs/:id/events")
+  async getMsfRunEvents(@Param("id") id: string) {
+    const r = await this.db.query(
+      `SELECT id, run_id, ts, actor, action, before, after, meta
+         FROM asv_msf_event
+        WHERE run_id = $1
+     ORDER BY ts DESC
+        LIMIT 200`,
+      [id]
+    );
+    return { items: r.rows };
+  }
+
+  @Get("msf-runs/:id/artifacts")
+  async listMsfRunArtifacts(@Param("id") id: string) {
+    const r = await this.db.query(
+      `SELECT id, run_id, kind, bytes, sha256, storage, created_at
+         FROM asv_msf_artifact
+        WHERE run_id = $1
+     ORDER BY created_at DESC`,
+      [id]
+    );
+    return { items: r.rows };
+  }
+
+  @Get("msf-runs/:runId/artifacts/:artifactId")
+  async getMsfRunArtifact(@Param("runId") runId: string, @Param("artifactId") artifactId: string) {
+    const r = await this.db.query(
+      `SELECT id, run_id, kind, bytes, sha256, storage, content_text, created_at
+         FROM asv_msf_artifact
+        WHERE run_id = $1 AND id = $2`,
+      [runId, artifactId]
+    );
+    const row = r.rows[0];
+    if (!row) throw new NotFoundException();
+    return row;
   }
 
   @Post("findings/:id/ai/triage")

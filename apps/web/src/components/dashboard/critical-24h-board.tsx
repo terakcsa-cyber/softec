@@ -63,27 +63,26 @@ function filterByCategory(list: HotCveRow[], cat: HotCategory): HotCveRow[] {
 }
 
 function sortByCategory(list: HotCveRow[], cat: HotCategory): HotCveRow[] {
-  const byTsDesc = (a: HotCveRow, b: HotCveRow) => {
-    const ta = a.published_at ?? a.modified_at ?? "";
-    const tb = b.published_at ?? b.modified_at ?? "";
+  const byPublishedDesc = (a: HotCveRow, b: HotCveRow) => {
+    const ta = a.published_at ?? "";
+    const tb = b.published_at ?? "";
     return tb.localeCompare(ta);
   };
-  // Default mode: sort by criticality (operationally useful), then by time.
+  // Главная показывает не ленту, а triage-очередь: сначала максимальная вероятность эксплуатации.
   if (cat === "all24h") {
     return [...list].sort((a, b) => {
-      const ka = a.exploit_known ? 1 : 0;
-      const kb = b.exploit_known ? 1 : 0;
-      if (kb !== ka) return kb - ka;
-      const ra = typeof a.risk_score === "number" ? a.risk_score : -1;
-      const rb = typeof b.risk_score === "number" ? b.risk_score : -1;
-      if (rb !== ra) return rb - ra;
       const ea = typeof a.epss === "number" ? a.epss : -1;
       const eb = typeof b.epss === "number" ? b.epss : -1;
       if (eb !== ea) return eb - ea;
+      const ra = typeof a.risk_score === "number" ? a.risk_score : -1;
+      const rb = typeof b.risk_score === "number" ? b.risk_score : -1;
+      if (rb !== ra) return rb - ra;
       const ca = typeof a.cvss_base === "number" ? a.cvss_base : -1;
       const cb = typeof b.cvss_base === "number" ? b.cvss_base : -1;
       if (cb !== ca) return cb - ca;
-      return byTsDesc(a, b);
+      const ta = a.published_at ?? "";
+      const tb = b.published_at ?? "";
+      return tb.localeCompare(ta);
     });
   }
   if (cat === "kev") {
@@ -94,7 +93,7 @@ function sortByCategory(list: HotCveRow[], cat: HotCategory): HotCveRow[] {
       const ra = typeof a.risk_score === "number" ? a.risk_score : -1;
       const rb = typeof b.risk_score === "number" ? b.risk_score : -1;
       if (rb !== ra) return rb - ra;
-      return byTsDesc(a, b);
+      return byPublishedDesc(a, b);
     });
   }
   if (cat === "cvss9") {
@@ -102,7 +101,7 @@ function sortByCategory(list: HotCveRow[], cat: HotCategory): HotCveRow[] {
       const ca = typeof a.cvss_base === "number" ? a.cvss_base : -1;
       const cb = typeof b.cvss_base === "number" ? b.cvss_base : -1;
       if (cb !== ca) return cb - ca;
-      return byTsDesc(a, b);
+      return byPublishedDesc(a, b);
     });
   }
   if (cat === "epss05") {
@@ -110,22 +109,25 @@ function sortByCategory(list: HotCveRow[], cat: HotCategory): HotCveRow[] {
       const ea = typeof a.epss === "number" ? a.epss : -1;
       const eb = typeof b.epss === "number" ? b.epss : -1;
       if (eb !== ea) return eb - ea;
-      return byTsDesc(a, b);
+      return byPublishedDesc(a, b);
     });
   }
-  return [...list].sort(byTsDesc);
+  return [...list].sort(byPublishedDesc);
 }
 
 export function Critical24hBoard({
   items,
   loading,
   highlightedCveIds,
+  maxPublishedAt,
   onCveClick
 }: {
   items: HotCveRow[] | undefined;
   loading: boolean;
   /** CVE, для которых открыто модальное окно на дашборде. */
   highlightedCveIds?: ReadonlySet<string> | null;
+  /** Последняя дата публикации в NVD в базе (для пустого блока). */
+  maxPublishedAt?: string | null;
   onCveClick: (cveId: string) => void;
 }) {
   const [cat, setCat] = useState<HotCategory>("all24h");
@@ -165,10 +167,10 @@ export function Critical24hBoard({
     <div className="space-y-4">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <div className="text-base font-semibold tracking-tight text-fg/95">Угрозы за последние 24 часа</div>
+          <div className="text-base font-semibold tracking-tight text-fg/95">Срочные CVE за последние 24 часа</div>
           <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-muted">
-            CVE с датой публикации в окне 24ч, от новых к старым по времени публикации. Клик открывает отдельное окно поверх (несколько
-            окон можно открыть и перетаскивать за заголовок).
+            Только новые CVE с сильным сигналом: KEV, EPSS ≥ 50% или CVSS ≥ 9. Это короткий список для немедленного
+            внимания, без общей шумной ленты.
           </p>
         </div>
       </div>
@@ -179,9 +181,9 @@ export function Critical24hBoard({
           {
             key: "all24h",
             icon: Target,
-            label: "В окне 24ч",
+            label: "Срочные",
             value: stats.total,
-            sub: "записей в выборке",
+            sub: "KEV / EPSS / CVSS",
             tone: "from-indigo-500/20 to-violet-600/10"
           },
           {
@@ -205,7 +207,7 @@ export function Critical24hBoard({
             icon: Flame,
             label: "EPSS ≥ 0.5",
             value: stats.highEpss,
-            sub: "высокая вероятность",
+            sub: "эксплуатации",
             tone: "from-fuchsia-500/15 to-pink-600/10"
           }
         ] as const
@@ -239,8 +241,21 @@ export function Critical24hBoard({
 
       {stats.total === 0 ? (
         <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center text-sm text-muted dark:border-border dark:bg-black/10">
-          За последние 24 часа нет опубликованных CVE в базе — проверьте ingest NVD или расширьте окно во вкладке
-          «Уязвимости».
+          <p>
+            За последние 24 часа нет CVE с сильным сигналом:{" "}
+            <span className="font-medium text-fg/85">KEV</span>,{" "}
+            <span className="font-medium text-fg/85">EPSS ≥ 50%</span> или{" "}
+            <span className="font-medium text-fg/85">CVSS ≥ 9</span>.
+          </p>
+          {maxPublishedAt ? (
+            <p className="mt-2 text-[12px]">
+              Последняя публикация в базе:{" "}
+              <span className="font-medium text-fg/80">{new Date(maxPublishedAt).toLocaleString()}</span>
+            </p>
+          ) : null}
+          <p className="mt-2 text-[11px] leading-relaxed">
+            Это нормально: на главной теперь показываем только действительно срочные события, а не всю NVD-ленту.
+          </p>
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
@@ -290,10 +305,8 @@ export function Critical24hBoard({
                     </div>
                     <div className="mt-1 text-[10px] text-muted">
                       {it.published_at
-                        ? new Date(it.published_at).toLocaleString()
-                        : it.modified_at
-                          ? `изм. ${new Date(it.modified_at).toLocaleString()}`
-                          : "нет даты"}
+                        ? `опубл. ${new Date(it.published_at).toLocaleString()}`
+                        : "нет даты публикации"}
                     </div>
                   </div>
                   <span

@@ -3,7 +3,8 @@ import type { ConsumeMessage } from "amqplib";
 import { createHash, randomUUID } from "node:crypto";
 import { QueueService } from "../services/queue.service.js";
 import { DbService } from "../services/db.service.js";
-import { getVulnContextLlmConfigFromEnv, sha256Hex, stableJsonStringify } from "@vuln-intel/shared";
+import { LlmService } from "../services/llm.service.js";
+import { sha256Hex, stableJsonStringify } from "@vuln-intel/shared";
 
 type Envelope = {
   id?: string;
@@ -27,7 +28,8 @@ function extractTextFromChatCompletions(data: any): string | null {
 export class AsvTriageWorker implements OnModuleInit {
   constructor(
     private readonly db: DbService,
-    private readonly queue: QueueService
+    private readonly queue: QueueService,
+    private readonly llm: LlmService
   ) {}
 
   async onModuleInit() {
@@ -75,7 +77,7 @@ export class AsvTriageWorker implements OnModuleInit {
           return;
         }
 
-        const cfg = getVulnContextLlmConfigFromEnv();
+        const cfg = await this.llm.getEffectiveLlmConfig();
 
         // Keep input bounded and stable.
         const input = {
@@ -204,7 +206,7 @@ export class AsvTriageWorker implements OnModuleInit {
       }
     });
 
-    const cfg = getVulnContextLlmConfigFromEnv();
+    const cfg = await this.llm.getEffectiveLlmConfig();
     // eslint-disable-next-line no-console
     console.log(`[ai:asv-triage] worker ready queue=ai.asv-triage model=${cfg.model} endpoint=${cfg.endpoint}`);
   }
