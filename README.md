@@ -190,7 +190,7 @@ cp .env.example .env
 
 Рекомендуется:
 
-- `AUTH_BOOTSTRAP_EMAIL` / `AUTH_BOOTSTRAP_PASSWORD` — первый пользователь при пустой таблице пользователей;
+- первый пользователь создаётся интерактивно на `/login`, если `auth_user` пустая; `AUTH_BOOTSTRAP_EMAIL` / `AUTH_BOOTSTRAP_PASSWORD` — только headless fallback;
 - `NVD_API_KEY` — лимиты NVD;
 - `LLM_ENDPOINT`, `LLM_API_KEY` (если нужен ключ), `LLM_MODEL` — для ИИ;
 - для ASV / Nuclei — блок **`ASV_NUCLEI_*`** в `.env.example` (включение сканера, Docker‑образ, таймауты, путь к шаблонам на диске).

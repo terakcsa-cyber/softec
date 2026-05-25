@@ -23,6 +23,8 @@ export type AuthUser = { id: string; email: string; totpEnabled: boolean };
 type AuthContextValue = {
   user: AuthUser | null;
   loading: boolean;
+  checkInitialSetup: () => Promise<{ required: boolean; error?: string }>;
+  setupFirstAdmin: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   login: (email: string, password: string) => Promise<
     | { ok: true; requiresTotp: false }
     | { ok: true; requiresTotp: true; pendingToken: string }
@@ -141,6 +143,52 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return { ok: false as const, error: "Unexpected response" };
   }, [refreshMe]);
 
+  const checkInitialSetup = useCallback(async () => {
+    try {
+      const res = await fetchWithTimeout(`${AUTH_BFF_PREFIX}/setup`, {
+        headers: { accept: "application/json" },
+        cache: "no-store"
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok) return { required: false, error: nestErrorMessage(data) };
+      return { required: data.required === true };
+    } catch {
+      return { required: false, error: "Не удалось проверить первичную настройку." };
+    }
+  }, []);
+
+  const setupFirstAdmin = useCallback(
+    async (email: string, password: string) => {
+      let res: Response;
+      try {
+        res = await fetchWithTimeout(`${AUTH_BFF_PREFIX}/setup`, {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({ email, password }),
+          cache: "no-store"
+        });
+      } catch {
+        return { ok: false, error: "Нет связи с сервером (проверьте, что веб и API запущены)." };
+      }
+      let data: Record<string, unknown>;
+      try {
+        data = (await res.json()) as Record<string, unknown>;
+      } catch {
+        return { ok: false, error: "Некорректный ответ сервера при первичной настройке." };
+      }
+      if (!res.ok) {
+        return { ok: false, error: nestErrorMessage(data) };
+      }
+      if (typeof data.accessToken === "string" && typeof data.refreshToken === "string") {
+        setStoredTokens(data.accessToken, data.refreshToken);
+        await refreshMe();
+        return { ok: true };
+      }
+      return { ok: false, error: "Unexpected response" };
+    },
+    [refreshMe]
+  );
+
   const completeTotp = useCallback(
     async (pendingToken: string, code: string) => {
       let res: Response;
@@ -203,12 +251,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () => ({
       user,
       loading,
+      checkInitialSetup,
+      setupFirstAdmin,
       login,
       completeTotp,
       logout,
       refreshMe
     }),
-    [user, loading, login, completeTotp, logout, refreshMe]
+    [user, loading, checkInitialSetup, setupFirstAdmin, login, completeTotp, logout, refreshMe]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

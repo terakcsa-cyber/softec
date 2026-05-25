@@ -41,6 +41,20 @@ type UserRow = {
   totp_enabled: boolean;
 };
 
+function normalizeEmail(emailRaw: string): string {
+  const email = emailRaw.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new BadRequestException("Invalid email");
+  }
+  return email;
+}
+
+function assertPasswordPolicy(password: string): void {
+  if (password.length < 12) {
+    throw new BadRequestException("Password must be at least 12 characters");
+  }
+}
+
 @Injectable()
 export class AuthService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AuthService.name);
@@ -81,6 +95,29 @@ export class AuthService implements OnApplicationBootstrap {
     }
   }
 
+  async setupStatus() {
+    return { required: await this.isInitialSetupRequired() };
+  }
+
+  async setupFirstAdmin(emailRaw: string, password: string) {
+    const email = normalizeEmail(emailRaw);
+    assertPasswordPolicy(password);
+    const hash = await argon2.hash(password, { type: argon2.argon2id });
+    const inserted = await this.db.query<UserRow>(
+      `INSERT INTO auth_user (email, password_hash)
+       SELECT $1, $2
+        WHERE NOT EXISTS (SELECT 1 FROM auth_user)
+       RETURNING id, email, password_hash, totp_secret, totp_pending_secret, totp_enabled`,
+      [email, hash]
+    );
+    const row = inserted.rows[0];
+    if (!row) {
+      throw new ForbiddenException("Initial setup is already completed");
+    }
+    this.logger.log(`Initial setup: created admin user ${email}`);
+    return { setupCompleted: true as const, ...(await this.issueTokenPair(row)) };
+  }
+
   async register(emailRaw: string, password: string) {
     if (process.env.AUTH_ALLOW_REGISTER?.trim() !== "true") {
       throw new ForbiddenException("Registration is disabled");
@@ -91,13 +128,8 @@ export class AuthService implements OnApplicationBootstrap {
     ) {
       throw new ForbiddenException("Registration is disabled in production");
     }
-    const email = emailRaw.trim().toLowerCase();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      throw new BadRequestException("Invalid email");
-    }
-    if (password.length < 12) {
-      throw new BadRequestException("Password must be at least 12 characters");
-    }
+    const email = normalizeEmail(emailRaw);
+    assertPasswordPolicy(password);
     const hash = await argon2.hash(password, { type: argon2.argon2id });
     try {
       await this.db.query(
@@ -300,6 +332,11 @@ export class AuthService implements OnApplicationBootstrap {
       [email]
     );
     return res.rows[0] ?? null;
+  }
+
+  private async isInitialSetupRequired(): Promise<boolean> {
+    const n = await this.db.query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM auth_user`);
+    return Number(n.rows[0]?.c ?? "0") === 0;
   }
 
   private async findUserById(id: string): Promise<UserRow | null> {
