@@ -16,6 +16,22 @@ export class AuthController {
   constructor(private readonly auth: AuthService) {}
 
   @Public()
+  @Get("setup")
+  async setupStatus() {
+    return this.auth.setupStatus();
+  }
+
+  @Public()
+  @Post("setup")
+  @HttpCode(200)
+  async setupFirstAdmin(@Body() body: { email?: string; password?: string }) {
+    if (!body.email || !body.password) {
+      throw new BadRequestException("email and password required");
+    }
+    return this.auth.setupFirstAdmin(body.email, body.password);
+  }
+
+  @Public()
   @Post("register")
   async register(@Body() body: { email?: string; password?: string }) {
     if (!body.email || !body.password) {
