@@ -137,6 +137,25 @@ async function main() {
      ON CONFLICT DO NOTHING`
   );
   console.log(`[bdu-sync] new cve_bdu_link rows: ${link.rowCount ?? 0}`);
+
+  const countRes = await pool.query(`SELECT COUNT(*)::text AS n FROM bdu_vuln`);
+  const total = countRes.rows[0]?.n ?? "0";
+  await pool.query(
+    `INSERT INTO audit_log(actor_type, action, metadata)
+     VALUES ('system', 'bdu.ingest', $1)`,
+    [
+      JSON.stringify({
+        sourceUrl,
+        usedFallback,
+        records: records.length,
+        upserted: records.length,
+        linked: link.rowCount ?? 0,
+        manual: true,
+        ts: new Date().toISOString()
+      })
+    ]
+  );
+  console.log(`[bdu-sync] done total_bdu_vuln=${total}`);
   await pool.end();
 }
 

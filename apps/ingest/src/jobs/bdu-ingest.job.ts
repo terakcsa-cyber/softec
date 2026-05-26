@@ -10,30 +10,38 @@ export class BduIngestJob implements OnModuleInit {
   async onModuleInit() {
     if (process.env.BDU_INGEST_ENABLED === "false") return;
     const intervalMs = Number(process.env.BDU_POLL_INTERVAL_MS ?? 24 * 60 * 60 * 1000);
-    const initialDelayMs = Number(process.env.BDU_INITIAL_DELAY_MS ?? 20_000);
+    const initialDelayMs = Number(process.env.BDU_INITIAL_DELAY_MS ?? 10_000);
     setTimeout(() => {
-      this.runForever(intervalMs).catch((e) => {
-        // eslint-disable-next-line no-console
-        console.error(e);
-        process.exit(1);
-      });
+      void this.runForever(intervalMs);
     }, initialDelayMs);
   }
 
   private async runForever(intervalMs: number) {
+    const failureBackoffMs = Number(process.env.BDU_INGEST_FAILURE_BACKOFF_MS ?? 5 * 60_000);
+    let consecutiveFailures = 0;
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const startedAt = Date.now();
       try {
         await this.ensureSchema();
         await this.runOnce();
+        consecutiveFailures = 0;
       } catch (e) {
+        consecutiveFailures += 1;
+        const retryMs = Math.min(
+          intervalMs,
+          failureBackoffMs * Math.min(consecutiveFailures, 12)
+        );
         // eslint-disable-next-line no-console
-        console.error("[ingest:bdu] cycle failed", e);
-      } finally {
-        const sleep = Math.max(60_000, intervalMs - (Date.now() - startedAt));
-        await new Promise((r) => setTimeout(r, sleep));
+        console.error(
+          `[ingest:bdu] cycle failed (attempt ${consecutiveFailures}), retry in ${Math.round(retryMs / 1000)}s`,
+          e
+        );
+        await new Promise((r) => setTimeout(r, retryMs));
+        continue;
       }
+      const sleep = Math.max(60_000, intervalMs - (Date.now() - startedAt));
+      await new Promise((r) => setTimeout(r, sleep));
     }
   }
 

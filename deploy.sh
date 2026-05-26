@@ -419,6 +419,27 @@ validate_env_file() {
   if (( ${#jwt} < 32 )); then
     die "JWT_SECRET in $ENV_FILE is too short."
   fi
+
+  validate_database_credentials
+}
+
+validate_database_credentials() {
+  local db_url pg_pass url_pass
+  db_url="$(read_env_value DATABASE_URL "$ENV_FILE" || true)"
+  pg_pass="$(read_env_value POSTGRES_PASSWORD "$ENV_FILE" || true)"
+  [[ -n "$db_url" && -n "$pg_pass" ]] || return 0
+
+  if ! command -v node >/dev/null 2>&1; then
+    return 0
+  fi
+
+  url_pass="$(node -e 'try{const u=new URL(process.argv[1]);process.stdout.write(decodeURIComponent(u.password||""))}catch{process.exit(2)}' "$db_url" 2>/dev/null || true)"
+  if [[ -z "$url_pass" ]]; then
+    return 0
+  fi
+  if [[ "$url_pass" != "$pg_pass" ]]; then
+    die "DATABASE_URL password does not match POSTGRES_PASSWORD in $ENV_FILE. Run ./deploy.sh --force-env or reset DB volumes (compose down -v)."
+  fi
 }
 
 wait_for_web() {
@@ -441,6 +462,36 @@ wait_for_web() {
   done
 
   warn "Web health check did not pass yet. Check logs with: ${COMPOSE[*]} --env-file $ENV_FILE -f infra/docker-compose.prod.yml logs -f web api"
+  return 0
+}
+
+wait_for_bdu_ingest() {
+  local app_env_file="$1"
+  local pg_user pg_db count i
+
+  pg_user="$(read_env_value POSTGRES_USER "$ENV_FILE" || true)"
+  pg_user="${pg_user:-vuln}"
+  pg_db="$(read_env_value POSTGRES_DB "$ENV_FILE" || true)"
+  pg_db="${pg_db:-vuln_intel}"
+
+  log "Waiting for BDU registry import (bdu_vuln > 0), up to ~25 minutes..."
+  for i in $(seq 1 150); do
+    count="$(
+      APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml \
+        exec -T postgres psql -U "$pg_user" -d "$pg_db" -tAc "SELECT COUNT(*) FROM bdu_vuln" 2>/dev/null \
+        | tr -d '[:space:]' || true
+    )"
+    if [[ -n "$count" && "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]]; then
+      log "BDU import ready: bdu_vuln rows=$count"
+      return 0
+    fi
+    sleep 10
+  done
+
+  warn "BDU registry is still empty. Check ingest logs:"
+  warn "  ${COMPOSE[*]} --env-file $ENV_FILE -f infra/docker-compose.prod.yml logs --tail=80 ingest"
+  warn "If TLS to bdu.fstec.ru fails, set BDU_TLS_INSECURE=1 and ensure BDU_ALLOW_MIRROR_FALLBACK=true in $ENV_FILE"
+  warn "Manual one-shot: pnpm bdu:sync"
   return 0
 }
 
@@ -500,6 +551,7 @@ public_origin="$(read_env_value PUBLIC_WEB_ORIGIN "$ENV_FILE" || true)"
 public_origin="${public_origin:-http://127.0.0.1:${published_port}}"
 
 wait_for_web "$published_port"
+wait_for_bdu_ingest "$app_env_file"
 
 echo
 log "Done."

@@ -106,12 +106,15 @@ services:
         required: false
     environment:
       NODE_ENV: production
+      BDU_ALLOW_MIRROR_FALLBACK: ${BDU_ALLOW_MIRROR_FALLBACK:-true}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       rabbitmq:
+        condition: service_healthy
+      api:
         condition: service_healthy
 
   ai:

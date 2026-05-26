@@ -21,7 +21,8 @@ export function resolveBduVulxmlUrl(): string {
 export function resolveBduVulxmlFallbackUrl(): string | null {
   const v = process.env.BDU_XML_FALLBACK_URL?.trim();
   if (v) return v;
-  if (process.env.BDU_ALLOW_MIRROR_FALLBACK === "true") return BDU_MIRROR_VULXML_GZ_URL;
+  const mirror = process.env.BDU_ALLOW_MIRROR_FALLBACK?.trim().toLowerCase();
+  if (mirror === "true" || mirror === "1") return BDU_MIRROR_VULXML_GZ_URL;
   return null;
 }
 
@@ -32,23 +33,49 @@ function bduFetchDispatcher(): Agent | undefined {
   return undefined;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function bduHttpGet(url: string, timeoutMs: number): Promise<Buffer> {
   const dispatcher = bduFetchDispatcher();
-  const res = await undiciFetch(url, {
-    dispatcher,
-    headers: {
-      accept: "application/zip, application/gzip, application/xml, text/xml, */*",
-      "user-agent":
-        process.env.BDU_FETCH_USER_AGENT?.trim() ||
-        "Mozilla/5.0 (compatible; vuln-intel-ingest/1.0; +https://bdu.fstec.ru)"
-    },
-    signal: AbortSignal.timeout(timeoutMs)
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`BDU fetch failed ${res.status} ${res.statusText} ${text.slice(0, 200)}`);
+  const maxAttempts = Math.max(1, Math.min(8, Number(process.env.BDU_FETCH_MAX_ATTEMPTS ?? 4)));
+  const perAttemptTimeoutMs = Math.max(30_000, Math.floor(timeoutMs / maxAttempts));
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await undiciFetch(url, {
+        dispatcher,
+        headers: {
+          accept: "application/zip, application/gzip, application/xml, text/xml, */*",
+          "user-agent":
+            process.env.BDU_FETCH_USER_AGENT?.trim() ||
+            "Mozilla/5.0 (compatible; vuln-intel-ingest/1.0; +https://bdu.fstec.ru)"
+        },
+        signal: AbortSignal.timeout(perAttemptTimeoutMs)
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`BDU fetch failed ${res.status} ${res.statusText} ${text.slice(0, 200)}`);
+      }
+      return Buffer.from(await res.arrayBuffer());
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts) {
+        const delayMs = Math.min(15_000, 2000 * attempt);
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[bdu-fetch] attempt ${attempt}/${maxAttempts} failed for ${url}: ${err instanceof Error ? err.message : String(err)}`
+        );
+        await sleep(delayMs);
+      }
+    }
   }
-  return Buffer.from(await res.arrayBuffer());
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`BDU fetch failed after ${maxAttempts} attempts: ${String(lastError)}`);
 }
 
 function extractVulxmlFromZipBuffer(zipBuf: Buffer): Promise<Buffer> {
@@ -175,12 +202,26 @@ export async function fetchBduVulxmlWithFallback(timeoutMs: number): Promise<{
 }> {
   const primary = resolveBduVulxmlUrl();
   const fallback = resolveBduVulxmlFallbackUrl();
+  const errors: unknown[] = [];
+
   try {
     const xml = await fetchBduVulxmlBytes(primary, timeoutMs);
     return { xml, sourceUrl: primary, usedFallback: false };
   } catch (primaryErr) {
-    if (!fallback) throw primaryErr;
-    const xml = await fetchBduVulxmlBytes(fallback, timeoutMs);
-    return { xml, sourceUrl: fallback, usedFallback: true };
+    errors.push(primaryErr);
   }
+
+  if (fallback) {
+    try {
+      const xml = await fetchBduVulxmlBytes(fallback, timeoutMs);
+      return { xml, sourceUrl: fallback, usedFallback: true };
+    } catch (fallbackErr) {
+      errors.push(fallbackErr);
+    }
+  }
+
+  const detail = errors
+    .map((e) => (e instanceof Error ? e.message : String(e)))
+    .join("; ");
+  throw new Error(`BDU fetch failed (primary and fallback): ${detail}`);
 }
