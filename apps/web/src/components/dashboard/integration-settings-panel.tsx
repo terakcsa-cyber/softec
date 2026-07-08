@@ -83,7 +83,15 @@ type IntegrationState = {
     activeId: string | null;
     envFallback: { endpoint: string; model: string; hasApiKey: boolean };
   };
-  nvd: { hasDbKey: boolean; hasEnvKey: boolean; activeKeySource: "db" | "env" | "none" };
+  nvd: { hasDbKey: boolean; hasEnvKey: boolean; activeKeySource: "db" | "env" | "none"; catalogStatus?: string; catalogCveCount?: number; catalogPubCursor?: string | null };
+  vulncheck?: {
+    hasDbToken: boolean;
+    hasEnvToken: boolean;
+    activeTokenSource: "db" | "env" | "none";
+    kevCount: number;
+    lastIngestAt: string | null;
+    lastIngestItems: number | null;
+  };
   mpvm: MpvmUiState;
   telegram: TelegramUiState;
 };
@@ -148,6 +156,12 @@ type QueueHealth = {
     endpoint?: string | null;
     activeKeySource?: "db" | "env" | "none";
     apiKeyRejected?: boolean;
+    catalogStatus?: string;
+    catalogActive?: boolean;
+    catalogPubCursor?: string | null;
+    catalogCveCount?: number;
+    catalogTotalUpserted?: number | null;
+    catalogCompletedAt?: string | null;
   };
 };
 
@@ -169,12 +183,13 @@ export function IntegrationSettingsPanel() {
       if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
       return (await res.json()) as QueueHealth;
     },
-    refetchInterval: 30_000
+    refetchInterval: 120_000
   });
 
   const [profiles, setProfiles] = useState<LlmProfileUi[] | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [nvdKeyDraft, setNvdKeyDraft] = useState("");
+  const [vcTokenDraft, setVcTokenDraft] = useState("");
   const [nvdVerify, setNvdVerify] = useState<NvdVerifyResult | null>(null);
   const [mpvmBaseUrl, setMpvmBaseUrl] = useState("");
   const [mpvmUsername, setMpvmUsername] = useState("");
@@ -398,7 +413,7 @@ export function IntegrationSettingsPanel() {
         );
       } else if (v?.ok) {
         setMsg(
-          "Ключ NVD сохранён в БД и принят API. Ingest подхватит его в этом или следующем цикле (pub-sync + lastModified)."
+          "Ключ NVD сохранён. Ingest сразу начнёт полную загрузку каталога CVE (быстрый режим); после завершения — суточный инкремент как раньше."
         );
       } else {
         setMsg("Ключ сохранён в БД. Проверка API: см. статус ниже.");
@@ -488,6 +503,50 @@ export function IntegrationSettingsPanel() {
     }
   });
 
+  const saveVulncheckMut = useMutation({
+    mutationFn: async (token: string): Promise<IntegrationState> => {
+      const res = await apiFetch("/api/settings/integrations", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ vulncheck: { apiToken: token.trim() } })
+      });
+      if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+      return (await res.json()) as IntegrationState;
+    },
+    onSuccess: (data) => {
+      setMsg("Токен VulnCheck сохранён — ingest подхватит на ближайшем цикле.");
+      setErr(null);
+      void qc.setQueryData(["settings", "integrations"], data);
+      setVcTokenDraft("");
+    },
+    onError: (e: unknown) => {
+      setMsg(null);
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  });
+
+  const clearVulncheckMut = useMutation({
+    mutationFn: async (): Promise<IntegrationState> => {
+      const res = await apiFetch("/api/settings/integrations", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ vulncheck: { apiToken: null } })
+      });
+      if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+      return (await res.json()) as IntegrationState;
+    },
+    onSuccess: (data) => {
+      setMsg("Токен VulnCheck удалён из БД.");
+      setErr(null);
+      void qc.setQueryData(["settings", "integrations"], data);
+      setVcTokenDraft("");
+    },
+    onError: (e: unknown) => {
+      setMsg(null);
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  });
+
   if (q.isLoading) {
     return (
       <div className="flex items-center gap-2 text-sm text-muted">
@@ -560,6 +619,22 @@ export function IntegrationSettingsPanel() {
             {nvdH.error ? (
               <div className={cn("mt-1 text-[10px]", nvdH.ok ? "text-warn" : "text-danger")}>{nvdH.error}</div>
             ) : null}
+            {nvdH.catalogActive ? (
+              <div className="mt-2 rounded border border-sky-300/40 bg-sky-500/10 px-2 py-1.5 text-[10px] text-sky-800 dark:text-sky-200">
+                Загрузка каталога CVE:{" "}
+                <span className="font-medium tabular-nums">{nvdH.catalogCveCount ?? "—"}</span> в базе
+                {nvdH.catalogPubCursor ? (
+                  <span>
+                    {" "}
+                    · с сегодня вглубь до {new Date(nvdH.catalogPubCursor).toLocaleDateString()}
+                  </span>
+                ) : null}
+              </div>
+            ) : nvdH.catalogStatus === "complete" ? (
+              <div className="mt-2 text-[10px] text-ok">
+                Каталог CVE загружен ({nvdH.catalogCveCount ?? "—"} записей) — работает инкрементальный ingest.
+              </div>
+            ) : null}
             {nvdH.ingestStale && nvdH.ingestStaleHint ? (
               <div className="mt-2 text-[10px] text-warn">{nvdH.ingestStaleHint}</div>
             ) : null}
@@ -625,6 +700,56 @@ export function IntegrationSettingsPanel() {
           >
             {clearNvdMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
             Удалить ключ из БД
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-amber-200/90 bg-amber-50/50 p-4 dark:border-amber-900/40 dark:bg-amber-950/25">
+        <div className="text-[12px] font-medium text-fg/90">VulnCheck API (KEV + XDB)</div>
+        <div className="mt-1 text-[11px] text-muted">
+          Community token для каталога VulnCheck KEV. В БД: {data.vulncheck?.hasDbToken ? "задан" : "нет"} · в .env:{" "}
+          {data.vulncheck?.hasEnvToken ? "VULNCHECK_API_TOKEN" : "нет"} · активен:{" "}
+          {data.vulncheck?.activeTokenSource === "db"
+            ? "БД"
+            : data.vulncheck?.activeTokenSource === "env"
+              ? ".env"
+              : "не задан"}
+        </div>
+        {data.vulncheck?.lastIngestAt ? (
+          <div className="mt-2 text-[10px] text-muted">
+            Посл. ingest: {new Date(data.vulncheck.lastIngestAt).toLocaleString()}
+            {typeof data.vulncheck.lastIngestItems === "number"
+              ? ` · ${data.vulncheck.lastIngestItems} записей`
+              : ""}
+            {typeof data.vulncheck.kevCount === "number" ? ` · в БД: ${data.vulncheck.kevCount}` : ""}
+          </div>
+        ) : null}
+        <input
+          type="password"
+          autoComplete="off"
+          value={vcTokenDraft}
+          onChange={(e) => setVcTokenDraft(e.target.value)}
+          placeholder={data.vulncheck?.hasDbToken ? "Новый токен…" : "VulnCheck API token"}
+          className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
+        />
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={saveVulncheckMut.isPending || !vcTokenDraft.trim()}
+            onClick={() => void saveVulncheckMut.mutateAsync(vcTokenDraft)}
+            className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] disabled:opacity-50"
+          >
+            {saveVulncheckMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+            Сохранить в БД
+          </button>
+          <button
+            type="button"
+            disabled={clearVulncheckMut.isPending || !data.vulncheck?.hasDbToken}
+            onClick={() => void clearVulncheckMut.mutateAsync()}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] disabled:opacity-50 dark:border-border dark:bg-black/25"
+          >
+            {clearVulncheckMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+            Удалить из БД
           </button>
         </div>
       </div>
@@ -923,6 +1048,25 @@ export function IntegrationSettingsPanel() {
         </div>
 
         <div className="mt-4 space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-white/10 dark:bg-black/30">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <label className="flex items-center gap-2 text-[11px] text-muted">
+                <input
+                  type="radio"
+                  name="llm-active"
+                  checked={!merged?.activeId}
+                  onChange={() => setActiveId(null)}
+                />
+                Использовать Fallback (.env)
+              </label>
+              <span className="text-[10px] text-muted">рекомендуется для локального Ollama</span>
+            </div>
+            <div className="mt-2 text-[10px] text-muted">
+              Endpoint: <span className="font-mono text-fg/80">{data.llm.envFallback.endpoint}</span> · model:{" "}
+              <span className="font-mono text-fg/80">{data.llm.envFallback.model}</span>
+            </div>
+          </div>
+
           {list.map((p, idx) => (
             <div key={p.id} className="rounded-xl border border-slate-200 bg-white p-3 dark:border-white/10 dark:bg-black/30">
               <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1014,8 +1158,12 @@ export function IntegrationSettingsPanel() {
                 <div>
                   <div className="text-[10px] text-muted">API key (опционально)</div>
                   <input
-                    type="password"
+                    type="text"
                     autoComplete="off"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    inputMode="text"
+                    data-lpignore="true"
                     value={p.apiKeyDraft}
                     placeholder={p.hasApiKey ? "•••• (в БД есть — оставь пустым чтобы не менять)" : "пусто для Ollama"}
                     onChange={(e) => {
@@ -1027,8 +1175,12 @@ export function IntegrationSettingsPanel() {
                         return cp;
                       });
                     }}
-                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm dark:border-border dark:bg-black/25"
+                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm font-mono dark:border-border dark:bg-black/25"
                   />
+                  <div className="mt-1 text-[10px] text-muted">
+                    Если ключ уже есть в БД — оставь поле пустым, чтобы <span className="text-fg/80">не менять</span>. Вставь новый ключ
+                    (например Gemini) — чтобы <span className="text-fg/80">заменить</span>.
+                  </div>
                   {p.hasApiKey ? (
                     <button
                       type="button"

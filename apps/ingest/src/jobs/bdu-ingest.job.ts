@@ -9,7 +9,7 @@ export class BduIngestJob implements OnModuleInit {
 
   async onModuleInit() {
     if (process.env.BDU_INGEST_ENABLED === "false") return;
-    const intervalMs = Number(process.env.BDU_POLL_INTERVAL_MS ?? 24 * 60 * 60 * 1000);
+    const intervalMs = Number(process.env.BDU_POLL_INTERVAL_MS ?? 30 * 60 * 1000);
     const initialDelayMs = Number(process.env.BDU_INITIAL_DELAY_MS ?? 10_000);
     setTimeout(() => {
       void this.runForever(intervalMs);

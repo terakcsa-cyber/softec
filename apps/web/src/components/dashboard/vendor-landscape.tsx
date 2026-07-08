@@ -4,6 +4,7 @@ import { useId, useMemo } from "react";
 import { motion } from "framer-motion";
 import { Factory, Layers } from "lucide-react";
 import { cn } from "../ui/cn";
+import { VocWatchlistQuickAdd } from "./voc-watchlist-quick-add";
 
 const VENDOR_COLORS = [
   "rgb(99, 102, 241)",
@@ -262,17 +263,19 @@ export function VendorLandscape({
           {vendors.length ? (
             <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200/90 pt-4 dark:border-white/[0.06]">
               {vendors.slice(0, 6).map((v) => (
-                <button
-                  key={v.vendor}
-                  type="button"
-                  onClick={() => onVendorSelect?.(v.vendor)}
-                  className={cn(
-                    "rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] text-fg/85 shadow-sm transition hover:border-accent/35 hover:bg-accent/10 dark:border-white/10 dark:bg-white/[0.04] dark:shadow-none",
-                    !onVendorSelect && "cursor-default hover:border-slate-200 hover:bg-white dark:hover:border-white/10 dark:hover:bg-white/[0.04]"
-                  )}
-                >
-                  {v.vendor}
-                </button>
+                <div key={v.vendor} className="inline-flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onVendorSelect?.(v.vendor)}
+                    className={cn(
+                      "rounded-full border border-slate-200 bg-white px-3 py-1 text-[11px] text-fg/85 shadow-sm transition hover:border-accent/35 hover:bg-accent/10 dark:border-white/10 dark:bg-white/[0.04] dark:shadow-none",
+                      !onVendorSelect && "cursor-default hover:border-slate-200 hover:bg-white dark:hover:border-white/10 dark:hover:bg-white/[0.04]"
+                    )}
+                  >
+                    {v.vendor}
+                  </button>
+                  <VocWatchlistQuickAdd kind="vendor" value={v.vendor} compact />
+                </div>
               ))}
             </div>
           ) : null}
@@ -287,17 +290,19 @@ export function VendorLandscape({
           {products.length ? (
             <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200/90 pt-4 dark:border-white/[0.06]">
               {products.slice(0, 6).map((p) => (
-                <button
-                  key={`${p.vendor}|${p.product}`}
-                  type="button"
-                  onClick={() => onProductSelect?.(p.vendor, p.product)}
-                  className={cn(
-                    "max-w-full truncate rounded-full border border-slate-200 bg-white px-3 py-1 text-left text-[11px] text-fg/85 shadow-sm transition hover:border-accent/35 hover:bg-accent/10 dark:border-white/10 dark:bg-white/[0.04] dark:shadow-none",
-                    !onProductSelect && "cursor-default hover:border-slate-200 hover:bg-white dark:hover:border-white/10 dark:hover:bg-white/[0.04]"
-                  )}
-                >
-                  {p.vendor} / {p.product}
-                </button>
+                <div key={`${p.vendor}|${p.product}`} className="inline-flex max-w-full items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onProductSelect?.(p.vendor, p.product)}
+                    className={cn(
+                      "max-w-full truncate rounded-full border border-slate-200 bg-white px-3 py-1 text-left text-[11px] text-fg/85 shadow-sm transition hover:border-accent/35 hover:bg-accent/10 dark:border-white/10 dark:bg-white/[0.04] dark:shadow-none",
+                      !onProductSelect && "cursor-default hover:border-slate-200 hover:bg-white dark:hover:border-white/10 dark:hover:bg-white/[0.04]"
+                    )}
+                  >
+                    {p.vendor} / {p.product}
+                  </button>
+                  <VocWatchlistQuickAdd kind="product" value={`${p.vendor}/${p.product}`} compact />
+                </div>
               ))}
             </div>
           ) : null}

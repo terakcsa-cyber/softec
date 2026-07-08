@@ -1,14 +1,22 @@
 import { BadRequestException, Injectable } from "@nestjs/common";
 import { randomUUID } from "node:crypto";
 import {
+  defaultNvdCatalogDoc,
+  fingerprintNvdApiKey,
   getVulnContextLlmConfigFromEnv,
   mergeVulnContextLlmConfig,
   MPVM_DEFAULT_PDQL,
   MPVM_DEFAULT_INVENTORY_PDQL,
+  NVD_CATALOG_SCAN_MODE,
+  NVD_CATALOG_SETTINGS_KEY,
+  normalizeNvdCatalogDoc,
+  parseNvdCatalogDoc,
+  catalogScanHeadIso,
   probeBduSourceReachability,
   resolveBduVulxmlUrl,
   verifyMpvmConnection,
   type MpvmClientConfig,
+  type NvdCatalogDoc,
   type VulnContextLlmConfig
 } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
@@ -24,6 +32,7 @@ type LlmProfileRow = {
 
 type LlmDoc = { profiles: LlmProfileRow[]; activeId: string | null };
 type NvdDoc = { apiKey?: string };
+type VulncheckDoc = { apiToken?: string };
 type MpvmDoc = {
   enabled?: boolean;
   baseUrl?: string;
@@ -65,6 +74,58 @@ export class IntegrationSettingsService {
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
       [key, JSON.stringify(value)]
     );
+  }
+
+  async getNvdCatalogDoc(): Promise<NvdCatalogDoc | null> {
+    const raw = await this.readJson(NVD_CATALOG_SETTINGS_KEY);
+    return parseNvdCatalogDoc(raw);
+  }
+
+  /** Запуск/продолжение каталога: всегда today→1999; pending — с текущего дня. */
+  async requestNvdCatalogBackfill(apiKey: string): Promise<NvdCatalogDoc> {
+    const fp = fingerprintNvdApiKey(apiKey);
+    const existingRaw = await this.getNvdCatalogDoc();
+    const existing = existingRaw ? normalizeNvdCatalogDoc(existingRaw) : null;
+    const keyChanged = Boolean(existing?.keyFingerprint && existing.keyFingerprint !== fp);
+    const continueDeep = !keyChanged && existing?.status === "running";
+
+    const doc = defaultNvdCatalogDoc({
+      status: continueDeep ? "running" : "pending",
+      scanMode: NVD_CATALOG_SCAN_MODE,
+      pubCursor: continueDeep ? existing!.pubCursor : catalogScanHeadIso(),
+      requestedAt: new Date().toISOString(),
+      keyFingerprint: fp,
+      totalUpserted: keyChanged ? 0 : (existing?.totalUpserted ?? 0),
+      startedAt: keyChanged ? undefined : existing?.startedAt,
+      completedAt: undefined,
+      lastWindowEnd: undefined,
+      lastWindowStart: undefined
+    });
+
+    await this.writeJson(NVD_CATALOG_SETTINGS_KEY, doc);
+    return doc;
+  }
+
+  private async getNvdCatalogProgress(): Promise<{
+    status: NvdCatalogDoc["status"] | "idle";
+    pubCursor: string | null;
+    completedAt: string | null;
+    totalUpserted: number | null;
+    cveCount: number;
+  }> {
+    const doc = await this.getNvdCatalogDoc();
+    const countR = await this.db.query<{ n: string }>(`SELECT count(*)::text AS n FROM cve`);
+    const cveCount = Number(countR.rows[0]?.n ?? 0);
+    if (!doc) {
+      return { status: "idle", pubCursor: null, completedAt: null, totalUpserted: null, cveCount };
+    }
+    return {
+      status: doc.status,
+      pubCursor: doc.pubCursor ?? null,
+      completedAt: doc.completedAt ?? null,
+      totalUpserted: doc.totalUpserted ?? null,
+      cveCount
+    };
   }
 
   async getEffectiveLlmConfig(): Promise<VulnContextLlmConfig> {
@@ -200,9 +261,9 @@ export class IntegrationSettingsService {
       `SELECT to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts, metadata
          FROM audit_log
         WHERE action = 'nvd.watermark'
-          AND COALESCE((metadata->>'processed')::int, 0) > 0
+          AND NULLIF(TRIM(metadata->>'modifiedEnd'), '') IS NOT NULL
           AND COALESCE(metadata->>'reason', '') NOT IN ('bootstrap after fix')
-     ORDER BY ts DESC
+     ORDER BY (metadata->>'modifiedEnd')::timestamptz DESC, ts DESC
         LIMIT 1`
     );
     const row = r.rows[0];
@@ -239,6 +300,15 @@ export class IntegrationSettingsService {
     };
   }
 
+  private async getNvdLastIngestActivity(): Promise<{ at: string | null }> {
+    const r = await this.db.query<{ ts: string | null }>(
+      `SELECT to_char(MAX(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts
+         FROM audit_log
+        WHERE action IN ('nvd.watermark', 'nvd.pub_sync', 'nvd.pub_catchup', 'nvd.catalog_backfill', 'nvd.catalog_complete')`
+    );
+    return { at: r.rows[0]?.ts ?? null };
+  }
+
   /** Lightweight NVD API probe (same surface as LLM in GET /stats/queue). */
   async probeNvdHealth() {
     const resolution = await this.getNvdKeyResolution();
@@ -246,16 +316,20 @@ export class IntegrationSettingsService {
     const endpoint =
       process.env.NVD_API_BASE?.trim() || "https://services.nvd.nist.gov/rest/json/cves/2.0";
     const watermark = await this.getNvdWatermarkMeta();
+    const catalog = await this.getNvdCatalogProgress();
     const lastAttempt = await this.getNvdLastAttempt();
+    const lastActivity = await this.getNvdLastIngestActivity();
     const pollMs = Number(process.env.NVD_POLL_INTERVAL_MS ?? 15 * 60 * 1000);
     const staleMs = Math.max(pollMs * 2, 30 * 60 * 1000);
 
     let ingestStale = true;
-    if (lastAttempt.at) {
-      const age = Date.now() - new Date(lastAttempt.at).getTime();
+    const activityAt = lastActivity.at ?? lastAttempt.at;
+    if (activityAt) {
+      const age = Date.now() - new Date(activityAt).getTime();
       ingestStale = !Number.isFinite(age) || age > staleMs;
     }
     const ingestHealthy = !ingestStale;
+    const catalogActive = catalog.status === "pending" || catalog.status === "running";
 
     const apiProbeOk = verify.ok;
     const apiStatus = verify.status;
@@ -291,6 +365,12 @@ export class IntegrationSettingsService {
       ingestStaleHint: ingestStale
         ? "Долго нет записи watermark ingest — проверьте apps/ingest (docker + NVD_PAGE_SLEEP_MS=6500)."
         : null,
+      catalogStatus: catalog.status,
+      catalogActive,
+      catalogPubCursor: catalog.pubCursor,
+      catalogCveCount: catalog.cveCount,
+      catalogTotalUpserted: catalog.totalUpserted,
+      catalogCompletedAt: catalog.completedAt,
       error: ok ? (apiProbeOk ? null : error) : error ?? ingestStale ? "Ingest устарел" : "NVD недоступен"
     };
   }
@@ -346,7 +426,7 @@ export class IntegrationSettingsService {
     );
     const links = await this.db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM cve_bdu_link`);
 
-    const pollMs = Number(process.env.BDU_POLL_INTERVAL_MS ?? 24 * 60 * 60 * 1000);
+    const pollMs = Number(process.env.BDU_POLL_INTERVAL_MS ?? 30 * 60 * 1000);
     const staleMs = Math.max(pollMs * 2, 6 * 60 * 60 * 1000);
 
     let ingestStale = true;
@@ -416,8 +496,10 @@ export class IntegrationSettingsService {
       .filter((p) => p.id);
 
     const resolution = await this.getNvdKeyResolution();
+    const catalog = await this.getNvdCatalogProgress();
     const mpvm = await this.getMpvmUiState();
     const telegram = await this.getTelegramUiState();
+    const vulncheck = await this.getVulncheckUiState();
 
     return {
       llm: {
@@ -432,10 +514,34 @@ export class IntegrationSettingsService {
       nvd: {
         hasDbKey: resolution.hasDbKey,
         hasEnvKey: resolution.hasEnvKey,
-        activeKeySource: resolution.source
+        activeKeySource: resolution.source,
+        catalogStatus: catalog.status,
+        catalogCveCount: catalog.cveCount,
+        catalogPubCursor: catalog.pubCursor
       },
+      vulncheck,
       mpvm,
       telegram
+    };
+  }
+
+  async getVulncheckUiState() {
+    const doc = (await this.readJson("vulncheck")) as unknown as VulncheckDoc;
+    const fromDb = typeof doc.apiToken === "string" ? doc.apiToken.trim() : "";
+    const fromEnv = process.env.VULNCHECK_API_TOKEN?.trim() ?? "";
+    const last = await this.db.query<{ ts: string | null; metadata: unknown }>(
+      `SELECT to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts, metadata
+         FROM audit_log WHERE action = 'vulncheck.kev.ingest' ORDER BY ts DESC LIMIT 1`
+    );
+    const meta = isRecord(last.rows[0]?.metadata) ? last.rows[0].metadata : {};
+    const kevCount = await this.db.query<{ n: string }>(`SELECT count(*)::text AS n FROM vulncheck_kev`);
+    return {
+      hasDbToken: fromDb.length > 0,
+      hasEnvToken: fromEnv.length > 0,
+      activeTokenSource: fromDb ? ("db" as const) : fromEnv ? ("env" as const) : ("none" as const),
+      kevCount: Number(kevCount.rows[0]?.n ?? 0),
+      lastIngestAt: last.rows[0]?.ts ?? null,
+      lastIngestItems: typeof meta.items === "number" ? meta.items : Number(meta.items) || null
     };
   }
 
@@ -661,8 +767,26 @@ export class IntegrationSettingsService {
           } else {
             await this.writeJson("nvd", { apiKey: trimmed });
             nvdVerification = await this.verifyNvdApiKey(trimmed);
+            if (nvdVerification.ok && !nvdVerification.apiKeyRejected) {
+              await this.requestNvdCatalogBackfill(trimmed);
+            }
           }
         } else throw new BadRequestException("nvd.apiKey must be a string or null");
+      }
+    }
+
+    if ("vulncheck" in body) {
+      const vcIn = body.vulncheck;
+      if (vcIn != null && !isRecord(vcIn)) throw new BadRequestException("vulncheck must be an object");
+      if (isRecord(vcIn) && "apiToken" in vcIn) {
+        const t = vcIn.apiToken;
+        if (t === null || t === undefined) {
+          await this.db.query(`DELETE FROM app_integration_settings WHERE key = 'vulncheck'`);
+        } else if (typeof t === "string") {
+          const trimmed = t.trim();
+          if (!trimmed) await this.db.query(`DELETE FROM app_integration_settings WHERE key = 'vulncheck'`);
+          else await this.writeJson("vulncheck", { apiToken: trimmed });
+        } else throw new BadRequestException("vulncheck.apiToken must be a string or null");
       }
     }
 

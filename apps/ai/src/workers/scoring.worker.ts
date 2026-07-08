@@ -5,7 +5,7 @@ import {
   QueueEventEnvelopeSchema,
   QueueEventType,
   ScoreCveRequestedEventSchema,
-  computeUnifiedRiskScoreV1
+  computeUnifiedRiskScoreV2
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
@@ -55,11 +55,17 @@ export class ScoringWorker implements OnModuleInit {
         });
 
         const publishedAt = enriched.publishedAt ? new Date(enriched.publishedAt) : undefined;
-        const computed = computeUnifiedRiskScoreV1({
+        const computed = computeUnifiedRiskScoreV2({
           cvss: enriched.cvss,
           epss: enriched.epss,
           exploitKnown: enriched.exploitKnown,
+          vckevOnly: enriched.vckevOnly,
+          vulncheckKev: enriched.vulncheckKev,
+          epssSpike: enriched.epssSpike,
+          hasPoc: enriched.hasPoc,
+          hasPublicExploit: enriched.hasPublicExploit,
           mentions: payload.mentions,
+          tgMentions24h: enriched.tgMentions24h,
           publishedAt
         });
 
@@ -154,8 +160,30 @@ export class ScoringWorker implements OnModuleInit {
   private async enrichInputs(
     cveId: string,
     input: { cvss?: number; epss?: number; exploitKnown?: boolean; publishedAt?: string }
-  ): Promise<{ cvss?: number; epss?: number; exploitKnown?: boolean; publishedAt?: string }> {
-    const out = { ...input };
+  ): Promise<{
+    cvss?: number;
+    epss?: number;
+    exploitKnown?: boolean;
+    vckevOnly?: boolean;
+    vulncheckKev?: boolean;
+    epssSpike?: boolean;
+    hasPoc?: boolean;
+    hasPublicExploit?: boolean;
+    tgMentions24h?: number;
+    publishedAt?: string;
+  }> {
+    const out: {
+      cvss?: number;
+      epss?: number;
+      exploitKnown?: boolean;
+      vckevOnly?: boolean;
+      vulncheckKev?: boolean;
+      epssSpike?: boolean;
+      hasPoc?: boolean;
+      hasPublicExploit?: boolean;
+      tgMentions24h?: number;
+      publishedAt?: string;
+    } = { ...input };
 
     if (out.publishedAt == null || out.cvss == null) {
       const cve = await this.db.query<{ raw: any; published_at: Date | null }>(
@@ -180,6 +208,34 @@ export class ScoringWorker implements OnModuleInit {
     if (out.exploitKnown == null) {
       const kev = await this.db.query<{ cve_id: string }>(`SELECT cve_id FROM kev WHERE cve_id = $1 LIMIT 1`, [cveId]);
       if ((kev.rowCount ?? 0) > 0) out.exploitKnown = true;
+    }
+
+    const intel = await this.db.query<{
+      vckev_only: boolean;
+      vulncheck_kev: boolean;
+      epss_spike: boolean;
+      has_poc: boolean;
+      has_public_exploit: boolean;
+      tg_mentions_24h: number;
+    }>(
+      `SELECT COALESCE(vckev_only, false) AS vckev_only,
+              COALESCE(vulncheck_kev, false) AS vulncheck_kev,
+              COALESCE(epss_spike, false) AS epss_spike,
+              COALESCE(has_poc, false) AS has_poc,
+              COALESCE(has_public_exploit, false) AS has_public_exploit,
+              COALESCE(tg_mentions_24h, 0)::int AS tg_mentions_24h
+         FROM cve_exploit_intel WHERE cve_id = $1 LIMIT 1`,
+      [cveId]
+    );
+    if ((intel.rowCount ?? 0) > 0) {
+      const row = intel.rows[0]!;
+      out.vckevOnly = row.vckev_only;
+      out.vulncheckKev = row.vulncheck_kev;
+      out.epssSpike = row.epss_spike;
+      out.hasPoc = row.has_poc;
+      out.hasPublicExploit = row.has_public_exploit;
+      out.tgMentions24h = row.tg_mentions_24h;
+      if (out.exploitKnown == null && row.vckev_only) out.exploitKnown = false;
     }
 
     return out;

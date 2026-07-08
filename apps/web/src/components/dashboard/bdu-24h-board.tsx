@@ -6,6 +6,10 @@ import { Flame, Link2, ShieldAlert, Target, Zap } from "lucide-react";
 import { cn } from "../ui/cn";
 import type { BduListItem } from "./bdu-card";
 import { bduRiskScore } from "@/lib/bdu-priority";
+import { ScrollableBoardGrid } from "./scrollable-board-grid";
+import { VocTriageCheckpoint, processedCardClass } from "./voc-triage-checkpoint";
+import { bduRefKey } from "@/lib/voc-ref-keys";
+import { useVocTriage } from "@/lib/voc-triage-context";
 
 export type HotBduRow = BduListItem;
 
@@ -63,6 +67,7 @@ export function Bdu24hBoard({
   onBduClick: (bduId: string) => void;
 }) {
   const [cat, setCat] = useState<HotCategory>("all24h");
+  const { isDone } = useVocTriage();
   const stats = useMemo(() => {
     const arr = items ?? [];
     const exploit = arr.filter((i) => i.hasExploit).length;
@@ -180,10 +185,11 @@ export function Bdu24hBoard({
       {stats.total === 0 ? (
         <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center text-sm text-muted dark:border-border dark:bg-black/10">
           <p>
-            За последние 24 часа нет БДУ с сильным сигналом: exploit,{" "}
-            <span className="font-medium text-fg/85">CVSS ≥ 9</span>, связь с{" "}
-            <span className="font-medium text-fg/85">KEV</span> или{" "}
-            <span className="font-medium text-fg/85">EPSS ≥ 50%</span>.
+            За последние 24 часа (дата публикации или обновления в выгрузке ФСТЭК) нет срочных БДУ:
+            exploit, <span className="font-medium text-fg/85">CVSS ≥ 9</span> или связь с CVE.
+          </p>
+          <p className="mt-2 text-[11px] leading-relaxed">
+            Синк БДУ с bdu.fstec.ru — каждые 30 минут. Если лента пуста, проверьте ingest и доступ к ФСТЭК.
           </p>
           {maxPublicationAt ? (
             <p className="mt-2 text-[12px]">
@@ -196,7 +202,8 @@ export function Bdu24hBoard({
           </p>
         </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        <ScrollableBoardGrid maxHeightClass="max-h-[min(30rem,calc(100vh-17rem))]">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {filtered.map((it, idx) => {
             const risk = bduRiskScore(it);
             const cvss =
@@ -204,6 +211,8 @@ export function Bdu24hBoard({
             const linked = it.linkedCveIds ?? [];
             const registry = it.cveIds ?? [];
             const isOpen = highlightedBduIds?.has(it.bduId) ?? false;
+            const processedKey = bduRefKey(it.bduId);
+            const done = isDone(processedKey);
             return (
               <motion.div
                 key={it.bduId}
@@ -221,13 +230,18 @@ export function Bdu24hBoard({
                     "dark:from-white/[0.07] dark:to-black/30 dark:hover:from-white/[0.09] dark:hover:to-black/25",
                     "pointer-events-auto transition hover:border-accent/35 active:scale-[0.99]",
                     isOpen && "border-accent/50 ring-2 ring-accent/25",
+                    done && "border-ok/25",
+                    processedCardClass(done),
                     cn("ring-1", tone.ring, tone.border)
                   )}
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <div className="font-mono text-sm font-semibold tracking-tight text-fg/95 group-hover:text-fg">
-                        {it.bduId}
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <VocTriageCheckpoint refKey={processedKey} title={`BDU:${it.bduId}`} compact />
+                        <div className="font-mono text-sm font-semibold tracking-tight text-fg/95 group-hover:text-fg">
+                          {it.bduId}
+                        </div>
                       </div>
                       <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-fg/80">{it.name || "—"}</div>
                       <div className="mt-1 text-[10px] text-muted">
@@ -278,7 +292,8 @@ export function Bdu24hBoard({
               </motion.div>
             );
           })}
-        </div>
+          </div>
+        </ScrollableBoardGrid>
       )}
 
       {stats.total > 0 && filtered.length === 0 ? (

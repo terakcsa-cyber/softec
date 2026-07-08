@@ -1,6 +1,13 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import {
+  runVocTaskBriefLlm,
+  type VocPriority,
+  type VocSource,
+  type VocTaskBriefInput
+} from "@vuln-intel/shared";
 import { escapePgLikePattern } from "../pg-like.util.js";
 import { DbService } from "./db.service.js";
+import { IntegrationSettingsService } from "./integration-settings.service.js";
 
 export type VulnTaskStatus = "new" | "in_progress" | "closed";
 
@@ -136,7 +143,10 @@ function statusMultiplier(st: VulnTaskStatus): number {
 
 @Injectable()
 export class VulnTaskService {
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly integration: IntegrationSettingsService
+  ) {}
 
   private validatePatch(input: Partial<{
     title: string;
@@ -524,6 +534,108 @@ export class VulnTaskService {
 
     await this.recomputeTask(id);
     return { ok: true, id };
+  }
+
+  async createFromVocCase(input: {
+    caseId: string;
+    refKey: string;
+    source: VocSource;
+    refId: string;
+    title: string;
+    subtitle?: string | null;
+    vocPriority: VocPriority;
+    vocReasons?: string[];
+    cveIds?: string[];
+    vendorKey?: string;
+    vendorDisplay?: string;
+    productKeyNorm?: string | null;
+    productDisplay?: string | null;
+    bduName?: string | null;
+    tgChannel?: string | null;
+    dueDate?: string | null;
+    priorityLocal?: VulnTaskPriorityLocal;
+  }) {
+    const vendorKey = String(input.vendorKey ?? input.vendorDisplay ?? "voc").trim().toLowerCase() || "voc";
+    const vendorDisplay = String(input.vendorDisplay ?? vendorKey).trim() || vendorKey;
+    const productKeyNorm = String(input.productKeyNorm ?? "").trim().toLowerCase();
+    const productDisplay = String(input.productDisplay ?? "").trim();
+    const normalizedCveIds = normalizeCveIds(input.cveIds ?? []);
+
+    await this.ensureCvesExist(normalizedCveIds, {
+      vendorDisplay,
+      vendorKey,
+      productDisplay,
+      productKeyNorm,
+      source: "voc.case"
+    });
+
+    const llmCfg = await this.integration.getEffectiveLlmConfig();
+    const briefInput: VocTaskBriefInput = {
+      caseId: input.caseId,
+      refKey: input.refKey,
+      source: input.source,
+      refId: input.refId,
+      title: input.title,
+      subtitle: input.subtitle,
+      vocPriority: input.vocPriority,
+      vocReasons: input.vocReasons,
+      cveIds: normalizedCveIds,
+      vendorDisplay,
+      productDisplay: productDisplay || null,
+      bduName: input.bduName,
+      tgChannel: input.tgChannel
+    };
+    const brief = await runVocTaskBriefLlm(briefInput, llmCfg);
+    const taskTitle = brief.taskTitle?.trim() || `VOC: ${input.title}`;
+
+    const r = await this.db.query<{ id: string }>(
+      `INSERT INTO vuln_task (
+         title, status, vendor_key, vendor_display, product_key_norm, product_display,
+         owner, due_date, priority_local, notes_md, evidence
+       ) VALUES ($1,'new',$2,$3,$4,$5,NULL,$6,$7,$8,$9)
+       RETURNING id`,
+      [
+        taskTitle,
+        vendorKey,
+        vendorDisplay,
+        productKeyNorm,
+        productDisplay,
+        input.dueDate ? new Date(input.dueDate) : null,
+        input.priorityLocal ?? "medium",
+        brief.notesMd,
+        brief.evidence
+      ]
+    );
+    const id = r.rows[0]!.id;
+
+    if (normalizedCveIds.length > 0) {
+      await this.db.query(
+        `INSERT INTO vuln_task_cve (task_id, cve_id)
+         SELECT $1, x.cve_id
+           FROM unnest($2::text[]) AS x(cve_id)
+         ON CONFLICT DO NOTHING`,
+        [id, normalizedCveIds]
+      );
+    }
+
+    await this.db.query(
+      `INSERT INTO vuln_task_event (task_id, action, after)
+       VALUES ($1, 'task.created', $2::jsonb)`,
+      [
+        id,
+        JSON.stringify({
+          source: "voc.case",
+          caseId: input.caseId,
+          refKey: input.refKey,
+          cveCount: normalizedCveIds.length,
+          aiGenerated: brief.aiGenerated,
+          status: "new"
+        })
+      ]
+    );
+
+    await this.recomputeTask(id);
+    return { ok: true, id, aiGenerated: brief.aiGenerated };
   }
 
   async patch(taskId: string, input: Partial<{

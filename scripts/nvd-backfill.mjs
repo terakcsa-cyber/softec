@@ -3,7 +3,6 @@ import pg from "pg";
 const DATABASE_URL =
   process.env.DATABASE_URL ?? "postgres://vuln:vuln@localhost:5432/vuln_intel";
 
-const NVD_API_KEY = process.env.NVD_API_KEY;
 const BASE_URL = process.env.NVD_API_BASE ?? "https://services.nvd.nist.gov/rest/json/cves/2.0";
 
 // Backfill by published date windows. Defaults: from 1999-01-01 to now, 30-day windows.
@@ -12,11 +11,81 @@ const END_DATE = new Date(process.env.NVD_PUB_END ?? new Date().toISOString());
 const WINDOW_DAYS = Number(process.env.NVD_WINDOW_DAYS ?? 30);
 
 const RESULTS_PER_PAGE = Math.max(1, Math.min(2000, Number(process.env.NVD_RESULTS_PER_PAGE ?? 2000)));
-const PAGE_SLEEP_MS = Number(process.env.NVD_PAGE_SLEEP_MS ?? 900);
 const MAX_ATTEMPTS = Number(process.env.NVD_FETCH_RETRIES ?? 6);
+const WAIT_FOR_KEY_MS = Math.max(0, Number(process.env.NVD_BACKFILL_WAIT_FOR_KEY_MS ?? 600_000));
 
 const UPSERT_BATCH = Math.max(1, Number(process.env.NVD_UPSERT_BATCH ?? 500));
 const WRITE_AUDIT = (process.env.NVD_WRITE_AUDIT ?? "true") !== "false";
+
+let nvdApiKey = process.env.NVD_API_KEY?.trim() || "";
+let nvdApiKeyDisabled = false;
+
+function resolvePageSleepMs() {
+  const configured = Number(process.env.NVD_PAGE_SLEEP_MS);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return nvdApiKey && !nvdApiKeyDisabled ? 650 : 6000;
+}
+
+async function loadNvdApiKeyFromDb(db) {
+  try {
+    const r = await db.query(`SELECT value FROM app_integration_settings WHERE key = 'nvd' LIMIT 1`);
+    const v = r.rows[0]?.value;
+    const k = v && typeof v === "object" && !Array.isArray(v) ? v.apiKey : undefined;
+    if (typeof k === "string" && k.trim()) return k.trim();
+  } catch {
+    // table may not exist on very first boot
+  }
+  return "";
+}
+
+async function refreshNvdApiKey(db) {
+  const fromDb = await loadNvdApiKeyFromDb(db);
+  const fromEnv = process.env.NVD_API_KEY?.trim() || "";
+  const next = fromDb || fromEnv;
+  if (next !== nvdApiKey) {
+    nvdApiKey = next;
+    nvdApiKeyDisabled = false;
+  }
+  return Boolean(nvdApiKey && !nvdApiKeyDisabled);
+}
+
+async function waitForNvdApiKey(db) {
+  const deadline = Date.now() + WAIT_FOR_KEY_MS;
+  for (;;) {
+    const fromDb = await loadNvdApiKeyFromDb(db);
+    if (fromDb) {
+      nvdApiKey = fromDb;
+      nvdApiKeyDisabled = false;
+      // eslint-disable-next-line no-console
+      console.log("[nvd-backfill] API key ready (source=settings)");
+      return;
+    }
+    const fromEnv = process.env.NVD_API_KEY?.trim() || "";
+    if (fromEnv && WAIT_FOR_KEY_MS <= 0) {
+      nvdApiKey = fromEnv;
+      nvdApiKeyDisabled = false;
+      // eslint-disable-next-line no-console
+      console.log("[nvd-backfill] API key ready (source=env)");
+      return;
+    }
+    if (fromEnv && Date.now() >= deadline) {
+      nvdApiKey = fromEnv;
+      nvdApiKeyDisabled = false;
+      // eslint-disable-next-line no-console
+      console.warn("[nvd-backfill] settings key not found — falling back to NVD_API_KEY from env");
+      return;
+    }
+    if (Date.now() >= deadline) {
+      // eslint-disable-next-line no-console
+      console.warn("[nvd-backfill] no API key — continuing unauthenticated (slower NVD limits)");
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.log("[nvd-backfill] waiting for NVD API key in web settings…");
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 5000));
+  }
+}
 
 function toIsoZ(d) {
   if (!(d instanceof Date) || Number.isNaN(d.getTime())) return undefined;
@@ -42,13 +111,30 @@ function extractCvssBaseScore(raw) {
   return undefined;
 }
 
-async function fetchJson(url) {
-  const headers = { accept: "application/json" };
-  if (NVD_API_KEY) headers.apiKey = NVD_API_KEY;
-
+async function fetchJson(url, db) {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const headers = { accept: "application/json" };
+    const useKey = nvdApiKey && !nvdApiKeyDisabled;
+    if (useKey) headers.apiKey = nvdApiKey;
+
     // eslint-disable-next-line no-await-in-loop
-    const res = await fetch(url, { headers });
+    let res = await fetch(url, { headers });
+    if (!res.ok && res.status === 404 && useKey) {
+      const hadDbKey = Boolean(await loadNvdApiKeyFromDb(db));
+      if (db) await refreshNvdApiKey(db);
+      if (nvdApiKey && !nvdApiKeyDisabled && nvdApiKey !== headers.apiKey) {
+        // eslint-disable-next-line no-console
+        console.warn("[nvd-backfill] API key rejected (404) — retrying with refreshed key");
+        continue;
+      }
+      nvdApiKeyDisabled = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[nvd-backfill] API key rejected (404) — continuing without apiKey${hadDbKey ? "" : " (save a valid key in settings)"}`
+      );
+      // eslint-disable-next-line no-await-in-loop
+      res = await fetch(url, { headers: { accept: "application/json" } });
+    }
     if (res.ok) return res.json();
 
     const retryAfter = res.headers.get("retry-after");
@@ -112,12 +198,15 @@ async function main() {
   let windowStart = START_DATE;
 
   try {
+    await waitForNvdApiKey(db);
     // eslint-disable-next-line no-console
     console.log(
-      `[nvd-backfill] start=${toIsoZ(windowStart)} end=${toIsoZ(END_DATE)} windowDays=${WINDOW_DAYS} rpp=${RESULTS_PER_PAGE}`
+      `[nvd-backfill] start=${toIsoZ(windowStart)} end=${toIsoZ(END_DATE)} windowDays=${WINDOW_DAYS} rpp=${RESULTS_PER_PAGE} pageSleepMs=${resolvePageSleepMs()}`
     );
 
     while (windowStart < END_DATE) {
+      await refreshNvdApiKey(db);
+      const pageSleepMs = resolvePageSleepMs();
       const windowEnd = addDays(windowStart, WINDOW_DAYS);
       const pubStart = toIsoZ(windowStart);
       const pubEnd = toIsoZ(windowEnd < END_DATE ? windowEnd : END_DATE);
@@ -140,7 +229,7 @@ async function main() {
         url.searchParams.set("resultsPerPage", String(RESULTS_PER_PAGE));
 
         // eslint-disable-next-line no-await-in-loop
-        const page = await fetchJson(url.toString());
+        const page = await fetchJson(url.toString(), db);
         const vulnerabilities = Array.isArray(page?.vulnerabilities) ? page.vulnerabilities : [];
         const totalResults = Number(page?.totalResults ?? vulnerabilities.length);
 
@@ -175,7 +264,7 @@ async function main() {
               `[nvd-backfill] giving up empty page pub=${pubStart}..${pubEnd} startIndex=${startIndex} total=${totalResults}`
             );
           }
-          const emptySleepMs = Number(process.env.NVD_EMPTY_PAGE_SLEEP_MS ?? Math.max(PAGE_SLEEP_MS, 6000));
+          const emptySleepMs = Number(process.env.NVD_EMPTY_PAGE_SLEEP_MS ?? Math.max(pageSleepMs, 6000));
           // eslint-disable-next-line no-console
           console.warn(
             `[nvd-backfill] empty page pub=${pubStart}..${pubEnd} startIndex=${startIndex} total=${totalResults} retry=${emptyRetries}/${maxEmptyRetries} sleep=${emptySleepMs}ms`
@@ -190,7 +279,7 @@ async function main() {
         if (startIndex >= totalResults) break;
 
         // eslint-disable-next-line no-await-in-loop
-        await new Promise((r) => setTimeout(r, PAGE_SLEEP_MS));
+        await new Promise((r) => setTimeout(r, pageSleepMs));
       }
 
       const elapsedMs = Date.now() - t0;

@@ -2,10 +2,15 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from "@nes
 import {
   bduFstecUrl,
   buildVulnPostFromAiJson,
+  EXPLOIT_INTEL_UPSERT_SQL,
   extractNvdCveDescription,
+  extractNvdExploitationHint,
+  extractNvdVulnerabilityClass,
   formatVulnTelegramPost,
   normalizeTelegramUserStatus,
-  parseAiOutputJsonLoose
+  parseAiOutputJsonLoose,
+  resolveBduCardEnrichment,
+  resolveCveCardEnrichment
 } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
 import { IntegrationSettingsService } from "./integration-settings.service.js";
@@ -30,20 +35,23 @@ export class TelegramPostService {
 
   async sendTelegramMessage(
     text: string,
-    creds?: { botToken: string; chatId: string }
+    creds?: { botToken: string; chatId: string },
+    opts?: { parseMode?: "HTML" | "Markdown" }
   ): Promise<{ ok: boolean; messageId: number | null; error: string | null }> {
     const { botToken, chatId } = creds ?? (await this.resolveCredentials());
     const url = `https://api.telegram.org/bot${encodeURIComponent(botToken)}/sendMessage`;
-    const started = Date.now();
     try {
+      const bodyPayload: Record<string, unknown> = {
+        chat_id: chatId,
+        text,
+        disable_web_page_preview: true
+      };
+      if (opts?.parseMode) bodyPayload.parse_mode = opts.parseMode;
+
       const res = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text,
-          disable_web_page_preview: false
-        }),
+        body: JSON.stringify(bodyPayload),
         signal: AbortSignal.timeout(30_000)
       });
       const body = (await res.json().catch(() => ({}))) as {
@@ -72,11 +80,70 @@ export class TelegramPostService {
     }
   }
 
+  async sendTelegramMessages(
+    texts: string[],
+    opts?: { parseMode?: "HTML" | "Markdown" }
+  ): Promise<{ ok: boolean; sent: number; messageIds: number[]; error: string | null }> {
+    const creds = await this.resolveCredentials();
+    const messageIds: number[] = [];
+    for (const text of texts) {
+      const r = await this.sendTelegramMessage(text, creds, opts);
+      if (!r.ok) {
+        return { ok: false, sent: messageIds.length, messageIds, error: r.error };
+      }
+      if (r.messageId != null) messageIds.push(r.messageId);
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
+    return { ok: true, sent: messageIds.length, messageIds, error: null };
+  }
+
+  async sendTelegramDocument(input: {
+    buffer: Buffer;
+    filename: string;
+    caption?: string;
+    parseMode?: "HTML" | "Markdown";
+  }): Promise<{ ok: boolean; messageId: number | null; error: string | null }> {
+    const creds = await this.resolveCredentials();
+    const url = `https://api.telegram.org/bot${encodeURIComponent(creds.botToken)}/sendDocument`;
+    try {
+      const form = new FormData();
+      form.append("chat_id", creds.chatId);
+      form.append("document", new Blob([input.buffer], { type: "application/pdf" }), input.filename);
+      if (input.caption) form.append("caption", input.caption);
+      if (input.parseMode) form.append("parse_mode", input.parseMode);
+
+      const res = await fetch(url, {
+        method: "POST",
+        body: form,
+        signal: AbortSignal.timeout(60_000)
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        description?: string;
+        result?: { message_id?: number };
+      };
+      if (!res.ok || body.ok === false) {
+        return { ok: false, messageId: null, error: body.description ?? `HTTP ${res.status}` };
+      }
+      return { ok: true, messageId: body.result?.message_id ?? null, error: null };
+    } catch (e) {
+      return { ok: false, messageId: null, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
   async verify(overrides?: { botToken?: string; chatId?: string }) {
     const creds = await this.resolveCredentials(overrides);
     const text = "✅ Vuln Intel: тест подключения Telegram-бота";
     const r = await this.sendTelegramMessage(text, creds);
     return { ...r, chatId: creds.chatId };
+  }
+
+  private resolveAiRow(rows: { output_json: unknown }[]): Record<string, unknown> | null {
+    for (const row of rows) {
+      const parsed = parseAiOutputJsonLoose(row.output_json);
+      if (parsed && !parsed._enrich_error) return parsed;
+    }
+    return null;
   }
 
   async postCve(cveId: string, userStatus: string) {
@@ -97,6 +164,7 @@ export class TelegramPostService {
       [id]
     );
     if ((cve.rowCount ?? 0) === 0) throw new NotFoundException("CVE not found");
+    const row = cve.rows[0]!;
 
     const aiR = await this.db.query<{ output_json: unknown }>(
       `SELECT output_json FROM enrichment_ai WHERE cve_id = $1
@@ -104,17 +172,10 @@ export class TelegramPostService {
        ORDER BY created_at DESC LIMIT 5`,
       [id]
     );
-    let ai: Record<string, unknown> | null = null;
-    for (const row of aiR.rows) {
-      const parsed = parseAiOutputJsonLoose(row.output_json);
-      if (parsed && !parsed._enrich_error) {
-        ai = parsed;
-        break;
-      }
-    }
-
-    const row = cve.rows[0]!;
-    const fallbackDesc = extractNvdCveDescription(row.raw);
+    const ai = resolveCveCardEnrichment(this.resolveAiRow(aiR.rows), id, row.raw) as Record<
+      string,
+      unknown
+    >;
 
     const products = await this.db.query<{ vendor: string; product: string | null }>(
       `SELECT vendor, product FROM cve_vendor_product WHERE cve_id = $1 ORDER BY vendor, product LIMIT 8`,
@@ -163,8 +224,11 @@ export class TelegramPostService {
       cvssScore: row.cvss_base,
       exploitKnown: row.exploit_known,
       epssScore: row.epss,
-      fallbackDescription: fallbackDesc,
+      fallbackDescription: extractNvdCveDescription(row.raw),
       fallbackTitle: productHint ? `${id} — ${productHint}` : null,
+      fallbackVulnerabilityClass: extractNvdVulnerabilityClass(row.raw),
+      fallbackAttackFlow: Array.isArray(ai.attackFlow) ? ai.attackFlow.map(String) : [],
+      fallbackExploitation: extractNvdExploitationHint(row.raw, row.exploit_known),
       extraLinks: links,
       extraRemediation
     });
@@ -180,15 +244,28 @@ export class TelegramPostService {
       description: string | null;
       solution: string | null;
       software_names: string | null;
+      severity: string | null;
+      exploit_status: string | null;
       cvss_score: number | null;
       has_exploit: boolean;
       cve_ids: string[];
     }>(
-      `SELECT bdu_id, name, description, solution, software_names, cvss_score, has_exploit, cve_ids
+      `SELECT bdu_id, name, description, solution, software_names, severity, exploit_status,
+              cvss_score, has_exploit, cve_ids
          FROM bdu_vuln WHERE bdu_id = $1 LIMIT 1`,
       [id]
     );
     if ((bdu.rowCount ?? 0) === 0) throw new NotFoundException("BDU not found");
+
+    const row = bdu.rows[0]!;
+    const linkedCve = await this.db.query<{ raw: unknown; cve_id: string }>(
+      `SELECT cve_id, raw FROM cve
+        WHERE cve_id = ANY($1::text[]) AND raw IS NOT NULL
+        ORDER BY cvss_base DESC NULLS LAST
+        LIMIT 1`,
+      [row.cve_ids ?? []]
+    );
+    const linkedRaw = linkedCve.rows[0]?.raw ?? null;
 
     const aiR = await this.db.query<{ output_json: unknown }>(
       `SELECT output_json FROM enrichment_bdu WHERE bdu_id = $1
@@ -196,16 +273,21 @@ export class TelegramPostService {
        ORDER BY created_at DESC LIMIT 5`,
       [id]
     );
-    let ai: Record<string, unknown> | null = null;
-    for (const row of aiR.rows) {
-      const parsed = parseAiOutputJsonLoose(row.output_json);
-      if (parsed && !parsed._enrich_error) {
-        ai = parsed;
-        break;
-      }
-    }
+    const ai = resolveBduCardEnrichment(
+      this.resolveAiRow(aiR.rows),
+      id,
+      {
+        name: row.name,
+        description: row.description,
+        solution: row.solution,
+        software_names: row.software_names,
+        severity: row.severity,
+        exploit_status: row.exploit_status,
+        has_exploit: row.has_exploit
+      },
+      linkedRaw
+    ) as Record<string, unknown>;
 
-    const row = bdu.rows[0]!;
     const links = [bduFstecUrl(id)];
     for (const cve of row.cve_ids ?? []) {
       if (typeof cve === "string" && cve.startsWith("CVE-")) {
@@ -215,7 +297,7 @@ export class TelegramPostService {
 
     const extraRemediation: string[] = [];
     if (row.solution?.trim()) {
-      for (const line of row.solution.split(/\n+/).map((s) => s.trim()).filter(Boolean).slice(0, 5)) {
+      for (const line of row.solution.split(/\n+/).map((s) => s.trim()).filter(Boolean).slice(0, 8)) {
         extraRemediation.push(line);
       }
     }
@@ -225,11 +307,17 @@ export class TelegramPostService {
       cvssScore: row.cvss_score,
       exploitKnown: row.has_exploit,
       fallbackDescription: row.description ?? row.name,
-      fallbackTitle: row.name?.trim() || (row.software_names?.trim() ? `БДУ ${id}` : null),
+      fallbackTitle: row.name?.trim() || `БДУ ${id}`,
+      fallbackVulnerabilityClass:
+        row.severity?.trim() ||
+        (linkedRaw ? extractNvdVulnerabilityClass(linkedRaw) : null),
+      fallbackAttackFlow: Array.isArray(ai.attackFlow) ? ai.attackFlow.map(String) : [],
+      fallbackExploitation:
+        row.exploit_status?.trim() ||
+        (linkedRaw ? extractNvdExploitationHint(linkedRaw, row.has_exploit) : null),
       extraLinks: links,
       extraRemediation
     });
-    if (!ai && row.name) input.title = row.name.slice(0, 200);
 
     return this.publish(input);
   }
@@ -245,11 +333,16 @@ export class TelegramPostService {
           JSON.stringify({
             ok: sent.ok,
             identifier: input.identifier,
+            cveId: /^CVE-\d{4}-\d+$/i.test(input.identifier) ? input.identifier.toUpperCase() : null,
             messageId: sent.messageId,
             error: sent.error
           })
         ]
       );
+      const cveId = /^CVE-\d{4}-\d+$/i.test(input.identifier) ? input.identifier.toUpperCase() : null;
+      if (sent.ok && cveId) {
+        await this.db.query(EXPLOIT_INTEL_UPSERT_SQL, [[cveId]]);
+      }
     } catch (e) {
       this.logger.warn(`telegram.post audit write failed: ${e instanceof Error ? e.message : String(e)}`);
     }

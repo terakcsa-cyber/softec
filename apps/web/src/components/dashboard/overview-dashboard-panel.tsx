@@ -4,10 +4,16 @@ import { useId, useMemo } from "react";
 import { motion } from "framer-motion";
 import { Activity, Clock, Database, Landmark, Loader2, RefreshCw, Shield, Sparkles, TrendingUp } from "lucide-react";
 import { cn } from "../ui/cn";
-import { Bdu24hBoard, type HotBduRow } from "./bdu-24h-board";
-import { Critical24hBoard, type HotCveRow } from "./critical-24h-board";
+import { LiveNumber } from "../ui/live-number";
+import type { HotCveRow } from "./critical-24h-board";
+import { VocHomePanel } from "./voc-home-panel";
+import { ExploitRadarWidget } from "./exploit-radar-widget";
 import { VendorLandscape } from "./vendor-landscape";
 import { computeCvePriority } from "@/lib/cve-priority";
+import { VocTriageCheckpoint, processedCardClass } from "./voc-triage-checkpoint";
+import { ExploitIntelBadges } from "./exploit-intel-badges";
+import { cveRefKey } from "@/lib/voc-ref-keys";
+import { useVocTriage } from "@/lib/voc-triage-context";
 
 export type SummaryStats = {
   totalCves: number;
@@ -83,9 +89,14 @@ function AnimatedMetricBar({
       <div className="flex items-center justify-between gap-2 text-[11px]">
         <span className="text-muted">{label}</span>
         <span className="tabular-nums text-fg/85">
-          {value.toLocaleString()}
-          <span className="text-muted"> / {total.toLocaleString()}</span>
-          <span className="ml-1.5 font-medium text-fg/95">{p}%</span>
+          <LiveNumber value={value} />
+          <span className="text-muted">
+            {" / "}
+            <LiveNumber value={total} />
+          </span>
+          <span className="ml-1.5 font-medium text-fg/95">
+            <LiveNumber value={p} suffix="%" />
+          </span>
         </span>
       </div>
       <div className="relative h-2.5 overflow-hidden rounded-full bg-white/[0.06] ring-1 ring-white/[0.06]">
@@ -160,7 +171,7 @@ function HealthRing({ score }: { score: number }) {
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 0.15 }}
         >
-          {clamped}
+          <LiveNumber value={clamped} />
         </motion.div>
         <div className={cn("text-[10px] font-medium uppercase tracking-wider", hl.cls)}>{hl.label}</div>
       </div>
@@ -265,20 +276,18 @@ export function OverviewDashboardPanel({
   onProductSelect,
   queueHealth,
   onOpenDlq,
-  hotCves,
-  hotLoading,
-  onHotCveClick,
-  hotBdu,
-  hotBduLoading,
-  onHotBduClick,
-  dashboardHighlightBduIds,
+  onOpenCve,
+  onOpenBdu,
+  onOpenTgLink,
   topPriorityCves,
   topPriorityLoading,
   onTopPriorityCveClick,
   vendorsLoading,
   dashboardHighlightCveIds,
   onRefresh,
-  refreshing
+  refreshing,
+  onExploitFilter,
+  exploitFilter
 }: {
   data: SummaryStats | undefined;
   loading: boolean;
@@ -299,13 +308,9 @@ export function OverviewDashboardPanel({
   onProductSelect?: (vendor: string, product: string) => void;
   queueHealth?: unknown;
   onOpenDlq?: () => void;
-  hotCves?: HotCveRow[];
-  hotLoading?: boolean;
-  onHotCveClick?: (cveId: string) => void;
-  hotBdu?: HotBduRow[];
-  hotBduLoading?: boolean;
-  onHotBduClick?: (bduId: string) => void;
-  dashboardHighlightBduIds?: ReadonlySet<string> | null;
+  onOpenCve?: (cveId: string) => void;
+  onOpenBdu?: (bduId: string) => void;
+  onOpenTgLink?: (link: string) => void;
   topPriorityCves?: HotCveRow[];
   topPriorityLoading?: boolean;
   onTopPriorityCveClick?: (cveId: string) => void;
@@ -314,7 +319,10 @@ export function OverviewDashboardPanel({
   dashboardHighlightCveIds?: ReadonlySet<string> | null;
   onRefresh?: () => void;
   refreshing?: boolean;
+  onExploitFilter?: (filter: import("@/lib/exploit-intel-client").ExploitRadarFilter) => void;
+  exploitFilter?: import("@/lib/exploit-intel-client").ExploitRadarFilter | null;
 }) {
+  const { isDone } = useVocTriage();
   const qh = (queueHealth ?? null) as null | {
     ok?: boolean;
     error?: unknown;
@@ -420,9 +428,9 @@ export function OverviewDashboardPanel({
     <div className="space-y-8">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="text-sm font-semibold tracking-tight">Обзор платформы</div>
+          <div className="text-sm font-semibold tracking-tight">VOC · обзор смены</div>
           <div className="mt-1 text-xs text-muted">
-            Заполнение scoring, EPSS, CVSS и ИИ по корпусу CVE, реестр БДУ ФСТЭК и актуальность источников.
+            Операционный центр: единая очередь NVD / БДУ / Telegram, метрики корпуса и ландшафт вендоров.
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -446,13 +454,6 @@ export function OverviewDashboardPanel({
               Обновить
             </button>
           ) : null}
-          <div className="flex items-center gap-1.5 rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-muted shadow-inner dark:border-border dark:bg-black/35">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-ok/70 opacity-60" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-ok" />
-            </span>
-            Онлайн
-          </div>
         </div>
       </div>
 
@@ -483,40 +484,21 @@ export function OverviewDashboardPanel({
               <c.icon className="h-3.5 w-3.5 opacity-90" />
               {c.label}
             </div>
-            <div className="mt-1.5 text-xl font-semibold tabular-nums tracking-tight text-fg/95">
-              {c.value.toLocaleString()}
+            <div className="mt-1.5 text-xl font-semibold tracking-tight text-fg/95">
+              <LiveNumber value={c.value} />
             </div>
             <div className="mt-0.5 text-[10px] text-muted/90">{c.sub}</div>
           </motion.div>
         ))}
       </div>
 
-      <section className="rounded-2xl border border-slate-200/90 bg-slate-50/80 p-5 ring-1 ring-slate-200/60 dark:border-border dark:bg-black/20 dark:ring-white/[0.05]">
-        <Critical24hBoard
-          items={hotCves}
-          loading={Boolean(hotLoading)}
-          highlightedCveIds={dashboardHighlightCveIds}
-          maxPublishedAt={data?.maxPublishedAt}
-          onCveClick={onHotCveClick ?? (() => undefined)}
-        />
-      </section>
+      <ExploitRadarWidget
+        onFilterSelect={onExploitFilter}
+        onOpenCve={onOpenCve}
+        activeFilter={exploitFilter}
+      />
 
-      <section className="rounded-2xl border border-teal-200/80 bg-teal-50/50 p-5 ring-1 ring-teal-200/50 dark:border-teal-900/40 dark:bg-teal-950/20 dark:ring-teal-800/30">
-        <Bdu24hBoard
-          items={hotBdu}
-          loading={Boolean(hotBduLoading)}
-          highlightedBduIds={dashboardHighlightBduIds}
-          maxPublicationAt={data?.maxBduPublicationAt}
-          publishedLast24hCount={data?.bduPublishedLast24hCount}
-          onBduClick={onHotBduClick ?? (() => undefined)}
-        />
-        {typeof data.cveBduLinkCount === "number" ? (
-          <p className="mt-4 text-[11px] text-muted">
-            Связей CVE↔БДУ в базе:{" "}
-            <span className="font-medium tabular-nums text-fg/85">{data.cveBduLinkCount.toLocaleString()}</span>
-          </p>
-        ) : null}
-      </section>
+      <VocHomePanel onOpenCve={onOpenCve} onOpenBdu={onOpenBdu} onOpenTgLink={onOpenTgLink} />
 
       <section className="rounded-2xl border border-slate-200/90 bg-white p-5 ring-1 ring-slate-200/60 dark:border-border dark:bg-black/15 dark:ring-white/[0.05]">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -528,7 +510,13 @@ export function OverviewDashboardPanel({
             </div>
           </div>
           <div className="shrink-0 text-[11px] text-muted">
-            {topPriorityLoading ? "Загрузка…" : topPriorityCves?.length ? `${topPriorityCves.length}` : "—"}
+            {topPriorityLoading ? (
+              "Загрузка…"
+            ) : topPriorityCves?.length ? (
+              <LiveNumber value={topPriorityCves.length} />
+            ) : (
+              "—"
+            )}
           </div>
         </div>
 
@@ -570,19 +558,27 @@ export function OverviewDashboardPanel({
                 typeof (it as any).cvss_base === "number" && Number.isFinite((it as any).cvss_base)
                   ? ((it as any).cvss_base as number).toFixed(1)
                   : "—";
+              const cveId = String((it as any).cve_id);
+              const processedKey = cveRefKey(cveId);
+              const done = isDone(processedKey);
               return (
                 <button
-                  key={(it as any).cve_id}
-                  onClick={() => onTopPriorityCveClick?.(String((it as any).cve_id))}
+                  key={cveId}
+                  onClick={() => onTopPriorityCveClick?.(cveId)}
                   className={cn(
                     "w-full rounded-xl border border-slate-200 bg-gradient-to-br from-white to-slate-50 p-3 text-left shadow-sm transition hover:from-slate-50 hover:to-slate-100/60",
-                    "dark:border-white/[0.06] dark:from-white/[0.04] dark:to-white/[0.01] dark:shadow-none dark:hover:from-white/[0.06] dark:hover:to-white/[0.02]"
+                    "dark:border-white/[0.06] dark:from-white/[0.04] dark:to-white/[0.01] dark:shadow-none dark:hover:from-white/[0.06] dark:hover:to-white/[0.02]",
+                    done && "border-ok/25",
+                    processedCardClass(done)
                   )}
                   title={p.reasons.join(" • ")}
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold tracking-tight">{String((it as any).cve_id)}</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <VocTriageCheckpoint refKey={processedKey} title={cveId} compact />
+                        <div className="truncate text-sm font-semibold tracking-tight">{cveId}</div>
+                      </div>
                       <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-fg/80">
                         {[
                           (it as any).vp_vendor ?? null,
@@ -615,6 +611,7 @@ export function OverviewDashboardPanel({
                             KEV
                           </span>
                         ) : null}
+                        <ExploitIntelBadges item={it as any} compact />
                       </div>
                     </div>
                     <div className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-medium tabular-nums text-fg/80 dark:border-white/10 dark:bg-white/5">
@@ -663,7 +660,11 @@ export function OverviewDashboardPanel({
             <div className="text-[10px] font-medium uppercase tracking-wider text-muted">Индекс покрытия</div>
             <HealthRing score={health} />
             <div className="mt-1 text-center text-[10px] text-muted">
-              Взвешенный балл <span className="font-mono text-fg/80">{health}</span> / 100
+              Взвешенный балл{" "}
+              <span className="font-mono text-fg/80">
+                <LiveNumber value={health} />
+              </span>{" "}
+              / 100
             </div>
           </div>
         </div>

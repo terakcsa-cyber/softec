@@ -218,6 +218,20 @@ pnpm dev
 - Web: `http://127.0.0.1:3001` (или следующий свободный)
 - API: `http://127.0.0.1:4001/api`
 
+Если вам нужно, чтобы **web всегда был строго на `3001`**, освободите порты (остановите лишние dev‑процессы) и задайте базовый порт:
+
+```bash
+WEB_PORT_BASE=3001 API_PORT_BASE=4001 pnpm dev
+```
+
+### Troubleshooting: web dev отдаёт 500 (Next.js devtools / RSC manifest)
+
+Иногда Next.js в dev падает с ошибкой вида:
+
+- `Could not find the module ... segment-explorer-node.js#SegmentViewNode in the React Client Manifest`
+
+В этом случае перезапустите dev: по умолчанию `scripts/dev.mjs` отключает devtools в Next (через `NEXT_DISABLE_DEVTOOLS=1`) как workaround.
+
 Переменные **`UPSTREAM_API_BASE`** и **`NEXT_PUBLIC_API_BASE`** для дочерних процессов выставляются **согласованно** с выбранным портом API — не подменяйте их вручную при работе через `pnpm dev`, если не уверены.
 
 Более быстрый перезапуск без очистки кэша Next:
@@ -245,6 +259,14 @@ rm -f .dev.lock
 ```
 
 `deploy.sh` автоматически создаёт `.env.production`, генерирует сильные секреты, проверяет compose config, собирает и поднимает stack. Наружу публикуется только web (`WEB_PUBLISHED_PORT`, по умолчанию **3000**); API и зависимости остаются внутри Docker network. Подробная инструкция: `docs/deploy-linux-docker.md`.
+
+### Отключение AI‑fanout при недоступной LLM
+
+Если LLM (например, Ollama в LAN) временно недоступна, очередь `ai.enrich` может расти. Для режима «не накачивать очередь» используйте:
+
+- `NVD_FANOUT_ENRICH=false` — не публиковать enrich‑задачи из NVD ingest
+- `HOT24_AI_SWEEP=false` — не делать автодогон enrich для окна 24ч
+- `BACKLOG_AI_SWEEP=false` — не делать автодогон backlog (по умолчанию выключен)
 
 ---
 

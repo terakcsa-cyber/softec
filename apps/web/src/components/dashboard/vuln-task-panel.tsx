@@ -1324,13 +1324,7 @@ export function VulnTaskPanel({
           <div className={cn("mt-3", showBoard ? "px-4 pb-4" : "")}>
             {viewMode === "list" ? (
               <div className="rounded-2xl border border-slate-200 bg-slate-50/80 p-3 dark:border-white/10 dark:bg-white/5">
-                <div className="grid gap-2 lg:grid-cols-[minmax(220px,1fr)_150px_130px_44px_auto]">
-                  <input
-                    value={q}
-                    onChange={(e) => setQ(e.target.value)}
-                    placeholder="Поиск: задача, vendor, product"
-                    className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/20"
-                  />
+                <div className="grid gap-2 lg:grid-cols-[150px_130px_44px_auto]">
                   <select
                     value={status}
                     onChange={(e) => setStatus(e.target.value)}

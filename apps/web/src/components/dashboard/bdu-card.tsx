@@ -2,6 +2,9 @@
 
 import { cn } from "../ui/cn";
 import { computeBduPriority, bduRiskScore } from "@/lib/bdu-priority";
+import { VocTriageCheckpoint, processedCardClass } from "./voc-triage-checkpoint";
+import { bduRefKey } from "@/lib/voc-ref-keys";
+import { useVocTriage } from "@/lib/voc-triage-context";
 
 export type BduListItem = {
   bduId: string;
@@ -30,20 +33,27 @@ function riskPill(score: number | null) {
 export function BduCard({
   item,
   selected,
+  previewActive,
   onSelect,
-  triage,
+  onHover,
+  onUnhover,
   showCheckbox,
   checked,
   onToggleChecked
 }: {
   item: BduListItem;
   selected: boolean;
+  previewActive?: boolean;
   onSelect: () => void;
-  triage?: "new" | "review" | "done";
+  onHover?: () => void;
+  onUnhover?: () => void;
   showCheckbox?: boolean;
   checked?: boolean;
   onToggleChecked?: (next: boolean) => void;
 }) {
+  const { isDone } = useVocTriage();
+  const processedKey = bduRefKey(item.bduId);
+  const done = isDone(processedKey);
   const risk = bduRiskScore(item);
   const pill = riskPill(risk);
   const pr = computeBduPriority(item);
@@ -62,18 +72,6 @@ export function BduCard({
   const linked = item.linkedCveIds ?? [];
   const registryCves = item.cveIds ?? [];
 
-  const triagePill =
-    triage === "done"
-      ? { label: "Готово", cls: "border-ok/30 bg-ok/15 text-ok" }
-      : triage === "review"
-        ? { label: "На разборе", cls: "border-accent/30 bg-accent/10 text-fg/80" }
-        : triage === "new"
-          ? {
-              label: "Новый",
-              cls: "border-slate-200 bg-slate-50 text-fg/80 dark:border-white/10 dark:bg-white/5"
-            }
-          : null;
-
   const criticalReasons: string[] = [];
   if (item.hasExploit) criticalReasons.push("эксплойт");
   if (item.severityLevel != null && item.severityLevel >= 4) criticalReasons.push("критический (ФСТЭК)");
@@ -83,16 +81,27 @@ export function BduCard({
     <button
       type="button"
       onClick={onSelect}
+      onMouseEnter={onHover}
+      onFocus={onHover}
+      onMouseLeave={onUnhover}
+      onBlur={onUnhover}
       className={cn(
         "group w-full rounded-xl border px-4 py-3 text-left transition",
         "bg-gradient-to-br from-slate-50 to-white hover:from-slate-100 hover:to-slate-50/90",
         "dark:from-white/5 dark:to-white/[0.02] dark:hover:from-white/7 dark:hover:to-white/[0.04]",
-        selected ? "border-accent/40 shadow-glass" : "border-border"
+        selected
+          ? "border-accent/40 shadow-glass"
+          : previewActive
+            ? "border-accent/30 bg-accent/5 shadow-sm"
+            : "border-border",
+        done && "border-ok/25",
+        processedCardClass(done)
       )}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
+            <VocTriageCheckpoint refKey={processedKey} title={`BDU:${item.bduId}`} compact />
             <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5">
               <span className="text-sm font-semibold tracking-tight">BDU:{item.bduId}</span>
               {linked.length > 0 ? (
@@ -114,9 +123,6 @@ export function BduCard({
                 </span>
               ) : null}
             </div>
-            {triagePill ? (
-              <span className={cn("rounded-full border px-2 py-0.5 text-[10px]", triagePill.cls)}>{triagePill.label}</span>
-            ) : null}
             <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[10px] text-fg/80 shadow-sm dark:border-white/10 dark:bg-white/5 dark:shadow-none">
               ФСТЭК
             </span>

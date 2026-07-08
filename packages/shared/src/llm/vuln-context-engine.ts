@@ -3,7 +3,22 @@ import {
   LLM_NOT_CONFIGURED_OUTPUT_TEXT,
   LLM_NOT_CONFIGURED_SUMMARY_PREFIX
 } from "../ai/enrichment-placeholder.js";
+import { isGenericEnrichmentTitle } from "../ai/enrichment-display.js";
+import { augmentEnrichmentWithNvdFixes } from "../cve/nvd-fix-signals.js";
 import { DEFAULT_SYSTEM_POLICY, sha256Hex, stableJsonStringify } from "../security/prompt-safety.js";
+import {
+  buildVocTaskBriefFallback,
+  type VocTaskBriefInput,
+  type VocTaskBriefOutput
+} from "../voc/task-brief.js";
+import {
+  buildVocPlaybookFromContext,
+  playbookFromStepLabels,
+  type VocPlaybookContextInput
+} from "../voc/playbook-context.js";
+import type { VocPlaybook } from "../voc/verification.js";
+
+export type { VocTaskBriefInput, VocTaskBriefOutput };
 
 export type VulnContextLlmConfig = {
   endpoint: string;
@@ -199,6 +214,68 @@ function tryParseLlmJson(raw: string): LlmJson | null {
   }
 }
 
+function isCleanSummaryText(s: unknown): s is string {
+  if (typeof s !== "string") return false;
+  const t = s.trim();
+  if (!t || t.startsWith("{") || t.startsWith("[")) return false;
+  if (t.length > 2000) return false;
+  if (t.includes('"attackFlow"') && t.includes('"description"')) return false;
+  return true;
+}
+
+function strOrEmpty(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+function strArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.map((x) => String(x)).filter(Boolean) : [];
+}
+
+function defaultExploitation(parsed: LlmJson) {
+  const e = parsed.exploitation;
+  if (e && typeof e === "object" && !Array.isArray(e)) return e;
+  return { publicExploit: "unknown" as const, exploitNotes: null };
+}
+
+function defaultApplicability(parsed: LlmJson) {
+  const a = parsed.applicability;
+  if (a && typeof a === "object" && !Array.isArray(a)) return a;
+  return { status: "unknown" as const, notes: null };
+}
+
+function defaultGraph(parsed: LlmJson) {
+  const g = parsed.graph;
+  if (g && typeof g === "object" && !Array.isArray(g)) return g;
+  return { nodes: [], edges: [] };
+}
+
+/** Частичный, но читаемый ответ модели (без graph/remediation и т.д.) — не заливать raw JSON в summary. */
+function coercePartialAnalysisEnvelope(parsed: LlmJson): LlmJson | null {
+  const summary = strOrEmpty(parsed.summary);
+  if (!isCleanSummaryText(summary)) return null;
+  const title = strOrEmpty(parsed.title) || "Анализ уязвимости";
+  let description = strOrEmpty(parsed.description);
+  if (description.length > 2800) description = `${description.slice(0, 2800)}…`;
+  return {
+    title,
+    summary,
+    description,
+    vulnerabilityClass:
+      typeof parsed.vulnerabilityClass === "string" ? parsed.vulnerabilityClass : null,
+    attackFlow: strArray(parsed.attackFlow),
+    exploitation: defaultExploitation(parsed),
+    consequences: strArray(parsed.consequences),
+    remediation: strArray(parsed.remediation),
+    applicability: defaultApplicability(parsed),
+    nextSteps: strArray(parsed.nextSteps),
+    questions: strArray(parsed.questions),
+    sources: Array.isArray(parsed.sources) ? parsed.sources : [],
+    graph: defaultGraph(parsed),
+    uncertainties: strArray(parsed.uncertainties),
+    exploitNarrative: typeof parsed.exploitNarrative === "string" ? parsed.exploitNarrative : null
+  };
+}
+
 function normalizeOutputJson(parsed: LlmJson | null, rawContent: string): LlmJson {
   const rawSnippet = rawContent.length > 12_000 ? `${rawContent.slice(0, 12_000)}…` : rawContent;
   if (!parsed) {
@@ -246,7 +323,28 @@ function normalizeOutputJson(parsed: LlmJson | null, rawContent: string): LlmJso
     parsed.exploitation != null &&
     typeof parsed.exploitation === "object";
 
-  if (hasV2Shape && (parsed.summary as string).trim().length > 0) return parsed;
+  if (hasV2Shape && isCleanSummaryText(parsed.summary)) return parsed;
+
+  const partial = parsed ? coercePartialAnalysisEnvelope(parsed) : null;
+  if (partial) {
+    const attackFlow = partial.attackFlow;
+    const graph = partial.graph as { nodes?: unknown[]; edges?: unknown[] } | undefined;
+    const graphEmpty =
+      !graph ||
+      ((!graph.nodes || graph.nodes.length === 0) && (!graph.edges || graph.edges.length === 0));
+    if (graphEmpty && Array.isArray(attackFlow) && attackFlow.length > 0) {
+      return {
+        ...partial,
+        graph: deriveGraphFromAttackFlow({
+          cveId: typeof parsed?.id === "string" ? parsed.id : "CVE",
+          attackFlow: attackFlow.map(String),
+          summary: typeof partial.summary === "string" ? partial.summary : undefined,
+          explanation: typeof partial.description === "string" ? partial.description : undefined
+        })
+      };
+    }
+    return partial;
+  }
 
   const vuln = (parsed.vulnerability as Record<string, unknown> | undefined) ?? undefined;
   const vulnTitle = vuln && typeof vuln.title === "string" ? vuln.title : null;
@@ -254,19 +352,22 @@ function normalizeOutputJson(parsed: LlmJson | null, rawContent: string): LlmJso
   const rootId = typeof parsed.id === "string" ? parsed.id : null;
   const rootDesc = typeof parsed.description === "string" ? parsed.description : null;
 
+  const vulnTitleTrim = (vulnTitle ?? "").trim();
   const fallbackSummary =
-    (vulnTitle ?? "").trim() ||
-    (rootId && rootDesc ? `Кратко: ${rootId} — ${rootDesc}` : null) ||
-    rawSnippet.slice(0, 4000);
-  const fallbackDescription =
-    (vulnDesc ?? "").trim() ||
-    (rootDesc ? `Описание (как в источнике): ${rootDesc}` : null) ||
-    rawSnippet.slice(0, 4000);
+    vulnTitleTrim && !isGenericEnrichmentTitle(vulnTitleTrim)
+      ? vulnTitleTrim
+      : rootDesc?.trim() || rawSnippet.slice(0, 4000);
+  const fallbackDescription = (vulnDesc ?? "").trim() || rootDesc?.trim() || rawSnippet.slice(0, 4000);
 
   // Some local models (e.g. smaller Qwen) can ignore schema instructions.
   // Normalize into the expected envelope so downstream UI/code has stable keys.
   return {
-    title: rootId ? `Комплексный анализ ${rootId}` : "Комплексный анализ уязвимости",
+    title:
+      vulnTitleTrim && !isGenericEnrichmentTitle(vulnTitleTrim)
+        ? vulnTitleTrim
+        : rootId
+          ? `Уязвимость ${rootId}`
+          : "Уязвимость",
     summary: fallbackSummary,
     description: fallbackDescription,
     vulnerabilityClass: null,
@@ -664,6 +765,7 @@ export async function runVulnContextLlm(
       : `Сгенерируй КОМПЛЕКСНЫЙ АНАЛИЗ УЯЗВИМОСТИ для ${subjectLabel} по шаблону банка.\n`) +
     `Цель: человекочитаемый отчёт + структурированные поля для автоматизации.\n` +
     `Все текстовые поля пиши НА РУССКОМ. Верни ТОЛЬКО raw JSON (без markdown, без \`\`\`, без пояснений).\n` +
+    `Не копируй в ответ поля из входного raw (descriptions, weaknesses, references, metrics, configurations, published и т.п.) — только ключи схемы ниже.\n` +
     `Top-level объект ДОЛЖЕН совпадать с формой и ключами ниже:\n${JSON.stringify(schemaHint, null, 2)}\n\n` +
     `Требования:\n` +
     `- title: короткий заголовок (например, \"Критическая уязвимость в Linux Kernel (n_gsm)\").\n` +
@@ -674,9 +776,9 @@ export async function runVulnContextLlm(
     `- applicability.status: \"applicable\" если уязвимость обычно релевантна в реальных окружениях и требует проверки; \"not_applicable\" если только узкая/редкая конфигурация; иначе \"unknown\".\n` +
     `- attackFlow: обязательно 4–10 коротких шагов от входной точки до воздействия.\n` +
     `- graph: построй простой граф (attacker→vector→service/asset→impact). Узлы с понятными label.\n` +
-    `- remediation: конкретные шаги фикса/минимизации.\n` +
+    `- remediation: конкретные шаги фикса/минимизации (обязательно 2–6 пунктов, не пустой массив).\n` +
     `- Если raw.mpvmContext есть: используй реальные активы, установленное ПО/пакеты и версии из MaxPatrol VM. В remediation указывай конкретные версии/пакеты/активы для патчинга и не давай общие рекомендации вместо доступного inventory-контекста.\n` +
-    `- nextSteps: что делать прямо сейчас (аудит/проверки/сбор фактов/создание заявки).\n` +
+    `- nextSteps: что делать прямо сейчас (обязательно 2–5 пунктов: аудит, проверки, заявка на патч).\n` +
     `- questions: если не хватает данных (версия, модуль, конфигурация) — задай 3–8 вопросов.\n` +
     `- sources: заполни ссылками из raw (fstecUrl, linked CVE NVD, advisories). Не выдумывай ссылки.\n\n` +
     `Пример (упрощённый):\n` +
@@ -884,6 +986,11 @@ export async function runVulnContextLlm(
     // eslint-disable-next-line no-console
     console.log(`[llm] ok cve=${cveId} tokensIn=${inTok ?? "?"} tokensOut=${outTok ?? "?"}`);
   }
+
+  outputJson = augmentEnrichmentWithNvdFixes(
+    outputJson as Record<string, unknown>,
+    raw
+  ) as LlmJson;
 
   return {
     inputHash,
@@ -1105,4 +1212,169 @@ export async function runFstecBulletinAnalysisLlm(
     model: config.model,
     promptVersion: config.promptVersion
   };
+}
+
+const VOC_TASK_BRIEF_SCHEMA = {
+  taskTitle: "string (короткий заголовок задачи, до 120 символов)",
+  contextSummary: "string (markdown, 4-8 предложений: что за сигнал, почему важен, на что смотреть)",
+  verificationChecklist: ["string (конкретный шаг проверки на инфре, без эксплуатации)"],
+  keyQuestions: ["string (2-4 вопроса к инвентаризации/экспозиции)"]
+};
+
+/**
+ * ИИ-бриф для задачи из VOC-кейса: контекст + чеклист верификации.
+ */
+export async function runVocTaskBriefLlm(
+  input: VocTaskBriefInput,
+  config: VulnContextLlmConfig
+): Promise<VocTaskBriefOutput> {
+  const fallback = buildVocTaskBriefFallback(input);
+  if (!config.apiKey && requiresApiKey(config.endpoint)) return fallback;
+
+  const userContent =
+    `Ты — аналитик ИБ в Vulnerability Operations Center банка/оператора КИИ.\n` +
+    `Сформируй ЗРЕЛЫЙ бриф для задачи верификации уязвимости на инфраструктуре.\n` +
+    `Платформа уже отранжировала сигнал — аналитик идёт проверять на инфре.\n` +
+    `ЗАПРЕЩЕНО: выдумывать CVE, версии, факты эксплуатации — только из входа.\n` +
+    `Стиль: деловой русский, без воды, без «как ИИ».\n` +
+    `Верни ТОЛЬКО JSON по схеме.\n\n` +
+    `Схема:\n${JSON.stringify(VOC_TASK_BRIEF_SCHEMA, null, 2)}\n\n` +
+    `Вход:\n${JSON.stringify(input).slice(0, 12_000)}`;
+
+  try {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (config.apiKey.length > 0) headers.authorization = `Bearer ${config.apiKey}`;
+    const ollama = isLikelyOllamaOpenAiEndpoint(config.endpoint);
+    const requestBody = {
+      model: config.model,
+      temperature: 0,
+      messages: [
+        { role: "system" as const, content: DEFAULT_SYSTEM_POLICY },
+        { role: "user" as const, content: userContent }
+      ],
+      ...(ollama ? { stream: false as const, max_tokens: 4096 } : {})
+    };
+    const timeoutMs = Math.max(effectiveLlmTimeoutMs(config.endpoint), 90_000);
+    const res = await fetch(config.endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!res.ok) return fallback;
+    const data = (await res.json()) as unknown;
+    const content = extractModelText(data, config.endpoint);
+    if (!content?.trim()) return fallback;
+    const parsed = tryParseLlmJson(content) as Record<string, unknown> | null;
+    if (!parsed) return fallback;
+
+    const contextSummary =
+      typeof parsed.contextSummary === "string" && parsed.contextSummary.trim()
+        ? parsed.contextSummary.trim()
+        : fallback.notesMd;
+    const checklist = Array.isArray(parsed.verificationChecklist)
+      ? parsed.verificationChecklist.map(String).filter((s) => s.trim()).slice(0, 10)
+      : [];
+    const questions = Array.isArray(parsed.keyQuestions)
+      ? parsed.keyQuestions.map(String).filter((s) => s.trim()).slice(0, 6)
+      : [];
+    const taskTitle =
+      typeof parsed.taskTitle === "string" && parsed.taskTitle.trim()
+        ? parsed.taskTitle.trim().slice(0, 160)
+        : fallback.taskTitle;
+
+    const notesParts = [contextSummary];
+    if (questions.length) {
+      notesParts.push("", "### Вопросы к проверке", ...questions.map((q) => `- ${q}`));
+    }
+    notesParts.push("", `---`, `VOC case \`${input.caseId}\` · ${input.refKey}`);
+
+    const evidence =
+      checklist.length > 0
+        ? checklist.map((step, i) => `${i + 1}. ${step}`).join("\n")
+        : fallback.evidence;
+
+    return {
+      notesMd: notesParts.join("\n"),
+      evidence,
+      taskTitle,
+      aiGenerated: true
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+const VOC_PLAYBOOK_SCHEMA = {
+  contextSummary: "string (2-3 предложения: специфика именно этой уязвимости и фокус проверки)",
+  steps: [
+    "string (уникальный шаг верификации на инфре: конкретный продукт/CVE/вектор из входа; без эксплуатации; 1 шаг = 1 действие)"
+  ]
+};
+
+/**
+ * ИИ-playbook верификации для VOC-кейса — шаги зависят от контекста уязвимости.
+ */
+export async function runVocPlaybookLlm(
+  input: VocPlaybookContextInput,
+  config: VulnContextLlmConfig
+): Promise<VocPlaybook> {
+  const fallback = buildVocPlaybookFromContext(input);
+  if (!config.apiKey && requiresApiKey(config.endpoint)) return fallback;
+
+  const stepCount =
+    input.vocPriority === "p1" ? "7-10" : input.vocPriority === "p2" ? "6-9" : "5-7";
+
+  const userContent =
+    `Ты — старший аналитик Vulnerability Operations Center банка/оператора КИИ.\n` +
+    `Сгенерируй ПЕРСОНАЛЬНЫЙ playbook верификации на инфраструктуре для КОНКРЕТНОГО сигнала.\n` +
+    `Каждый шаг должен ссылаться на факты из входа (CVE, продукт, CVSS, EPSS, KEV, БДУ, TG, watchlist).\n` +
+    `НЕ используй универсальные шаблоны вроде «проверить инвентарь» без привязки к продукту/CVE из входа.\n` +
+    `ЗАПРЕЩЕНО: эксплуатация, сканирование с exploit, выдуманные CVE/версии.\n` +
+    `Разрешено: инвентарь, версии, логи, конфиги, perimeter check, advisory, тикеты.\n` +
+    `Стиль: деловой русский, императив, без воды.\n` +
+    `Количество шагов: ${stepCount}. Последний шаг — зафиксировать evidence.\n` +
+    `Верни ТОЛЬКО JSON по схеме.\n\n` +
+    `Схема:\n${JSON.stringify(VOC_PLAYBOOK_SCHEMA, null, 2)}\n\n` +
+    `Вход:\n${JSON.stringify(input).slice(0, 14_000)}`;
+
+  try {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (config.apiKey.length > 0) headers.authorization = `Bearer ${config.apiKey}`;
+    const ollama = isLikelyOllamaOpenAiEndpoint(config.endpoint);
+    const requestBody = {
+      model: config.model,
+      temperature: 0.2,
+      messages: [
+        { role: "system" as const, content: DEFAULT_SYSTEM_POLICY },
+        { role: "user" as const, content: userContent }
+      ],
+      ...(ollama ? { stream: false as const, max_tokens: 4096 } : {})
+    };
+    const timeoutMs = Math.max(effectiveLlmTimeoutMs(config.endpoint), 90_000);
+    const res = await fetch(config.endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!res.ok) return fallback;
+    const data = (await res.json()) as unknown;
+    const content = extractModelText(data, config.endpoint);
+    if (!content?.trim()) return fallback;
+    const parsed = tryParseLlmJson(content) as Record<string, unknown> | null;
+    if (!parsed) return fallback;
+
+    const rawSteps = Array.isArray(parsed.steps) ? parsed.steps.map(String).filter((s) => s.trim()) : [];
+    if (rawSteps.length < 3) return fallback;
+
+    const contextSummary =
+      typeof parsed.contextSummary === "string" && parsed.contextSummary.trim()
+        ? parsed.contextSummary.trim()
+        : null;
+
+    return playbookFromStepLabels(rawSteps, { aiGenerated: true, contextSummary });
+  } catch {
+    return fallback;
+  }
 }

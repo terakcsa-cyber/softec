@@ -4,13 +4,28 @@ import { v4 as uuidv4 } from "uuid";
 import {
   QueueEventType,
   SQL_EFFECTIVE_PUBLISHED_AT,
+  catalogBackfillActive,
+  catalogReverseFloorReached,
+  catalogScanHeadIso,
+  defaultNvdCatalogDoc,
   extractNvdPublishedIso,
   extractVendorProductPairsFromCveRaw,
+  fingerprintNvdApiKey,
+  initialReverseCatalogCursor,
   isPublishedWithinHours,
+  NVD_CATALOG_FLOOR_ISO,
+  NVD_CATALOG_SCAN_MODE,
+  NVD_CATALOG_SETTINGS_KEY,
+  NVD_PUB_MAX_WINDOW_DAYS,
+  normalizeNvdCatalogDoc,
+  parseNvdCatalogDoc,
   parseNvdTimestampIso,
+  resolveCatalogDeepEndMs,
   resolveNvdPubSyncWindow,
+  resolveNvdCatalogTurboParams,
   stableJsonStringify,
-  sha256Hex
+  sha256Hex,
+  type NvdCatalogDoc
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
@@ -32,6 +47,12 @@ export class NvdIngestJob implements OnModuleInit {
     @Inject(QueueService) private readonly queue: QueueService
   ) {}
 
+  private isNvdInvalidApiKeyResponse(status: number, text: string, messageHeader: string | null): boolean {
+    if (status !== 404) return false;
+    const detail = `${messageHeader ?? ""} ${text}`.toLowerCase();
+    return detail.includes("invalid apikey") || detail.includes("invalid api key");
+  }
+
   private withNvdApiLock<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.nvdApiChain.then(fn, fn);
     this.nvdApiChain = next.catch(() => undefined);
@@ -50,6 +71,10 @@ export class NvdIngestJob implements OnModuleInit {
     const initialDelayMs = Number(process.env.NVD_INITIAL_DELAY_MS ?? 12_000);
 
     setTimeout(() => {
+      void this.bootstrapCatalogBackfill();
+    }, Math.min(initialDelayMs, 8000));
+
+    setTimeout(() => {
       this.runForever(intervalMs).catch((e) => {
         // eslint-disable-next-line no-console
         console.error("[ingest:nvd] runForever crashed — restarting loop in 30s", e);
@@ -62,7 +87,7 @@ export class NvdIngestJob implements OnModuleInit {
       });
     }, initialDelayMs);
 
-    const pubHotOnStartMs = Number(process.env.NVD_PUB_HOT_SYNC_ON_START_MS ?? 2_000);
+    const pubHotOnStartMs = Number(process.env.NVD_PUB_HOT_SYNC_ON_START_MS ?? 0);
     if (pubHotOnStartMs > 0 && process.env.NVD_PUB_HOT_SYNC !== "false") {
       setTimeout(() => {
         this.syncPublishedHotWindow()
@@ -120,7 +145,18 @@ export class NvdIngestJob implements OnModuleInit {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const startedAt = Date.now();
+      let skipPollSleep = false;
       try {
+        const catalogRemaining = await this.runCatalogBackfillBurst();
+        if (catalogRemaining) {
+          skipPollSleep = true;
+          const turbo = await this.resolveCatalogTurboParams();
+          if (turbo.burstPauseMs > 0) {
+            await new Promise((r) => setTimeout(r, turbo.burstPauseMs));
+          }
+          continue;
+        }
+
         // eslint-disable-next-line no-console
         console.log("[ingest:nvd] cycle started");
         await this.runOnce();
@@ -129,11 +165,48 @@ export class NvdIngestJob implements OnModuleInit {
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error("NVD ingest failed", e);
-      } finally {
+      }
+      if (!skipPollSleep) {
         const sleep = Math.max(5_000, intervalMs - (Date.now() - startedAt));
         await new Promise((r) => setTimeout(r, sleep));
       }
     }
+  }
+
+  private catalogTurboEnabled(): boolean {
+    return process.env.NVD_CATALOG_TURBO !== "false";
+  }
+
+  private async resolveCatalogTurboParams() {
+    const apiKey = await this.resolveNvdApiKey();
+    const hasEffectiveApiKey = Boolean(this.effectiveNvdApiKey(apiKey));
+    const base = resolveNvdCatalogTurboParams({
+      turboEnabled: this.catalogTurboEnabled(),
+      hasEffectiveApiKey
+    });
+    return {
+      ...base,
+      windowDays: Math.min(
+        NVD_PUB_MAX_WINDOW_DAYS,
+        Math.max(1, Number(process.env.NVD_CATALOG_WINDOW_DAYS ?? base.windowDays))
+      ),
+      windowsPerBurst: Math.max(
+        1,
+        Number(process.env.NVD_CATALOG_WINDOWS_PER_BURST ?? base.windowsPerBurst)
+      ),
+      burstPauseMs: Math.max(
+        0,
+        Number(process.env.NVD_CATALOG_BURST_PAUSE_MS ?? base.burstPauseMs)
+      ),
+      pageSleepMs: Math.max(
+        0,
+        Number(process.env.NVD_CATALOG_PAGE_SLEEP_MS ?? base.pageSleepMs)
+      ),
+      resultsPerPage: Math.max(
+        20,
+        Math.min(2000, Number(process.env.NVD_CATALOG_RESULTS_PER_PAGE ?? base.resultsPerPage))
+      )
+    };
   }
 
   private scoreFanoutHotOnly(): boolean {
@@ -163,42 +236,51 @@ export class NvdIngestJob implements OnModuleInit {
       this.nvdApiKeyFingerprint = fp;
       this.nvdApiKeyRejected = false;
     }
-    if (this.nvdApiKeyRejected) return undefined;
     return key;
   }
 
-  private async runOnce() {
-    await this.repairPublishedAtFromRaw();
+  private effectiveNvdApiKey(apiKey?: string): string | undefined {
+    return apiKey && !this.nvdApiKeyRejected ? apiKey : undefined;
+  }
 
-    if (process.env.NVD_PUB_HOT_SYNC !== "false") {
-      await this.syncPublishedHotWindow();
+  private async runOnce() {
+    const catalog = await this.readCatalogState();
+    if (catalogBackfillActive(catalog)) {
+      // eslint-disable-next-line no-console
+      console.log("[ingest:nvd] skip incremental — catalog backfill in progress");
+      return;
     }
+
+    await this.repairPublishedAtFromRaw();
 
     const apiKey = await this.resolveNvdApiKey();
     const baseUrl = process.env.NVD_API_BASE ?? "https://services.nvd.nist.gov/rest/json/cves/2.0";
 
     const overlapMs = Number(process.env.NVD_WATERMARK_OVERLAP_MS ?? 120_000);
-    const last = await this.db.query<{ metadata: any }>(
-      `SELECT metadata FROM audit_log
-        WHERE action = 'nvd.watermark'
-          AND COALESCE((metadata->>'processed')::int, 0) > 0
-     ORDER BY ts DESC
-        LIMIT 1`
-    );
-
-    const lastEnd =
-      (last.rowCount ?? 0) > 0 && last.rows[0]?.metadata?.modifiedEnd
-        ? String(last.rows[0].metadata.modifiedEnd)
-        : null;
+    const lastEnd = await this.getLatestWatermarkModifiedEnd();
 
     const sinceIso = lastEnd
       ? new Date(Math.max(0, new Date(lastEnd).getTime() - overlapMs)).toISOString()
       : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
 
     const nowIso = new Date().toISOString();
-    if (new Date(sinceIso).getTime() >= new Date(nowIso).getTime()) {
+    const maxWindowHours = Math.max(
+      1,
+      Math.min(168, Number(process.env.NVD_WATERMARK_MAX_WINDOW_HOURS ?? 24))
+    );
+    const windowEndMs = Math.min(
+      new Date(nowIso).getTime(),
+      new Date(sinceIso).getTime() + maxWindowHours * 60 * 60 * 1000
+    );
+    const modEndIso = new Date(windowEndMs).toISOString();
+    const windowChunked = windowEndMs < new Date(nowIso).getTime() - 60_000;
+
+    if (new Date(sinceIso).getTime() >= windowEndMs) {
       // eslint-disable-next-line no-console
-      console.log(`[ingest:nvd] skip: watermark window empty (${sinceIso} >= ${nowIso})`);
+      console.log(`[ingest:nvd] skip: watermark window empty (${sinceIso} >= ${modEndIso})`);
+      if (process.env.NVD_PUB_HOT_SYNC !== "false") {
+        await this.syncPublishedHotWindow();
+      }
       return;
     }
 
@@ -221,7 +303,7 @@ export class NvdIngestJob implements OnModuleInit {
 
       const url = new URL(baseUrl);
       url.searchParams.set("lastModStartDate", sinceIso);
-      url.searchParams.set("lastModEndDate", nowIso);
+      url.searchParams.set("lastModEndDate", modEndIso);
       url.searchParams.set("startIndex", String(startIndex));
       url.searchParams.set("resultsPerPage", String(resultsPerPage));
 
@@ -287,10 +369,11 @@ export class NvdIngestJob implements OnModuleInit {
     }
 
     if (partialSync && processed > 0) syncComplete = true;
+    if (windowChunked && processed >= 0) syncComplete = true;
 
     // eslint-disable-next-line no-console
     console.log(
-      `[ingest:nvd] processed=${processed} complete=${syncComplete} partial=${partialSync} window=${sinceIso}..${nowIso}`
+      `[ingest:nvd] processed=${processed} complete=${syncComplete} partial=${partialSync || windowChunked} window=${sinceIso}..${modEndIso}`
     );
 
     await this.backfillCvssBase();
@@ -303,13 +386,31 @@ export class NvdIngestJob implements OnModuleInit {
         [
           JSON.stringify({
             modifiedStart: sinceIso,
-            modifiedEnd: nowIso,
+            modifiedEnd: modEndIso,
             processed,
-            partial: partialSync
+            partial: partialSync || windowChunked
           })
         ]
       );
     }
+
+    if (process.env.NVD_PUB_HOT_SYNC !== "false") {
+      await this.syncPublishedHotWindow();
+      await this.syncPublishedCatchUpFromWatermark();
+    }
+  }
+
+  /** Последний modifiedEnd watermark (включая processed=0 — иначе ingest застревает на одном окне). */
+  private async getLatestWatermarkModifiedEnd(): Promise<string | null> {
+    const last = await this.db.query<{ modified_end: string | null }>(
+      `SELECT NULLIF(TRIM(metadata->>'modifiedEnd'), '') AS modified_end
+         FROM audit_log
+        WHERE action = 'nvd.watermark'
+          AND NULLIF(TRIM(metadata->>'modifiedEnd'), '') IS NOT NULL
+     ORDER BY (metadata->>'modifiedEnd')::timestamptz DESC, ts DESC
+        LIMIT 1`
+    );
+    return last.rows[0]?.modified_end ?? null;
   }
 
   /** NVD: без apiKey — 5 req / 30s; с ключом — 50 req / 30s. */
@@ -317,6 +418,219 @@ export class NvdIngestJob implements OnModuleInit {
     const configured = Number(process.env.NVD_PAGE_SLEEP_MS);
     if (Number.isFinite(configured) && configured > 0) return configured;
     return apiKey ? 6500 : 6000;
+  }
+
+  private async readCatalogState(): Promise<NvdCatalogDoc | null> {
+    try {
+      const r = await this.db.query<{ value: unknown }>(
+        `SELECT value FROM app_integration_settings WHERE key = $1 LIMIT 1`,
+        [NVD_CATALOG_SETTINGS_KEY]
+      );
+      const parsed = parseNvdCatalogDoc(r.rows[0]?.value);
+      if (!parsed) return null;
+      const normalized = normalizeNvdCatalogDoc(parsed);
+      const migrated =
+        parsed.scanMode !== normalized.scanMode ||
+        parsed.pubCursor !== normalized.pubCursor ||
+        parsed.status !== normalized.status;
+      if (migrated) {
+        await this.writeCatalogState(normalized);
+        // eslint-disable-next-line no-console
+        console.log(
+          `[ingest:nvd] catalog state migrated to newest_first backEdge=${normalized.pubCursor}`
+        );
+      }
+      return normalized;
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeCatalogState(doc: NvdCatalogDoc): Promise<void> {
+    await this.db.query(
+      `INSERT INTO app_integration_settings (key, value, updated_at)
+       VALUES ($1, $2::jsonb, now())
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [NVD_CATALOG_SETTINGS_KEY, JSON.stringify(doc)]
+    );
+  }
+
+  private async catalogCompleteMinCve(): Promise<number> {
+    return Math.max(10_000, Number(process.env.NVD_CATALOG_COMPLETE_MIN_CVE ?? 150_000));
+  }
+
+  private async bootstrapCatalogBackfill(): Promise<void> {
+    if (process.env.NVD_CATALOG_BACKFILL === "false") return;
+    const apiKey = await this.resolveNvdApiKey();
+
+    const minComplete = Math.max(
+      10_000,
+      Number(process.env.NVD_CATALOG_COMPLETE_MIN_CVE ?? 150_000)
+    );
+    const countR = await this.db.query<{ n: string }>(`SELECT count(*)::text AS n FROM cve`);
+    const cveCount = Number(countR.rows[0]?.n ?? 0);
+    const doc = await this.readCatalogState();
+    const fp = apiKey ? fingerprintNvdApiKey(apiKey) : "none";
+
+    if (doc?.status === "complete" && cveCount >= minComplete) return;
+
+    if (doc?.status === "complete" && cveCount < minComplete) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[ingest:nvd] catalog reset (cve=${cveCount} < ${minComplete}) — restarting full backfill`
+      );
+      await this.writeCatalogState(
+        defaultNvdCatalogDoc({
+          status: "pending",
+          pubCursor: initialReverseCatalogCursor(),
+          keyFingerprint: fp,
+          requestedAt: new Date().toISOString()
+        })
+      );
+      return;
+    }
+
+    if (!doc && cveCount < minComplete) {
+      await this.writeCatalogState(
+        defaultNvdCatalogDoc({
+          status: "pending",
+          keyFingerprint: fp,
+          requestedAt: new Date().toISOString()
+        })
+      );
+      // eslint-disable-next-line no-console
+      console.log(`[ingest:nvd] catalog bootstrap pending (cve=${cveCount})`);
+    }
+  }
+
+  /** Полная загрузка каталога по pubStart/pubEnd (newest_first: от now() к 1999). */
+  private async runCatalogBackfillBurst(): Promise<boolean> {
+    if (process.env.NVD_CATALOG_BACKFILL === "false") return false;
+
+    const apiKey = await this.resolveNvdApiKey();
+
+    let doc = await this.readCatalogState();
+    if (!catalogBackfillActive(doc)) {
+      await this.bootstrapCatalogBackfill();
+      doc = await this.readCatalogState();
+    }
+    if (!catalogBackfillActive(doc) || !doc) return false;
+
+    const fp = apiKey ? fingerprintNvdApiKey(apiKey) : "none";
+    if (doc.keyFingerprint && doc.keyFingerprint !== fp) {
+      doc = defaultNvdCatalogDoc({
+        status: "pending",
+        pubCursor: initialReverseCatalogCursor(),
+        keyFingerprint: fp,
+        requestedAt: new Date().toISOString()
+      });
+      await this.writeCatalogState(doc);
+    } else if (!doc.keyFingerprint) {
+      doc.keyFingerprint = fp;
+    }
+
+    if (doc.status === "pending") {
+      doc.status = "running";
+      doc.startedAt = doc.startedAt ?? new Date().toISOString();
+      doc.scanMode = NVD_CATALOG_SCAN_MODE;
+      doc.pubCursor = catalogScanHeadIso();
+      await this.writeCatalogState(doc);
+      const turbo = await this.resolveCatalogTurboParams();
+      // eslint-disable-next-line no-console
+      console.log(
+        `[ingest:nvd] catalog backfill started (today→1999) turbo=${turbo.turbo} windowDays=${turbo.windowDays} windowsPerBurst=${turbo.windowsPerBurst}`
+      );
+    }
+
+    const turbo = await this.resolveCatalogTurboParams();
+    const windowDays = turbo.windowDays;
+    const windowsPerBurst = turbo.windowsPerBurst;
+    const floorMs = new Date(NVD_CATALOG_FLOOR_ISO).getTime();
+    const dayMs = 24 * 60 * 60 * 1000;
+    const nowMs = Date.now();
+    const syncOpts = {
+      resultsPerPage: turbo.resultsPerPage,
+      pageSleepMs: turbo.pageSleepMs
+    };
+
+    let burstUpserted = 0;
+
+    // Пока deep-scan идёт вглубь — каждый burst подтягивает «голову» с текущего дня.
+    if (doc.status === "running") {
+      const headHours = Math.max(6, Number(process.env.NVD_CATALOG_HEAD_HOURS ?? 48));
+      const headStartMs = nowMs - headHours * 60 * 60 * 1000;
+      const headProcessed = await this.syncPublishedWindow(
+        new Date(headStartMs).toISOString(),
+        new Date(nowMs).toISOString(),
+        `catalog_head_${headHours}h`,
+        "nvd.catalog_backfill",
+        syncOpts
+      );
+      burstUpserted += headProcessed;
+    }
+
+    let cursorEndMs = resolveCatalogDeepEndMs(doc);
+    doc.scanMode = NVD_CATALOG_SCAN_MODE;
+
+    for (let w = 0; w < windowsPerBurst && cursorEndMs > floorMs; w++) {
+      const windowStartMs = Math.max(floorMs, cursorEndMs - windowDays * dayMs);
+      const pubStartIso = new Date(windowStartMs).toISOString();
+      const pubEndIso = new Date(cursorEndMs).toISOString();
+      const processed = await this.syncPublishedWindow(
+        pubStartIso,
+        pubEndIso,
+        `catalog_rev_${windowDays}d`,
+        "nvd.catalog_backfill",
+        syncOpts
+      );
+      burstUpserted += processed;
+      doc.totalUpserted = (doc.totalUpserted ?? 0) + processed;
+      doc.pubCursor = pubStartIso;
+      doc.lastWindowStart = pubStartIso;
+      doc.lastWindowEnd = pubEndIso;
+      doc.scanMode = NVD_CATALOG_SCAN_MODE;
+      doc.status = "running";
+      cursorEndMs = windowStartMs;
+      await this.writeCatalogState(doc);
+    }
+
+    if (catalogReverseFloorReached(doc.pubCursor)) {
+      const countR = await this.db.query<{ n: string }>(`SELECT count(*)::text AS n FROM cve`);
+      const cveCount = Number(countR.rows[0]?.n ?? 0);
+      const minComplete = await this.catalogCompleteMinCve();
+      if (cveCount < minComplete) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ingest:nvd] catalog reached 1999 but cve=${cveCount} < ${minComplete} — finishing anyway (pub walk done)`
+        );
+      }
+
+      doc.status = "complete";
+      doc.completedAt = new Date().toISOString();
+      await this.writeCatalogState(doc);
+      await this.db.query(
+        `INSERT INTO audit_log(actor_type, action, metadata)
+         VALUES ('system', 'nvd.catalog_complete', $1)`,
+        [
+          JSON.stringify({
+            totalUpserted: doc.totalUpserted ?? 0,
+            completedAt: doc.completedAt,
+            scanMode: NVD_CATALOG_SCAN_MODE
+          })
+        ]
+      );
+      // eslint-disable-next-line no-console
+      console.log(`[ingest:nvd] catalog backfill complete total=${doc.totalUpserted ?? 0}`);
+      return false;
+    }
+
+    doc.status = "running";
+    await this.writeCatalogState(doc);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[ingest:nvd] catalog burst upserted=${burstUpserted} backEdge=${doc.pubCursor} total=${doc.totalUpserted ?? 0} turbo=${turbo.turbo}`
+    );
+    return true;
   }
 
   private async upsertCveAndFanout(input: {
@@ -414,6 +728,8 @@ export class NvdIngestJob implements OnModuleInit {
    * Не смешивается с watermark lastModified (после простоя не «заливает» блок 24ч).
    */
   private async syncPublishedHotWindow() {
+    if (catalogBackfillActive(await this.readCatalogState())) return;
+
     const maxRow = await this.db.query<{ max_pub: Date | null }>(
       `SELECT MAX(published_at) AS max_pub FROM cve`
     );
@@ -425,22 +741,69 @@ export class NvdIngestJob implements OnModuleInit {
       overlapMs: Number(process.env.NVD_PUB_HOT_OVERLAP_MS ?? 3_600_000)
     });
 
+    await this.syncPublishedWindow(pubStartIso, pubEndIso, reason, "nvd.pub_sync");
+  }
+
+  /**
+   * Догон по дате публикации от watermark lastModified: закрывает дыры, когда max(published_at)
+   * уже «свежий», но часть CVE в середине пропущена (типичный кейс после простоя ingest).
+   */
+  private async syncPublishedCatchUpFromWatermark() {
+    if (process.env.NVD_PUB_CATCHUP === "false") return;
+    if (catalogBackfillActive(await this.readCatalogState())) return;
+
+    const watermarkEnd = await this.getLatestWatermarkModifiedEnd();
+    if (!watermarkEnd) return;
+
+    const lagHours = Math.max(1, Number(process.env.NVD_PUB_CATCHUP_LAG_HOURS ?? 6));
+    const chunkDays = Math.max(1, Math.min(30, Number(process.env.NVD_PUB_CATCHUP_CHUNK_DAYS ?? 7)));
+    const overlapMs = Number(process.env.NVD_PUB_CATCHUP_OVERLAP_MS ?? 3_600_000);
+
+    const endMs = new Date(watermarkEnd).getTime();
+    if (Number.isNaN(endMs)) return;
+    const nowMs = Date.now();
+    if (nowMs - endMs < lagHours * 60 * 60 * 1000) return;
+
+    const pubStartIso = new Date(Math.max(0, endMs - overlapMs)).toISOString();
+    const chunkEndMs = Math.min(nowMs, endMs + chunkDays * 24 * 60 * 60 * 1000);
+    if (chunkEndMs <= new Date(pubStartIso).getTime()) return;
+    const pubEndIso = new Date(chunkEndMs).toISOString();
+
+    await this.syncPublishedWindow(
+      pubStartIso,
+      pubEndIso,
+      `catchup_watermark_${chunkDays}d`,
+      "nvd.pub_catchup"
+    );
+  }
+
+  private async syncPublishedWindow(
+    pubStartIso: string,
+    pubEndIso: string,
+    reason: string,
+    auditAction: "nvd.pub_sync" | "nvd.pub_catchup" | "nvd.catalog_backfill",
+    opts?: { resultsPerPage?: number; pageSleepMs?: number }
+  ): Promise<number> {
     const apiKey = await this.resolveNvdApiKey();
     const baseUrl = process.env.NVD_API_BASE ?? "https://services.nvd.nist.gov/rest/json/cves/2.0";
-    const resultsPerPage = Math.max(
-      20,
-      Math.min(2000, Number(process.env.NVD_RESULTS_PER_PAGE ?? 100))
-    );
-    const pageSleepMs = this.resolveNvdPageSleepMs(apiKey);
+    const resultsPerPage =
+      opts?.resultsPerPage ??
+      Math.max(20, Math.min(2000, Number(process.env.NVD_RESULTS_PER_PAGE ?? 100)));
+    const pageSleepMs = opts?.pageSleepMs ?? this.resolveNvdPageSleepMs(apiKey);
     let startIndex = 0;
     let processed = 0;
     const maxEmptyRetries = Number(process.env.NVD_EMPTY_PAGE_RETRIES ?? 12);
     let emptyRetries = 0;
 
+    const logTag =
+      auditAction === "nvd.pub_catchup"
+        ? "pub-catchup"
+        : auditAction === "nvd.catalog_backfill"
+          ? "catalog"
+          : "pub-hot";
+
     // eslint-disable-next-line no-console
-    console.log(
-      `[ingest:nvd] pub-hot sync window=${pubStartIso}..${pubEndIso} reason=${reason} maxPublished=${maxPublishedAt?.toISOString() ?? "none"}`
-    );
+    console.log(`[ingest:nvd] ${logTag} window=${pubStartIso}..${pubEndIso} reason=${reason}`);
 
     for (;;) {
       if (startIndex > 0 || emptyRetries > 0) {
@@ -462,13 +825,13 @@ export class NvdIngestJob implements OnModuleInit {
         if (emptyRetries <= maxEmptyRetries) {
           // eslint-disable-next-line no-console
           console.warn(
-            `[ingest:nvd] pub-hot empty page startIndex=${startIndex} total=${totalResults} retry=${emptyRetries}/${maxEmptyRetries}`
+            `[ingest:nvd] ${logTag} empty page startIndex=${startIndex} total=${totalResults} retry=${emptyRetries}/${maxEmptyRetries}`
           );
           continue;
         }
         // eslint-disable-next-line no-console
         console.error(
-          `[ingest:nvd] pub-hot giving up empty page startIndex=${startIndex} total=${totalResults}`
+          `[ingest:nvd] ${logTag} giving up empty page startIndex=${startIndex} total=${totalResults}`
         );
         break;
       }
@@ -489,7 +852,7 @@ export class NvdIngestJob implements OnModuleInit {
           processed++;
         } catch (e) {
           // eslint-disable-next-line no-console
-          console.error(`[ingest:nvd] pub-hot failed cve=${cveId}`, e);
+          console.error(`[ingest:nvd] ${logTag} failed cve=${cveId}`, e);
         }
       }
 
@@ -499,25 +862,21 @@ export class NvdIngestJob implements OnModuleInit {
 
     await this.db.query(
       `INSERT INTO audit_log(actor_type, action, metadata)
-       VALUES ('system', 'nvd.pub_sync', $1)`,
+       VALUES ('system', $1, $2)`,
       [
+        auditAction,
         JSON.stringify({
           pubStart: pubStartIso,
           pubEnd: pubEndIso,
           processed,
-          reason,
-          maxPublishedBefore: maxPublishedAt?.toISOString() ?? null
+          reason
         })
       ]
     );
 
-    if (processed > 0) {
-      // eslint-disable-next-line no-console
-      console.log(`[ingest:nvd] pub-hot sync processed=${processed}`);
-    } else {
-      // eslint-disable-next-line no-console
-      console.log(`[ingest:nvd] pub-hot sync processed=0 (NVD returned no rows in window)`);
-    }
+    // eslint-disable-next-line no-console
+    console.log(`[ingest:nvd] ${logTag} processed=${processed}`);
+    return processed;
   }
 
   /** Заполнить published_at из паспорта NVD, если колонка пустая. */
@@ -763,15 +1122,16 @@ export class NvdIngestJob implements OnModuleInit {
   }
 
   private async fetchJson(url: string, apiKey?: string) {
+    const effectiveKey = this.effectiveNvdApiKey(apiKey);
     try {
-      return await this.fetchJsonWithKey(url, apiKey);
+      return await this.fetchJsonWithKey(url, effectiveKey);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (apiKey && /\b404\b/.test(msg)) {
+      if (effectiveKey && this.isNvdInvalidApiKeyResponse(404, msg, null)) {
         this.nvdApiKeyRejected = true;
         // eslint-disable-next-line no-console
         console.warn(
-          "[ingest:nvd] NVD API key rejected (HTTP 404) — falling back to unauthenticated requests (check NVD_API_KEY)"
+          "[ingest:nvd] NVD API key rejected — falling back to unauthenticated requests"
         );
         return await this.fetchJsonWithKey(url, undefined);
       }
@@ -779,7 +1139,7 @@ export class NvdIngestJob implements OnModuleInit {
     }
   }
 
-  private async fetchJsonWithKey(url: string, apiKey?: string) {
+  private async fetchJsonWithKey(url: string, apiKey?: string): Promise<any> {
     const headers: Record<string, string> = { accept: "application/json" };
     if (apiKey) headers["apiKey"] = apiKey;
 
@@ -791,12 +1151,24 @@ export class NvdIngestJob implements OnModuleInit {
       try {
         const res = await fetch(url, { headers, signal: ac.signal });
         if (res.ok) return res.json();
+        const text = await res.text().catch(() => "");
+        const messageHeader = res.headers.get("message");
+        if (apiKey && this.isNvdInvalidApiKeyResponse(res.status, text, messageHeader)) {
+          this.nvdApiKeyRejected = true;
+          // eslint-disable-next-line no-console
+          console.warn("[ingest:nvd] NVD API key rejected — retrying without apiKey");
+          return await this.fetchJsonWithKey(url, undefined);
+        }
+        if (res.status === 404) {
+          throw new Error(
+            `NVD fetch failed: 404 ${messageHeader ?? (text || "not found")} url=${url}`
+          );
+        }
         const retryAfter = res.headers.get("retry-after");
         const backoffMs = retryAfter
           ? Number(retryAfter) * 1000
           : Math.min(60_000, 2000 * attempt * attempt);
         if (attempt === maxAttempts) {
-          const text = await res.text().catch(() => "");
           throw new Error(`NVD fetch failed: ${res.status} ${res.statusText} ${text} url=${url}`);
         }
         // eslint-disable-next-line no-console

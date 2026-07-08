@@ -146,6 +146,9 @@ for (let attempt = 1; attempt <= maxDevRetries; attempt++) {
     UPSTREAM_API_BASE: apiBase,
     JWT_SECRET: jwtSecret,
     INTERNAL_API_BEARER: internalApiBearer,
+    // Work around occasional Next.js devtools / RSC manifest crash in dev.
+    NEXT_DISABLE_DEVTOOLS: process.env.NEXT_DISABLE_DEVTOOLS ?? "1",
+    NEXT_TELEMETRY_DISABLED: process.env.NEXT_TELEMETRY_DISABLED ?? "1",
     /**
      * Всегда как у поднятого API (`apiBase`). Не брать из `.env`: там часто зашит 4001,
      * а `findFreePort` мог выбрать другой порт — иначе BFF и браузер расходятся с Nest.

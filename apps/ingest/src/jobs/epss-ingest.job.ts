@@ -54,6 +54,22 @@ export class EpssIngestJob implements OnModuleInit {
       )`
     );
     await this.db.query(`CREATE INDEX IF NOT EXISTS epss_score_score_idx ON epss_score (score DESC)`);
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS epss_score_history (
+        id BIGSERIAL PRIMARY KEY,
+        cve_id TEXT NOT NULL,
+        score DOUBLE PRECISION NOT NULL CHECK (score >= 0 AND score <= 1),
+        percentile DOUBLE PRECISION CHECK (percentile >= 0 AND percentile <= 1),
+        scored_at DATE NOT NULL,
+        recorded_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS epss_score_history_cve_scored_uq ON epss_score_history (cve_id, scored_at)`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS epss_score_history_cve_scored_idx ON epss_score_history (cve_id, scored_at DESC)`
+    );
   }
 
   private async runOnce() {
@@ -66,7 +82,8 @@ export class EpssIngestJob implements OnModuleInit {
 
     const buf = Buffer.from(await res.arrayBuffer());
     const csv = this.maybeGunzip(buf);
-    const rows = this.parseCsv(csv);
+    const feedScoreDate = this.parseFeedScoreDate(csv);
+    const rows = this.parseCsv(csv, feedScoreDate);
     if (rows.length === 0) return;
 
     const nowIso = new Date().toISOString();
@@ -78,7 +95,7 @@ export class EpssIngestJob implements OnModuleInit {
       const cveIds = batch.map((r) => r.cveId);
       const scores = batch.map((r) => r.epss);
       const percentiles = batch.map((r) => (r.percentile == null ? null : r.percentile));
-      const scoredAts = batch.map((r) => (r.scoredAt ? new Date(r.scoredAt) : null));
+      const scoredAts = batch.map((r) => (r.scoredAt ? new Date(r.scoredAt) : feedScoreDate));
 
       await this.db.query(
         `INSERT INTO epss_score(cve_id, score, percentile, scored_at, updated_at)
@@ -89,6 +106,16 @@ export class EpssIngestJob implements OnModuleInit {
                        scored_at = EXCLUDED.scored_at,
                        updated_at = now()`,
         [cveIds, scores, percentiles, scoredAts, Array(batch.length).fill(new Date())]
+      );
+      await this.db.query(
+        `INSERT INTO epss_score_history (cve_id, score, percentile, scored_at)
+         SELECT u.cve_id, u.score, u.percentile, u.scored_at::date
+           FROM UNNEST($1::text[], $2::double precision[], $3::double precision[], $4::date[]) AS u(cve_id, score, percentile, scored_at)
+         ON CONFLICT (cve_id, scored_at) DO UPDATE SET
+           score = EXCLUDED.score,
+           percentile = EXCLUDED.percentile,
+           recorded_at = now()`,
+        [cveIds, scores, percentiles, scoredAts.map((d) => d.toISOString().slice(0, 10))]
       );
       upserted += batch.length;
     }
@@ -148,16 +175,28 @@ export class EpssIngestJob implements OnModuleInit {
     return buf.toString("utf8");
   }
 
-  private parseCsv(csv: string): ParsedRow[] {
+  private parseFeedScoreDate(csv: string): Date {
+    const first = csv.split(/\r?\n/).find((l) => l.trim().length > 0) ?? "";
+    const m = first.match(/score_date:([^,\s#]+)/i);
+    if (m?.[1]) {
+      const d = new Date(m[1]);
+      if (Number.isFinite(d.getTime())) return d;
+    }
+    return new Date();
+  }
+
+  private parseCsv(csv: string, feedScoreDate: Date): ParsedRow[] {
     const lines = csv.split(/\r?\n/);
     if (lines.length <= 1) return [];
-    const header = lines[0] ?? "";
-    const idx = this.headerIndexes(header);
+    const headerLine = lines.find((l) => /^cve,/i.test(l.trim())) ?? lines[0] ?? "";
+    const idx = this.headerIndexes(headerLine);
+    const defaultDate = feedScoreDate.toISOString().slice(0, 10);
 
     const out: ParsedRow[] = [];
-    for (let i = 1; i < lines.length; i++) {
+    for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      if (!line) continue;
+      if (!line || line.startsWith("#")) continue;
+      if (/^cve,/i.test(line.trim())) continue;
       // Simple CSV split (EPSS feed does not include quoted commas for these columns).
       const cols = line.split(",");
       const cveId = cols[idx.cve] ?? "";
@@ -170,7 +209,7 @@ export class EpssIngestJob implements OnModuleInit {
       const pRaw = idx.percentile != null ? cols[idx.percentile] : undefined;
       const percentile = pRaw != null && pRaw.length > 0 ? Number(pRaw) : undefined;
 
-      const scoredAt = idx.date != null ? cols[idx.date] : undefined;
+      const scoredAt = idx.date != null ? cols[idx.date] : defaultDate;
       out.push({ cveId, epss, percentile: Number.isFinite(percentile) ? percentile : undefined, scoredAt });
     }
     return out;

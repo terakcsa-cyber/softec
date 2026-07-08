@@ -1,6 +1,14 @@
+import fs from "node:fs/promises";
 import { gunzipSync } from "node:zlib";
 import { Agent, fetch as undiciFetch } from "undici";
 import yauzl from "yauzl";
+import {
+  bduKeepStagingOnDisk,
+  ensureBduStagingDir,
+  pruneBduStaging,
+  stagingArtifactName,
+  writeStreamToStagingFile
+} from "./staging.js";
 
 /** Официальная полная выгрузка (обновляется на bdu.fstec.ru, внутри export/vulxml.xml). */
 export const BDU_FSTEC_VULXML_ZIP_URL = "https://bdu.fstec.ru/files/documents/vulxml.zip";
@@ -37,10 +45,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function bduHttpGet(url: string, timeoutMs: number): Promise<Buffer> {
+async function bduHttpGetToFile(url: string, destPath: string, timeoutMs: number): Promise<void> {
   const dispatcher = bduFetchDispatcher();
   const maxAttempts = Math.max(1, Math.min(8, Number(process.env.BDU_FETCH_MAX_ATTEMPTS ?? 4)));
-  const perAttemptTimeoutMs = Math.max(30_000, Math.floor(timeoutMs / maxAttempts));
+  const perAttemptTimeoutMs = Math.max(60_000, timeoutMs);
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -59,9 +67,11 @@ async function bduHttpGet(url: string, timeoutMs: number): Promise<Buffer> {
         const text = await res.text().catch(() => "");
         throw new Error(`BDU fetch failed ${res.status} ${res.statusText} ${text.slice(0, 200)}`);
       }
-      return Buffer.from(await res.arrayBuffer());
+      await writeStreamToStagingFile(res.body, destPath);
+      return;
     } catch (err) {
       lastError = err;
+      await fs.rm(destPath, { force: true }).catch(() => undefined);
       if (attempt < maxAttempts) {
         const delayMs = Math.min(15_000, 2000 * attempt);
         // eslint-disable-next-line no-console
@@ -78,9 +88,9 @@ async function bduHttpGet(url: string, timeoutMs: number): Promise<Buffer> {
     : new Error(`BDU fetch failed after ${maxAttempts} attempts: ${String(lastError)}`);
 }
 
-function extractVulxmlFromZipBuffer(zipBuf: Buffer): Promise<Buffer> {
+function extractVulxmlFromZipFile(zipPath: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    yauzl.fromBuffer(zipBuf, { lazyEntries: true }, (err, zipfile) => {
+    yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
       if (err || !zipfile) {
         reject(err ?? new Error("Failed to open BDU zip"));
         return;
@@ -119,22 +129,35 @@ function extractVulxmlFromZipBuffer(zipBuf: Buffer): Promise<Buffer> {
   });
 }
 
-/** Скачивает выгрузку БДУ и возвращает распакованный vulxml.xml. */
-export async function fetchBduVulxmlBytes(url: string, timeoutMs: number): Promise<Buffer> {
+async function vulxmlFromStagingFile(artifactPath: string, url: string): Promise<Buffer> {
   const lower = url.toLowerCase();
-  const buf = await bduHttpGet(url, timeoutMs);
-  if (lower.endsWith(".zip")) {
-    return extractVulxmlFromZipBuffer(buf);
+  const head = await fs.readFile(artifactPath, { flag: "r" }).then((b) => b.subarray(0, 4));
+
+  if (lower.endsWith(".zip") || (head[0] === 0x50 && head[1] === 0x4b)) {
+    return extractVulxmlFromZipFile(artifactPath);
   }
-  if (lower.endsWith(".gz")) {
-    return gunzipSync(buf);
+  const raw = await fs.readFile(artifactPath);
+  if (lower.endsWith(".gz") || (raw[0] === 0x1f && raw[1] === 0x8b)) {
+    return gunzipSync(raw);
   }
-  const enc = buf[0] === 0x1f && buf[1] === 0x8b;
-  if (enc) return gunzipSync(buf);
-  if (buf[0] === 0x50 && buf[1] === 0x4b) {
-    return extractVulxmlFromZipBuffer(buf);
+  return raw;
+}
+
+/** Скачивает выгрузку БДУ во временный каталог, парсит vulxml.xml, затем удаляет артефакты. */
+export async function fetchBduVulxmlBytes(url: string, timeoutMs: number): Promise<Buffer> {
+  const stagingDir = await ensureBduStagingDir();
+  await pruneBduStaging(stagingDir);
+  const artifactPath = `${stagingDir}/${stagingArtifactName(url)}`;
+
+  try {
+    await bduHttpGetToFile(url, artifactPath, timeoutMs);
+    const xml = await vulxmlFromStagingFile(artifactPath, url);
+    return xml;
+  } finally {
+    if (!bduKeepStagingOnDisk()) {
+      await pruneBduStaging(stagingDir);
+    }
   }
-  return buf;
 }
 
 /** Проверка доступности источника (Range/HEAD, без полной загрузки ZIP). */

@@ -107,6 +107,93 @@ export class SchemaService implements OnModuleInit {
       )`
     );
 
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS epss_score_history (
+        cve_id TEXT NOT NULL,
+        score DOUBLE PRECISION NOT NULL,
+        percentile DOUBLE PRECISION,
+        scored_at DATE NOT NULL,
+        recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (cve_id, scored_at)
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS epss_score_history_cve_scored_idx ON epss_score_history (cve_id, scored_at DESC)`
+    );
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS vulncheck_kev (
+        cve_id TEXT PRIMARY KEY,
+        date_added TIMESTAMPTZ,
+        cisa_date_added TIMESTAMPTZ,
+        vckev_only BOOLEAN NOT NULL DEFAULT false,
+        ransomware_use TEXT,
+        evidence_count INT NOT NULL DEFAULT 0,
+        xdb_url TEXT,
+        raw JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS vulncheck_kev_date_added_idx ON vulncheck_kev (date_added DESC NULLS LAST)`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS vulncheck_kev_vckev_only_idx ON vulncheck_kev (vckev_only) WHERE vckev_only = true`
+    );
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS cve_exploit_signal (
+        id BIGSERIAL PRIMARY KEY,
+        cve_id TEXT NOT NULL REFERENCES cve(cve_id) ON DELETE CASCADE,
+        signal_type TEXT NOT NULL,
+        source TEXT NOT NULL,
+        url TEXT,
+        title TEXT,
+        confidence TEXT NOT NULL DEFAULT 'medium',
+        first_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        raw JSONB
+      )`
+    );
+    await this.db.query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS cve_exploit_signal_uq ON cve_exploit_signal (cve_id, signal_type, source, COALESCE(url, ''))`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS cve_exploit_signal_cve_idx ON cve_exploit_signal (cve_id)`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS cve_exploit_signal_type_idx ON cve_exploit_signal (signal_type)`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS cve_exploit_signal_last_seen_idx ON cve_exploit_signal (last_seen_at DESC)`
+    );
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS cve_exploit_intel (
+        cve_id TEXT PRIMARY KEY REFERENCES cve(cve_id) ON DELETE CASCADE,
+        epss_score DOUBLE PRECISION,
+        epss_percentile DOUBLE PRECISION,
+        epss_delta_7d DOUBLE PRECISION,
+        epss_spike BOOLEAN NOT NULL DEFAULT false,
+        cisa_kev BOOLEAN NOT NULL DEFAULT false,
+        vulncheck_kev BOOLEAN NOT NULL DEFAULT false,
+        vckev_only BOOLEAN NOT NULL DEFAULT false,
+        has_poc BOOLEAN NOT NULL DEFAULT false,
+        has_nuclei BOOLEAN NOT NULL DEFAULT false,
+        has_public_exploit BOOLEAN NOT NULL DEFAULT false,
+        exploit_ref_count INT NOT NULL DEFAULT 0,
+        tg_mentions_24h INT NOT NULL DEFAULT 0,
+        advisory_mentions_7d INT NOT NULL DEFAULT 0,
+        intel_updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS cve_exploit_intel_spike_idx ON cve_exploit_intel (epss_spike) WHERE epss_spike = true`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS cve_exploit_intel_vckev_only_idx ON cve_exploit_intel (vckev_only) WHERE vckev_only = true`
+    );
+
     /** Связки БДУ ФСТЭК ↔ CVE (накапливаются при обогащении ленты, если CVE уже в `cve`). */
     await this.db.query(
       `CREATE TABLE IF NOT EXISTS cve_bdu_link (
@@ -374,6 +461,169 @@ export class SchemaService implements OnModuleInit {
       )`
     );
     await this.db.query(`CREATE INDEX IF NOT EXISTS vuln_task_event_task_ts_idx ON vuln_task_event (task_id, ts DESC)`);
+
+    // --- VOC triage (team-wide operational queue state) ---
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS voc_triage (
+        ref_key TEXT PRIMARY KEY,
+        source TEXT NOT NULL CHECK (source IN ('cve','bdu','tg')),
+        ref_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open'
+          CHECK (status IN ('open','claimed','done','dismissed')),
+        claimed_by_user_id UUID REFERENCES auth_user(id) ON DELETE SET NULL,
+        claimed_by_email TEXT,
+        updated_by_user_id UUID REFERENCES auth_user(id) ON DELETE SET NULL,
+        updated_by_email TEXT,
+        voc_score INT NOT NULL DEFAULT 0 CHECK (voc_score >= 0 AND voc_score <= 100),
+        voc_priority TEXT NOT NULL DEFAULT 'p4'
+          CHECK (voc_priority IN ('p1','p2','p3','p4')),
+        voc_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+        title TEXT NOT NULL DEFAULT '',
+        meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS voc_triage_status_updated_idx ON voc_triage (status, updated_at DESC)`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS voc_triage_source_idx ON voc_triage (source)`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS voc_watchlist (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        kind TEXT NOT NULL CHECK (kind IN ('vendor','product','keyword')),
+        value TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT '',
+        active BOOLEAN NOT NULL DEFAULT true,
+        created_by_user_id UUID REFERENCES auth_user(id) ON DELETE SET NULL,
+        created_by_email TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        CONSTRAINT voc_watchlist_kind_value_uq UNIQUE (kind, value)
+      )`
+    );
+    await this.db.query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS voc_watchlist_kind_value_uq ON voc_watchlist (kind, value)`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS voc_watchlist_active_idx ON voc_watchlist (active, updated_at DESC)`
+    );
+    await this.db.query(`
+      DO $$ BEGIN
+        ALTER TABLE voc_watchlist ADD CONSTRAINT voc_watchlist_kind_value_uq UNIQUE (kind, value);
+      EXCEPTION
+        WHEN duplicate_object THEN NULL;
+        WHEN duplicate_table THEN NULL;
+      END $$`);
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS voc_case (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        title TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open'
+          CHECK (status IN ('open','in_progress','resolved','cancelled')),
+        dedup_key TEXT NOT NULL,
+        primary_ref_key TEXT NOT NULL,
+        assignee_user_id UUID REFERENCES auth_user(id) ON DELETE SET NULL,
+        assignee_email TEXT,
+        sla_due_at TIMESTAMPTZ,
+        voc_priority TEXT NOT NULL DEFAULT 'p4'
+          CHECK (voc_priority IN ('p1','p2','p3','p4')),
+        task_id UUID REFERENCES vuln_task(id) ON DELETE SET NULL,
+        created_by_user_id UUID REFERENCES auth_user(id) ON DELETE SET NULL,
+        created_by_email TEXT,
+        meta JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS voc_case_status_sla_idx ON voc_case (status, sla_due_at ASC)`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS voc_case_dedup_idx ON voc_case (dedup_key, updated_at DESC)`
+    );
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS voc_case_ref (
+        case_id UUID NOT NULL REFERENCES voc_case(id) ON DELETE CASCADE,
+        ref_key TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('cve','bdu','tg')),
+        ref_id TEXT NOT NULL,
+        added_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (case_id, ref_key)
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS voc_case_ref_ref_key_idx ON voc_case_ref (ref_key)`);
+
+    await this.db.query(`ALTER TABLE voc_case ADD COLUMN IF NOT EXISTS outcome TEXT`);
+    await this.db.query(`ALTER TABLE voc_case ADD COLUMN IF NOT EXISTS outcome_notes TEXT`);
+    await this.db.query(`ALTER TABLE voc_case ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ`);
+    await this.db.query(`ALTER TABLE voc_case ADD COLUMN IF NOT EXISTS playbook JSONB NOT NULL DEFAULT '{}'::jsonb`);
+    await this.db.query(
+      `ALTER TABLE voc_case DROP CONSTRAINT IF EXISTS voc_case_outcome_check`
+    );
+    // In dev multiple API instances can race on schema init: both DROP, then both ADD → one gets 42710.
+    try {
+      await this.db.query(
+        `ALTER TABLE voc_case ADD CONSTRAINT voc_case_outcome_check
+           CHECK (outcome IS NULL OR outcome IN (
+             'not_affected','exposed','monitoring','patched','accepted_risk','needs_more_info'
+           ))`
+      );
+    } catch (e: any) {
+      if (String(e?.code ?? "") !== "42710") throw e;
+    }
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS voc_case_evidence (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        case_id UUID NOT NULL REFERENCES voc_case(id) ON DELETE CASCADE,
+        author_email TEXT,
+        body TEXT NOT NULL,
+        url TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE INDEX IF NOT EXISTS voc_case_evidence_case_idx ON voc_case_evidence (case_id, created_at DESC)`
+    );
+
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS voc_alert_rule (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name TEXT NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT true,
+        condition TEXT NOT NULL
+          CHECK (condition IN ('p1_open','sla_breach','watchlist_p1','case_exposed')),
+        channel TEXT NOT NULL DEFAULT 'telegram'
+          CHECK (channel IN ('telegram','webhook')),
+        webhook_url TEXT,
+        config JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS voc_alert_fired (
+        rule_id UUID NOT NULL REFERENCES voc_alert_rule(id) ON DELETE CASCADE,
+        dedup_key TEXT NOT NULL,
+        fired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (rule_id, dedup_key)
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS voc_alert_fired_at_idx ON voc_alert_fired (fired_at DESC)`);
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS voc_handover (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        author_email TEXT,
+        window_hours INT NOT NULL DEFAULT 8,
+        snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+        notes TEXT,
+        markdown TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(`CREATE INDEX IF NOT EXISTS voc_handover_created_idx ON voc_handover (created_at DESC)`);
 
     await this.db.query(
       `CREATE TABLE IF NOT EXISTS app_integration_settings (

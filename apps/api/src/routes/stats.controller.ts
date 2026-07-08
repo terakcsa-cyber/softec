@@ -3,10 +3,33 @@ import { Controller, Get, Logger, Post, Query } from "@nestjs/common";
 import { llmEndpointRequiresApiKey, parseBduVendorProductPairs } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
+import { sqlBduFstecAttentionWithinHours } from "@vuln-intel/shared";
 import { IntegrationSettingsService } from "../services/integration-settings.service.js";
+import { ThreatFeedService } from "../services/threat-feed.service.js";
+import { ThreatDigestPdfService } from "../services/threat-digest-pdf.service.js";
+import { ThreatIntelRefreshService } from "../services/threat-intel-refresh.service.js";
+import { TelegramPostService } from "../services/telegram-post.service.js";
 
 type VendorAgg = { vendor: string; count: number };
 type ProductAgg = { vendor: string; product: string; count: number };
+
+type LlmHealth = {
+  configured: boolean;
+  ok: boolean;
+  endpoint: string | null;
+  model: string | null;
+  ms: number;
+  status?: number;
+  error?: string | null;
+  requiresApiKey: boolean;
+  hasApiKey: boolean;
+  authReady: boolean;
+  authHint: string | null;
+  cached?: boolean;
+  checkedAt?: string;
+};
+
+let llmHealthCache: { key: string; ts: number; value: LlmHealth } | null = null;
 
 function vendorMergeKey(vendor: string): string {
   return vendor.trim().toLowerCase();
@@ -111,7 +134,11 @@ export class StatsController {
   constructor(
     private readonly db: DbService,
     private readonly queue: QueueService,
-    private readonly integration: IntegrationSettingsService
+    private readonly integration: IntegrationSettingsService,
+    private readonly threatFeedSvc: ThreatFeedService,
+    private readonly threatDigestPdf: ThreatDigestPdfService,
+    private readonly threatIntelRefresh: ThreatIntelRefreshService,
+    private readonly telegram: TelegramPostService
   ) {}
 
   @Get("summary")
@@ -151,8 +178,7 @@ export class StatsController {
     const lastNvd = await this.db.query<{ ts: string | null }>(
       `SELECT to_char(MAX(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts
          FROM audit_log
-        WHERE action = 'nvd.watermark'
-          AND COALESCE((metadata->>'processed')::int, 0) > 0`
+        WHERE action IN ('nvd.watermark', 'nvd.pub_sync', 'nvd.pub_catchup')`
     );
     const lastEpss = await this.db.query<{ ts: string | null }>(
       `SELECT to_char(MAX(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts
@@ -169,11 +195,14 @@ export class StatsController {
          FROM risk_score`
     );
     const totalBdu = await this.db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM bdu_vuln`);
+    const bduAttentionHours = Math.max(
+      1,
+      Math.min(168, Number(process.env.BDU_ATTENTION_WINDOW_HOURS ?? 24))
+    );
     const bduLast24h = await this.db.query<{ n: string }>(
       `SELECT COUNT(*)::text AS n
-         FROM bdu_vuln
-        WHERE publication_date ~ '^\\d{2}\\.\\d{2}\\.\\d{4}$'
-          AND to_timestamp(publication_date, 'DD.MM.YYYY') >= now() - interval '24 hours'`
+         FROM bdu_vuln b
+        WHERE ${sqlBduFstecAttentionWithinHours("b", bduAttentionHours)}`
     );
     const bduLinks = await this.db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM cve_bdu_link`);
     const maxBduPublication = await this.db.query<{ ts: string | null }>(
@@ -219,6 +248,180 @@ export class StatsController {
       },
       /** When false, POST /cves/:id/enrich is disabled (pipeline-only AI). */
       manualEnrichAllowed: allowManualEnrich
+    };
+  }
+
+  /** Компактные KPI для виджета «Exploit radar» на дашборде. */
+  @Get("exploit-radar")
+  async exploitRadar() {
+    const r = await this.db.query<{
+      vckev_only: string;
+      epss_spikes: string;
+      new_vckev_7d: string;
+      with_poc: string;
+      with_public_exploit: string;
+      intel_rows: string;
+      last_vckev_ingest: string | null;
+    }>(
+      `SELECT
+         (SELECT count(*)::text FROM cve_exploit_intel WHERE vckev_only) AS vckev_only,
+         (SELECT count(*)::text FROM cve_exploit_intel WHERE epss_spike) AS epss_spikes,
+         (SELECT count(*)::text FROM vulncheck_kev WHERE date_added >= now() - interval '7 days') AS new_vckev_7d,
+         (SELECT count(*)::text FROM cve_exploit_intel WHERE has_poc) AS with_poc,
+         (SELECT count(*)::text FROM cve_exploit_intel WHERE has_public_exploit) AS with_public_exploit,
+         (SELECT count(*)::text FROM cve_exploit_intel) AS intel_rows,
+         (SELECT to_char(MAX(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+            FROM audit_log WHERE action = 'vulncheck.kev.ingest') AS last_vckev_ingest`
+    );
+    const row = r.rows[0];
+    const highlightsR = await this.db.query<{
+      cve_id: string;
+      epss: number | null;
+      cvss_base: number | null;
+      vckev_only: boolean;
+      epss_spike: boolean;
+      has_poc: boolean;
+      has_public_exploit: boolean;
+      radar_reason: string;
+    }>(
+      `SELECT c.cve_id,
+              es.score AS epss,
+              c.cvss_base,
+              ei.vckev_only,
+              ei.epss_spike,
+              ei.has_poc,
+              ei.has_public_exploit,
+              CASE
+                WHEN ei.vckev_only THEN 'vckev_only'
+                WHEN ei.epss_spike THEN 'epss_spike'
+                WHEN ei.has_public_exploit THEN 'has_public_exploit'
+                WHEN ei.has_poc THEN 'has_poc'
+                ELSE 'other'
+              END AS radar_reason
+         FROM cve_exploit_intel ei
+         JOIN cve c ON c.cve_id = ei.cve_id
+    LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+        WHERE ei.vckev_only OR ei.epss_spike OR ei.has_public_exploit OR ei.has_poc
+        ORDER BY ei.vckev_only DESC,
+                 ei.epss_spike DESC,
+                 ei.has_public_exploit DESC,
+                 COALESCE(es.score, 0) DESC,
+                 c.published_at DESC NULLS LAST
+        LIMIT 10`
+    );
+    return {
+      vckevOnly: Number(row?.vckev_only ?? 0),
+      epssSpikes: Number(row?.epss_spikes ?? 0),
+      newVckev7d: Number(row?.new_vckev_7d ?? 0),
+      withPoc: Number(row?.with_poc ?? 0),
+      withPublicExploit: Number(row?.with_public_exploit ?? 0),
+      intelRows: Number(row?.intel_rows ?? 0),
+      lastVckevIngestAt: row?.last_vckev_ingest ?? null,
+      highlights: highlightsR.rows
+    };
+  }
+
+  /** Синхронизация VulnCheck + пересчёт exploit intel (старт TI / ручной refresh). */
+  @Post("threat-feed/refresh")
+  async threatFeedRefresh(@Query("force") forceRaw?: string) {
+    const force = forceRaw === "1" || forceRaw === "true";
+    return this.threatIntelRefresh.refresh({ reason: "ti_open", force });
+  }
+
+  @Get("threat-feed/refresh/status")
+  threatFeedRefreshStatus() {
+    return this.threatIntelRefresh.getStatus();
+  }
+
+  /** Лента exploit-сигналов для модуля Threat. */
+  @Get("threat-feed")
+  async threatFeed(
+    @Query("limit") limitRaw?: string,
+    @Query("offset") offsetRaw?: string,
+    @Query("windowHours") windowHoursRaw?: string,
+    @Query("signalType") signalTypeRaw?: string,
+    @Query("sort") sortRaw?: string,
+    @Query("newOnly") newOnlyRaw?: string,
+    @Query("since") sinceRaw?: string,
+    @Query("vendor") vendorRaw?: string | string[],
+    @Query("watchlistOnly") watchlistOnlyRaw?: string
+  ) {
+    const limit = Math.max(1, Math.min(100, Number(limitRaw ?? 40)));
+    const offset = Math.max(0, Number(offsetRaw ?? 0));
+    const windowAll = windowHoursRaw === "all" || windowHoursRaw === "0";
+    const windowHours = windowAll
+      ? null
+      : Math.max(1, Math.min(720, Number(windowHoursRaw ?? 168)));
+    const signalType = signalTypeRaw?.trim() || null;
+    const sort = (sortRaw ?? "threat").toLowerCase() === "recent" ? "recent" : "threat";
+    const newOnly = newOnlyRaw === "1" || newOnlyRaw === "true";
+    const watchlistOnly = watchlistOnlyRaw === "1" || watchlistOnlyRaw === "true";
+    const since = sinceRaw?.trim() ? new Date(sinceRaw.trim()) : null;
+    if (since != null && Number.isNaN(since.getTime())) {
+      return { error: "invalid since" };
+    }
+    const vendorKeys = (Array.isArray(vendorRaw) ? vendorRaw : vendorRaw ? [vendorRaw] : [])
+      .flatMap((v) => String(v).split(","))
+      .map((v) => v.trim().toLowerCase())
+      .filter(Boolean);
+
+    return this.threatFeedSvc.getFeed({
+      limit,
+      offset,
+      windowHours,
+      signalType,
+      sort,
+      newOnly,
+      since: since && !Number.isNaN(since.getTime()) ? since : null,
+      vendorKeys,
+      watchlistOnly
+    });
+  }
+
+  /** Отправить threat digest в Telegram. */
+  @Post("threat-digest/telegram")
+  async threatDigestTelegram() {
+    const payload = await this.threatFeedSvc.collectDailyDigestPayload(20);
+    const messages = await this.threatFeedSvc.buildDailyDigestMessages(20);
+    const sent = await this.telegram.sendTelegramMessages(messages, { parseMode: "HTML" });
+    if (!sent.ok) {
+      return sent;
+    }
+
+    const pdf = await this.threatDigestPdf.build(payload);
+    const pdfSent = await this.telegram.sendTelegramDocument({
+      buffer: pdf.buffer,
+      filename: pdf.filename,
+      caption: `📊 <b>Суточный Threat Digest (PDF)</b> · ${payload.windowHours}ч · ${payload.hotCves.length} hot CVE`,
+      parseMode: "HTML"
+    });
+
+    try {
+      await this.db.query(
+        `INSERT INTO audit_log (actor_type, action, metadata) VALUES ('user', 'telegram.threat_digest', $1::jsonb)`,
+        [
+          JSON.stringify({
+            ok: sent.ok && pdfSent.ok,
+            parts: sent.sent,
+            messageIds: sent.messageIds,
+            pdfMessageId: pdfSent.messageId,
+            pdfFilename: pdf.filename,
+            pdfBytes: pdf.buffer.length,
+            error: pdfSent.error ?? sent.error,
+            chars: messages.reduce((a, m) => a + m.length, 0)
+          })
+        ]
+      );
+    } catch {
+      // ignore audit failures
+    }
+
+    return {
+      ok: sent.ok && pdfSent.ok,
+      sent: sent.sent,
+      messageIds: sent.messageIds,
+      pdf: pdfSent,
+      pdfFilename: pdf.filename
     };
   }
 
@@ -335,7 +538,7 @@ export class StatsController {
       ]);
 
       const [llm, nvd, bdu] = await Promise.all([
-        (async () => {
+        (async (): Promise<LlmHealth> => {
         const cfg = await this.integration.getEffectiveLlmConfig();
         const requiresApiKey = llmEndpointRequiresApiKey(cfg.endpoint);
         const hasApiKey = Boolean(cfg.apiKey?.length);
@@ -361,31 +564,68 @@ export class StatsController {
           };
         }
         const endpoint = endpointRaw;
+
+        const cacheTtlMs = Math.max(15_000, Math.min(10 * 60_000, Number(process.env.LLM_HEALTH_CACHE_MS ?? 120_000)));
+        const cacheKey = `${endpoint}|${model ?? ""}|${hasApiKey ? "k" : "no-k"}`;
+        if (llmHealthCache && llmHealthCache.key === cacheKey && Date.now() - llmHealthCache.ts < cacheTtlMs) {
+          return { ...llmHealthCache.value, cached: true };
+        }
+
         const started = Date.now();
         const ac = new AbortController();
         const timeoutMs = Math.max(800, Math.min(10_000, Number(process.env.LLM_HEALTH_TIMEOUT_MS ?? 2500)));
         const t = setTimeout(() => ac.abort(), timeoutMs);
         try {
-          // Prefer root for Ollama (cheap), fallback to OpenAI-compatible models list.
-          const url = endpoint.includes("/v1/") ? endpoint.replace(/\/v1\/.*$/i, "/") : endpoint;
-          const res = await fetch(url, { method: "GET", signal: ac.signal });
+          const headers: Record<string, string> = { accept: "application/json" };
+          if (cfg.apiKey?.trim()) headers.Authorization = `Bearer ${cfg.apiKey.trim()}`;
+
+          // For OpenAI-compatible chat endpoints, do a tiny POST. A plain GET often returns 404 (Gemini, OpenAI).
+          const isChatCompletions = /\/chat\/completions\/?$/i.test(endpoint);
+          const isOllama = endpoint.includes("127.0.0.1:11434") || endpoint.includes("localhost:11434");
+
+          const res = isChatCompletions && model && !isOllama
+            ? await fetch(endpoint, {
+                method: "POST",
+                headers: { "content-type": "application/json", ...headers },
+                body: JSON.stringify({
+                  model,
+                  messages: [{ role: "user", content: "ping" }],
+                  max_tokens: 2
+                }),
+                signal: ac.signal
+              })
+            : await fetch(
+                // Prefer root for Ollama (cheap).
+                endpoint.includes("/v1/") ? endpoint.replace(/\/v1\/.*$/i, "/") : endpoint,
+                { method: "GET", headers, signal: ac.signal }
+              );
           const ms = Date.now() - started;
-          const ok = res.ok;
-          return {
+          // Some providers (Gemini free tier, proxies) may respond with 429 even when endpoint+auth are correct.
+          // Treat 429 as "reachable" but surface as warning.
+          const ok = res.ok || res.status === 429;
+          const error =
+            res.status === 429
+              ? "Rate limit (429). Endpoint доступен, но превышены лимиты. Подождите или снизьте частоту запросов."
+              : undefined;
+          const out: LlmHealth = {
             configured: true,
             ok,
             endpoint,
             model,
             ms,
             status: res.status,
+            error,
             requiresApiKey,
             hasApiKey,
             authReady,
-            authHint
+            authHint,
+            checkedAt: new Date().toISOString()
           };
+          llmHealthCache = { key: cacheKey, ts: Date.now(), value: out };
+          return out;
         } catch (e) {
           const ms = Date.now() - started;
-          return {
+          const out: LlmHealth = {
             configured: true,
             ok: false,
             endpoint,
@@ -395,8 +635,11 @@ export class StatsController {
             requiresApiKey,
             hasApiKey,
             authReady,
-            authHint
+            authHint,
+            checkedAt: new Date().toISOString()
           };
+          llmHealthCache = { key: cacheKey, ts: Date.now(), value: out };
+          return out;
         } finally {
           clearTimeout(t);
         }

@@ -1,3 +1,10 @@
+import {
+  isGarbageEnrichSummary,
+  isGenericEnrichmentTitle,
+  stripEnrichmentBoilerplate
+} from "../ai/enrichment-display.js";
+import { defaultAttackFlowSteps } from "../cve/baseline-enrichment.js";
+
 export type VulnTelegramPostInput = {
   identifier: string;
   title: string;
@@ -111,17 +118,25 @@ export function formatVulnTelegramPost(input: VulnTelegramPostInput): string {
       ? `${input.cvssScore.toFixed(1)} (${sev.label})`
       : "—";
 
+  const header = "Комплексный анализ уязвимости";
+  let subtitle = sanitizeTelegramText(input.title, { max: 220 }) || "Уязвимость";
+  if (isGenericEnrichmentTitle(subtitle) || subtitle.toLowerCase() === header.toLowerCase()) {
+    subtitle = sanitizeTelegramText(input.identifier, { max: 80 }) || "Уязвимость";
+  }
+
   const parts = [
-    "🚀 Комплексный анализ уязвимости",
-    `💥 ${sanitizeTelegramText(input.title, { max: 220 }) || "Уязвимость"}`,
+    `🚀 ${header}`,
+    `💥 ${subtitle}`,
     `🔝 Идентификатор уязвимости: ${sanitizeTelegramText(input.identifier, { max: 80 })}`,
     "🟠 Описание:",
     trimBlock(input.description || "—", 1800),
-    `⚙️ Класс: ${sanitizeTelegramText(input.vulnerabilityClass, { max: 160 }) || "—"}`,
+    `⚙️ Класс: ${sanitizeTelegramText(input.vulnerabilityClass, { max: 160 }) || "не указан в NVD/ИИ"}`,
     `🔹 Уровень опасности по CVSS: ${cvssLine}`,
     `❗️ Эксплуатация: ${sanitizeTelegramText(input.exploitation, { max: 360 }) || "—"}`,
     `🚨 Статус: ${sanitizeTelegramText(input.status, { max: 360 }) || "🟡 В работе — требуется уточнение контекста"}`,
-    ...(input.attackFlow?.length ? ["🧭 Схема атаки:", numberedLines(input.attackFlow)] : []),
+    ...(input.attackFlow?.length
+      ? ["🧭 Схема атаки:", numberedLines(input.attackFlow)]
+      : ["🧭 Схема атаки:", numberedLines(defaultAttackFlowSteps())]),
     "⚙️ Рекомендации (в проработке):",
     bulletLines(input.recommendations),
     "🌐 Ссылки на источник:",
@@ -232,6 +247,16 @@ function extractAttackFlow(ai: Record<string, unknown> | null): string[] {
   return [];
 }
 
+function pickPostNarrative(...candidates: (string | null | undefined)[]): string {
+  for (const c of candidates) {
+    if (!c?.trim()) continue;
+    const cleaned = stripEnrichmentBoilerplate(c.trim());
+    if (!cleaned || isGarbageEnrichSummary(cleaned) || isGenericEnrichmentTitle(cleaned)) continue;
+    return cleaned;
+  }
+  return "";
+}
+
 export function buildVulnPostFromAiJson(
   identifier: string,
   ai: Record<string, unknown> | null,
@@ -242,29 +267,45 @@ export function buildVulnPostFromAiJson(
     epssScore?: number | null;
     fallbackDescription?: string | null;
     fallbackTitle?: string | null;
+    fallbackVulnerabilityClass?: string | null;
+    fallbackAttackFlow?: string[];
+    fallbackExploitation?: string | null;
     extraLinks?: string[];
     extraRemediation?: string[];
   }
 ): VulnTelegramPostInput {
+  const aiTitle = typeof ai?.title === "string" ? ai.title.trim() : "";
   const title =
-    (typeof ai?.title === "string" && ai.title.trim()) ||
-    ctx.fallbackTitle?.trim() ||
-    `Уязвимость ${identifier}`;
+    aiTitle && !isGenericEnrichmentTitle(aiTitle)
+      ? aiTitle
+      : ctx.fallbackTitle?.trim() || `Уязвимость ${identifier}`;
 
   const descParts: string[] = [];
-  if (typeof ai?.description === "string" && ai.description.trim()) descParts.push(ai.description.trim());
-  else if (typeof ai?.summary === "string" && ai.summary.trim()) descParts.push(ai.summary.trim());
-  else if (ctx.fallbackDescription?.trim()) descParts.push(ctx.fallbackDescription.trim());
+  const fromAi = pickPostNarrative(
+    typeof ai?.description === "string" ? ai.description : null,
+    typeof ai?.summary === "string" ? ai.summary : null
+  );
+  if (fromAi) descParts.push(fromAi);
+  else if (ctx.fallbackDescription?.trim()) {
+    const nvd = stripEnrichmentBoilerplate(ctx.fallbackDescription.trim()) || ctx.fallbackDescription.trim();
+    descParts.push(nvd);
+  }
   if (Array.isArray(ai?.consequences)) {
-    const c = ai.consequences.map(String).filter(Boolean);
+    const c = ai.consequences
+      .map(String)
+      .filter(Boolean)
+      .filter((line) => !/^Возможная реализация класса:/i.test(line));
     if (c.length) descParts.push(c.join(" "));
   }
-  const description = descParts.join("\n\n") || "Описание уточняется по данным NVD/БДУ и ИИ-анализа.";
+  const description = descParts.join("\n\n") || "Описание уточняется по данным NVD/БДУ.";
 
-  const vulnClass =
+  const aiClass =
     typeof ai?.vulnerabilityClass === "string" && ai.vulnerabilityClass.trim()
       ? ai.vulnerabilityClass.trim()
       : null;
+  const nvdClass = ctx.fallbackVulnerabilityClass?.trim() || null;
+  const vulnClass =
+    nvdClass && (!aiClass || /^CWE-\d+$/i.test(aiClass)) ? nvdClass : aiClass || nvdClass || null;
 
   let exploitation = "";
   const ex = ai?.exploitation;
@@ -273,10 +314,13 @@ export function buildVulnPostFromAiJson(
     const notes = (ex as Record<string, unknown>).exploitNotes;
     if (pe === "yes") exploitation = "Публичный эксплойт / PoC возможен";
     else if (pe === "no") exploitation = "Публичный эксплойт не подтверждён";
+    else if (ctx.fallbackExploitation?.trim()) exploitation = ctx.fallbackExploitation.trim();
     else exploitation = "Статус эксплуатации уточняется";
     if (typeof notes === "string" && notes.trim()) exploitation += `. ${notes.trim()}`;
   } else if (ctx.exploitKnown) {
     exploitation = "В KEV / известна активная эксплуатация";
+  } else if (ctx.fallbackExploitation?.trim()) {
+    exploitation = ctx.fallbackExploitation.trim();
   } else {
     exploitation = "Требуется локальный/сетевой контекст — уточняется по инвентаризации";
   }
@@ -285,10 +329,15 @@ export function buildVulnPostFromAiJson(
   }
 
   const status = normalizeTelegramUserStatus(ctx.userStatus);
-  const attackFlow = extractAttackFlow(ai);
+  const attackFlowFromAi = extractAttackFlow(ai);
+  const attackFlow =
+    attackFlowFromAi.length > 0
+      ? attackFlowFromAi
+      : (ctx.fallbackAttackFlow ?? defaultAttackFlowSteps()).map(String).filter(Boolean);
 
   const remediation = [
     ...(Array.isArray(ai?.remediation) ? ai.remediation.map(String) : []),
+    ...(Array.isArray(ai?.nextSteps) ? ai.nextSteps.map(String) : []),
     ...(ctx.extraRemediation ?? [])
   ]
     .map((s) => s.trim())
@@ -310,6 +359,10 @@ export function buildVulnPostFromAiJson(
     }
   }
   for (const u of ctx.extraLinks ?? []) pushUrl(u);
+  if (identifier.startsWith("CVE-")) {
+    const nvd = `https://nvd.nist.gov/vuln/detail/${identifier}`;
+    if (!sourceUrls.includes(nvd)) sourceUrls.unshift(nvd);
+  }
 
   return {
     identifier,

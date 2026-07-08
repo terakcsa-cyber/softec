@@ -4,6 +4,9 @@ import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { AlertTriangle, Flame, ShieldAlert, Target, Zap } from "lucide-react";
 import { cn } from "../ui/cn";
+import { VocTriageCheckpoint, processedCardClass } from "./voc-triage-checkpoint";
+import { cveRefKey } from "@/lib/voc-ref-keys";
+import { useVocTriage } from "@/lib/voc-triage-context";
 
 export type HotCveRow = {
   cve_id: string;
@@ -131,6 +134,7 @@ export function Critical24hBoard({
   onCveClick: (cveId: string) => void;
 }) {
   const [cat, setCat] = useState<HotCategory>("all24h");
+  const { isDone } = useVocTriage();
   const stats = useMemo(() => {
     const arr = items ?? [];
     const kev = arr.filter((i) => i.exploit_known).length;
@@ -268,6 +272,8 @@ export function Critical24hBoard({
             const reasons = Array.isArray(it.critical_reasons) ? it.critical_reasons.slice(0, 3) : [];
             const isOpen = highlightedCveIds?.has(it.cve_id) ?? false;
             const per = cat === "all24h" ? cardTone(it) : tone;
+            const processedKey = cveRefKey(it.cve_id);
+            const done = isDone(processedKey);
             return (
               <motion.div
                 key={it.cve_id}
@@ -288,6 +294,8 @@ export function Critical24hBoard({
                     "dark:from-white/[0.07] dark:to-black/30 dark:hover:from-white/[0.09] dark:hover:to-black/25",
                     "pointer-events-auto transition hover:border-accent/35 active:scale-[0.99]",
                     isOpen && "border-accent/50 ring-2 ring-accent/25",
+                    done && "border-ok/25",
+                    processedCardClass(done),
                     ra.border,
                     !isOpen && ra.glow,
                     // Color cards: default view uses per-card signal tones; category views use category tone.
@@ -295,9 +303,12 @@ export function Critical24hBoard({
                   )}
                 >
                 <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="font-mono text-sm font-semibold tracking-tight text-fg/95 group-hover:text-fg">
-                      {it.cve_id}
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <VocTriageCheckpoint refKey={processedKey} title={it.cve_id} compact />
+                      <div className="font-mono text-sm font-semibold tracking-tight text-fg/95 group-hover:text-fg">
+                        {it.cve_id}
+                      </div>
                     </div>
                     <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-fg/80">
                       {[it.vp_vendor, it.vp_product].filter(Boolean).join(" / ") || "—"}{" "}

@@ -24,19 +24,30 @@ export function AiSummaryPanel({
   onRequestEnrich?: (opts?: { force?: boolean }) => void;
 }) {
   const d = (data ?? null) as null | {
-    cve?: { cve_id?: string | null } | null;
+    cve?: { cve_id?: string | null; raw?: unknown } | null;
     bdu?: { bduId?: string | null } | null;
     ai?: { output_json?: Record<string, unknown> | null; output_text?: unknown } | null;
   };
   const entityId = d?.cve?.cve_id ?? d?.bdu?.bduId ?? null;
   const entityLabel = d?.cve?.cve_id ? "CVE" : d?.bdu?.bduId ? "БДУ" : "запись";
-  const out = parseAiOutputJson(d?.ai?.output_json ?? null);
+  const cveRaw =
+    d?.cve?.raw != null && typeof d.cve.raw === "object" && !Array.isArray(d.cve.raw)
+      ? d.cve.raw
+      : undefined;
+  const out = parseAiOutputJson(
+    d?.ai?.output_json ?? null,
+    d?.cve?.cve_id ? { cveId: String(d.cve.cve_id), nvdRaw: cveRaw } : undefined
+  );
   const get = (k: string): unknown => (out ? out[k] : undefined);
   const enrichError = Boolean(get("_enrich_error"));
   const title = get("title") ?? null;
   const summary = get("summary") ?? d?.ai?.output_text ?? null;
-  const summaryText =
+  const summaryTextRaw =
     summary == null ? null : typeof summary === "string" ? summary : JSON.stringify(summary, null, 2);
+  const summaryText =
+    summaryTextRaw && summaryTextRaw.trim().startsWith("{") && summaryTextRaw.includes('"title"')
+      ? null
+      : summaryTextRaw;
   const description = get("description") ?? get("explanation") ?? null;
   const attackFlow = get("attackFlow") ?? null;
   const remediation = get("remediation") ?? null;

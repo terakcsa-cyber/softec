@@ -21,6 +21,157 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+function exploitExposureN(input: {
+  exploitKnown?: boolean;
+  vckevOnly?: boolean;
+  vulncheckKev?: boolean;
+  hasPublicExploit?: boolean;
+  hasPoc?: boolean;
+}): number {
+  if (input.exploitKnown) return 1;
+  if (input.vckevOnly) return 0.92;
+  if (input.hasPublicExploit) return 0.88;
+  if (input.vulncheckKev) return 0.8;
+  if (input.hasPoc) return 0.55;
+  return 0;
+}
+
+function computeApproxContribV2(input: {
+  cvss?: number | null;
+  epss?: number | null;
+  exploitKnown?: boolean;
+  vckevOnly?: boolean;
+  vulncheckKev?: boolean;
+  epssSpike?: boolean;
+  hasPoc?: boolean;
+  hasPublicExploit?: boolean;
+  mentions?: number | null;
+  freshnessDays?: number | null;
+}) {
+  const cvss = typeof input.cvss === "number" ? input.cvss : undefined;
+  const epss = typeof input.epss === "number" ? input.epss : undefined;
+  const mentions = typeof input.mentions === "number" ? input.mentions : 0;
+  const freshnessDays = typeof input.freshnessDays === "number" ? input.freshnessDays : undefined;
+
+  const cvssN = cvss == null ? 0.35 : clamp(cvss / 10, 0, 1);
+  const epssN = epss == null ? 0.15 : clamp(epss, 0, 1);
+  const exploitN = exploitExposureN({
+    exploitKnown: Boolean(input.exploitKnown),
+    vckevOnly: Boolean(input.vckevOnly),
+    vulncheckKev: Boolean(input.vulncheckKev),
+    hasPublicExploit: Boolean(input.hasPublicExploit),
+    hasPoc: Boolean(input.hasPoc)
+  });
+  const spikeN = input.epssSpike ? 1 : 0;
+  const mentionsN = clamp(Math.log10(mentions + 1) / 4, 0, 1);
+  const freshnessN = freshnessDays == null ? 0.2 : clamp(Math.exp(-freshnessDays / 180), 0, 1);
+
+  const w = { cvss: 0.36, epss: 0.22, exploit: 0.18, spike: 0.06, freshness: 0.08, mentions: 0.1 };
+  const parts = {
+    cvss: w.cvss * cvssN,
+    epss: w.epss * epssN,
+    exploit: w.exploit * exploitN,
+    spike: w.spike * spikeN,
+    freshness: w.freshness * freshnessN,
+    mentions: w.mentions * mentionsN
+  };
+  const boost =
+    (input.exploitKnown || input.vckevOnly) && cvss != null && cvss >= 9
+      ? 0.08
+      : input.epssSpike && exploitN >= 0.55
+        ? 0.05
+        : 0;
+  const combined = parts.cvss + parts.epss + parts.exploit + parts.spike + parts.freshness + parts.mentions + boost;
+  const scoreApprox = Math.round(clamp(combined * 100, 0, 100));
+
+  const items: Array<{
+    key: string;
+    value01: number;
+    label: string;
+    cls: string;
+    detail: { raw: string; normalized01: number; weight: number; contribution01: number; source: string };
+  }> = [
+    {
+      key: "CVSS",
+      value01: parts.cvss,
+      label: `${fmtNum(cvss, 1)} → ${(parts.cvss * 100).toFixed(1)}`,
+      cls: "bg-emerald-500/70",
+      detail: { raw: fmtNum(cvss, 1), normalized01: cvssN, weight: w.cvss, contribution01: parts.cvss, source: "cve.cvss_base" }
+    },
+    {
+      key: "EPSS",
+      value01: parts.epss,
+      label: `${fmtPct(epss)} → ${(parts.epss * 100).toFixed(1)}`,
+      cls: "bg-amber-500/80",
+      detail: { raw: fmtPct(epss), normalized01: epssN, weight: w.epss, contribution01: parts.epss, source: "cve.epss" }
+    },
+    {
+      key: "Exploit",
+      value01: parts.exploit,
+      label: `${exploitN.toFixed(2)} → ${(parts.exploit * 100).toFixed(1)}`,
+      cls: "bg-rose-500/80",
+      detail: {
+        raw: `kev=${Boolean(input.exploitKnown)} vck=${Boolean(input.vckevOnly)} poc=${Boolean(input.hasPoc)}`,
+        normalized01: exploitN,
+        weight: w.exploit,
+        contribution01: parts.exploit,
+        source: "cve_exploit_intel"
+      }
+    },
+    {
+      key: "Spike",
+      value01: parts.spike,
+      label: `${input.epssSpike ? "yes" : "no"} → ${(parts.spike * 100).toFixed(1)}`,
+      cls: "bg-orange-500/80",
+      detail: {
+        raw: input.epssSpike ? "true" : "false",
+        normalized01: spikeN,
+        weight: w.spike,
+        contribution01: parts.spike,
+        source: "cve_exploit_intel.epss_spike"
+      }
+    },
+    {
+      key: "Fresh",
+      value01: parts.freshness,
+      label: `${freshnessDays == null ? "—" : `${Math.round(freshnessDays)}d`} → ${(parts.freshness * 100).toFixed(1)}`,
+      cls: "bg-indigo-500/70",
+      detail: {
+        raw: freshnessDays == null ? "—" : `${Math.round(freshnessDays)}d`,
+        normalized01: freshnessN,
+        weight: w.freshness,
+        contribution01: parts.freshness,
+        source: "cve.risk_factors.freshnessDays"
+      }
+    },
+    {
+      key: "Mentions",
+      value01: parts.mentions,
+      label: `${mentions ? Math.round(mentions) : "—"} → ${(parts.mentions * 100).toFixed(1)}`,
+      cls: "bg-slate-400/70",
+      detail: {
+        raw: mentions ? String(Math.round(mentions)) : "—",
+        normalized01: mentionsN,
+        weight: w.mentions,
+        contribution01: parts.mentions,
+        source: "cve.risk_factors.mentions"
+      }
+    }
+  ];
+  if (boost > 0) {
+    items.push({
+      key: "Boost",
+      value01: boost,
+      label: `+${(boost * 100).toFixed(1)}`,
+      cls: "bg-fuchsia-500/70",
+      detail: { raw: "rule_v2 boost", normalized01: 1, weight: 1, contribution01: boost, source: "rule_v2 boost" }
+    });
+  }
+
+  const max = Math.max(...items.map((x) => x.value01), 0.0001);
+  return { items, scoreApprox, max };
+}
+
 function computeApproxContrib(input: {
   cvss?: number | null;
   epss?: number | null;
@@ -161,17 +312,30 @@ export function RiskBreakdownPanel({ data }: { data: unknown | null }) {
   const kev = Boolean(cve?.exploit_known);
   const aiReady = Boolean(d?.ai);
   const f = factors && typeof factors === "object" ? (factors as Record<string, unknown>) : null;
-  const contrib = useMemo(
-    () =>
-      computeApproxContrib({
+  const isV2 = modelVersionText === "rule_v2";
+  const contrib = useMemo(() => {
+    if (isV2) {
+      return computeApproxContribV2({
         cvss,
         epss,
-        exploitKnown: kev,
+        exploitKnown: kev || Boolean(f?.exploitKnown),
+        vckevOnly: Boolean(f?.vckevOnly),
+        vulncheckKev: Boolean(f?.vulncheckKev),
+        epssSpike: Boolean(f?.epssSpike),
+        hasPoc: Boolean(f?.hasPoc),
+        hasPublicExploit: Boolean(f?.hasPublicExploit),
         mentions: typeof f?.mentions === "number" ? f.mentions : null,
         freshnessDays: typeof f?.freshnessDays === "number" ? f.freshnessDays : null
-      }),
-    [cvss, epss, kev, f?.mentions, f?.freshnessDays]
-  );
+      });
+    }
+    return computeApproxContrib({
+      cvss,
+      epss,
+      exploitKnown: kev,
+      mentions: typeof f?.mentions === "number" ? f.mentions : null,
+      freshnessDays: typeof f?.freshnessDays === "number" ? f.freshnessDays : null
+    });
+  }, [cvss, epss, kev, f, isV2]);
   const [openKey, setOpenKey] = useState<string | null>(null);
 
   const explain = (() => {
@@ -195,6 +359,12 @@ export function RiskBreakdownPanel({ data }: { data: unknown | null }) {
       });
 
     if (f) {
+      if (f.vckevOnly) out.push({ title: "VCK-only", detail: "VulnCheck KEV", cls: "border-danger/30 bg-danger/15 text-danger" });
+      if (f.epssSpike) out.push({ title: "EPSS spike", detail: "7d", cls: "border-warn/30 bg-warn/15 text-warn" });
+      if (f.hasPublicExploit) out.push({ title: "Exploit", detail: "public", cls: "border-rose-500/30 bg-rose-500/15 text-rose-600 dark:text-rose-300" });
+      if (f.hasPoc) out.push({ title: "PoC", detail: "public", cls: "border-accent/30 bg-accent/10 text-fg/80" });
+      if (typeof f.tgMentions24h === "number" && f.tgMentions24h > 0)
+        out.push({ title: "TG 24h", detail: String(Math.round(f.tgMentions24h)), cls: "border-slate-200 bg-slate-50 text-fg/80 dark:border-white/10 dark:bg-white/5" });
       if (typeof f.freshnessDays === "number")
         out.push({
           title: "Freshness",

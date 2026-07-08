@@ -14,6 +14,7 @@
     "@nestjs/common": "^11.1.6",
     "@nestjs/core": "^11.1.6",
     "@vuln-intel/shared": "workspace:*",
+    "fflate": "^0.8.2",
     "amqplib": "^0.10.9",
     "dotenv": "^17.4.2",
     "fast-xml-parser": "^4.5.6",

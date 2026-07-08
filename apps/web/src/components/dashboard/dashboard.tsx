@@ -9,8 +9,23 @@ import { apiFetch } from "@/lib/api-fetch";
 import { needsOnDemandBduEnrich, shouldAutoEnrichBduOnOpen } from "@/lib/bdu-enrich-ui";
 import { needsOnDemandEnrich, parseAiOutputJson, shouldAutoEnrichOnOpen } from "@/lib/cve-enrich-ui";
 import { CVE_POLL_BACKGROUND_ONLY_MS, CVE_POLL_WHILE_ENRICH_MS, ENRICH_UI_WAIT_MS } from "@/lib/enrich-ui-wait";
+import { useLivePollInterval } from "@/lib/live-refresh";
+import { EXPLOIT_RADAR_FILTER_LABELS, type ExploitRadarFilter } from "@/lib/exploit-intel-client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bandage, BarChart3, ClipboardList, Loader2, Radar, RefreshCw, Settings, ShieldAlert, ShieldCheck } from "lucide-react";
+import {
+  Bandage,
+  BarChart3,
+  ClipboardList,
+  Loader2,
+  Pin,
+  PinOff,
+  Radar,
+  RefreshCw,
+  Settings,
+  ShieldAlert,
+  ShieldCheck,
+  Target
+} from "lucide-react";
 import * as Tabs from "@radix-ui/react-tabs";
 import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "../ui/cn";
@@ -18,9 +33,12 @@ import { CveCard } from "./cve-card";
 import { AiSummaryPanel } from "./ai-summary-panel";
 import { RiskBreakdownPanel } from "./risk-breakdown-panel";
 import { OverviewDashboardPanel } from "./overview-dashboard-panel";
+import { ThreatFeedPanel } from "./threat-feed-panel";
 import { CveSourcesPanel } from "./cve-sources-panel";
 import { computeCvePriority } from "@/lib/cve-priority";
 import { computeBduPriority } from "@/lib/bdu-priority";
+import { cveRefKey } from "@/lib/voc-ref-keys";
+import { useVocTriage } from "@/lib/voc-triage-context";
 import { CveDetailPanel } from "./cve-detail-panel";
 import { BduCard, type BduListItem } from "./bdu-card";
 import { BduDetailPanel, type BduDetailsPayload } from "./bdu-detail-panel";
@@ -48,6 +66,9 @@ import { PatchManagementPanel } from "./patch-management-panel";
 import { AsvScannerPanel } from ".";
 import { VulnSearchBar } from "./vuln-search-bar";
 import { VulnTaskPanel } from "./vuln-task-panel";
+import { VulnClassFilter } from "./vuln-class-filter";
+import { VulnClassBadge } from "./vuln-class-badge";
+import { isVulnClassId, type VulnClassId } from "@/lib/vuln-class";
 
 type CveListItem = {
   cve_id: string;
@@ -70,6 +91,7 @@ type CveListItem = {
   exploit_known?: boolean;
   critical_reasons?: string[] | null;
   ai_ready?: boolean;
+  vuln_class?: string | null;
 };
 
 type CveDetails = {
@@ -94,20 +116,43 @@ type SavedView = {
   id: string;
   name: string;
   state: {
-    view: "critical_v2" | "critical" | "latest" | "last24h" | "kev" | "all";
-    sort: "rank" | "fresh" | "risk" | "epss" | "cvss" | "priority";
+    view: "critical_v2" | "critical" | "latest" | "last24h" | "kev" | "exploit" | "all";
+    sort: "rank" | "fresh" | "risk" | "epss" | "cvss" | "exploit" | "priority";
     limit: 15 | 20;
     kevOnly: boolean;
     minCvss: number | null;
     minEpss: number | null;
     vendorFilter: string | null;
     productFilter: string | null;
+    vulnClasses: VulnClassId[];
+    exploitFilter: ExploitRadarFilter | null;
+    /** @deprecated legacy single-select */
+    vulnClass?: string | null;
     q: string;
   };
 };
 
-type TriageStatus = "new" | "review" | "done";
-type ModuleKey = "dashboard" | "vulns" | "tasks" | "fstec" | "patches" | "asv" | "settings";
+type ModuleKey = "dashboard" | "vulns" | "threat" | "tasks" | "fstec" | "patches" | "asv" | "settings";
+type VulnPreviewRef = { kind: "cve" | "bdu"; id: string };
+
+function vulnPreviewKey(ref: VulnPreviewRef): string {
+  return `${ref.kind}:${ref.id}`;
+}
+
+function vulnPreviewFromEntry(entry: { kind: "cve"; item: { cve_id: string } } | { kind: "bdu"; item: { bduId: string } }): VulnPreviewRef {
+  return entry.kind === "cve" ? { kind: "cve", id: entry.item.cve_id } : { kind: "bdu", id: entry.item.bduId };
+}
+
+function findVulnPreviewIndex(
+  entries: Array<{ kind: "cve"; item: { cve_id: string } } | { kind: "bdu"; item: { bduId: string } }>,
+  ref: VulnPreviewRef | null
+): number {
+  if (!ref) return -1;
+  return entries.findIndex((entry) => {
+    const id = entry.kind === "cve" ? entry.item.cve_id : entry.item.bduId;
+    return entry.kind === ref.kind && id === ref.id;
+  });
+}
 
 export function Dashboard() {
   const queryClient = useQueryClient();
@@ -118,18 +163,24 @@ export function Dashboard() {
   const [qDebounced, setQDebounced] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedBdu, setSelectedBdu] = useState<string | null>(null);
-  const [view, setView] = useState<"critical_v2" | "critical" | "latest" | "last24h" | "kev" | "all">("critical_v2");
+  const [hoveredPreview, setHoveredPreview] = useState<VulnPreviewRef | null>(null);
+  const [pinnedPreview, setPinnedPreview] = useState<VulnPreviewRef | null>(null);
+  const [kbdPreview, setKbdPreview] = useState<VulnPreviewRef | null>(null);
+  const hoverDebounceRef = useRef<number | null>(null);
+  const [view, setView] = useState<"critical_v2" | "critical" | "latest" | "last24h" | "kev" | "exploit" | "all">("critical_v2");
   const [limit, setLimit] = useState<15 | 20>(20);
-  const [sort, setSort] = useState<"rank" | "fresh" | "risk" | "epss" | "cvss" | "priority">("rank");
+  const [sort, setSort] = useState<"rank" | "fresh" | "risk" | "epss" | "cvss" | "exploit" | "priority">("rank");
   const [attentionOnly, setAttentionOnly] = useState(false);
   const [kevOnly, setKevOnly] = useState(false);
   const [minCvss, setMinCvss] = useState<number | null>(null);
   const [minEpss, setMinEpss] = useState<number | null>(null);
   const [vendorFilter, setVendorFilter] = useState<string | null>(null);
   const [productFilter, setProductFilter] = useState<string | null>(null);
+  const [exploitFilter, setExploitFilter] = useState<ExploitRadarFilter | null>(null);
+  const [vulnClasses, setVulnClasses] = useState<VulnClassId[]>([]);
   const [savedViews, setSavedViews] = useState<SavedView[]>([]);
-  const [triage, setTriage] = useState<Record<string, TriageStatus>>({});
   const [savedViewsOpen, setSavedViewsOpen] = useState(false);
+  const { isDone } = useVocTriage();
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Record<string, true>>({});
 
@@ -137,12 +188,6 @@ export function Dashboard() {
     try {
       const raw = localStorage.getItem("vip:savedViews");
       if (raw) setSavedViews(JSON.parse(raw));
-    } catch {
-      // ignore
-    }
-    try {
-      const raw = localStorage.getItem("vip:triageStatus");
-      if (raw) setTriage(JSON.parse(raw));
     } catch {
       // ignore
     }
@@ -161,14 +206,7 @@ export function Dashboard() {
     return () => window.clearTimeout(id);
   }, [q]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem("vip:triageStatus", JSON.stringify(triage));
-    } catch {
-      // ignore
-    }
-  }, [triage]);
-
+  const livePollMs = useLivePollInterval();
 
   const queueHealthQuery = useQuery({
     queryKey: ["stats", "queue"],
@@ -177,7 +215,9 @@ export function Dashboard() {
       if (!res.ok) throw new Error(`Failed to fetch queue (${res.status})`);
       return (await res.json()) as unknown;
     },
-    staleTime: 10_000
+    staleTime: 8_000,
+    refetchInterval: moduleKey === "dashboard" ? livePollMs : false,
+    refetchIntervalInBackground: false
   });
 
   const [dlqOpen, setDlqOpen] = useState(false);
@@ -259,7 +299,10 @@ export function Dashboard() {
           bduIngestTs?: string | null;
         };
       };
-    }
+    },
+    staleTime: 8_000,
+    refetchInterval: moduleKey === "dashboard" ? livePollMs : false,
+    refetchIntervalInBackground: false
   });
 
   /** Как на API: по умолчанию разрешено, только `false` отключает. Пока summary грузится — не блокируем кнопки (`=== true` ломало ручной enrich). */
@@ -284,73 +327,17 @@ export function Dashboard() {
         products: { vendor: string; product: string; count: number }[];
       };
     },
-    staleTime: 30_000
-  });
-
-  const hotBduQuery = useQuery({
-    queryKey: ["bdu", "dashboard", "attention24h", "kev-or-epss05-or-cvss9", 100],
-    enabled: moduleKey === "dashboard",
-    staleTime: 45_000,
-    refetchInterval: moduleKey === "dashboard" ? 90_000 : false,
-    queryFn: async () => {
-      const url = new URL(`/api/bdu`, window.location.origin);
-      url.searchParams.set("publishedLast24h", "true");
-      url.searchParams.set("urgentOnly", "true");
-      url.searchParams.set("minLinkedEpss", "0.5");
-      url.searchParams.set("minCvss", "9");
-      url.searchParams.set("limit", "100");
-      const res = await apiFetch(url.toString(), { cache: "no-store" });
-      if (!res.ok) throw new Error(`Failed to fetch hot BDU (${res.status})`);
-      const data = (await res.json()) as { items: BduListItem[] };
-      return data.items;
-    }
-  });
-
-  const hotCvesQuery = useQuery({
-    queryKey: ["cves", "dashboard", "attention24h", "kev-or-epss05-or-cvss9", 200],
-    enabled: moduleKey === "dashboard",
-    staleTime: 45_000,
-    refetchInterval: moduleKey === "dashboard" ? 90_000 : false,
-    queryFn: async () => {
-      const url = new URL(`/api/cves`, window.location.origin);
-      url.searchParams.set("view", "last24h");
-      url.searchParams.set("sort", "epss");
-      url.searchParams.set("limit", "200");
-      const res = await apiFetch(url.toString(), { cache: "no-store" });
-      if (!res.ok) throw new Error(`Failed to fetch hot CVEs (${res.status})`);
-      const data = (await res.json()) as { items: CveListItem[] };
-      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-      return data.items
-        .filter((it) => {
-          if (!it.published_at) return false;
-          const t = new Date(it.published_at).getTime();
-          const highEpss = typeof it.epss === "number" && it.epss >= 0.5;
-          const criticalCvss = typeof it.cvss_base === "number" && it.cvss_base >= 9;
-          return !Number.isNaN(t) && t >= cutoff && (Boolean(it.exploit_known) || highEpss || criticalCvss);
-        })
-        .sort((a, b) => {
-          const ka = a.exploit_known ? 1 : 0;
-          const kb = b.exploit_known ? 1 : 0;
-          if (kb !== ka) return kb - ka;
-          const ea = typeof a.epss === "number" ? a.epss : -1;
-          const eb = typeof b.epss === "number" ? b.epss : -1;
-          if (eb !== ea) return eb - ea;
-          const ca = typeof a.cvss_base === "number" ? a.cvss_base : -1;
-          const cb = typeof b.cvss_base === "number" ? b.cvss_base : -1;
-          if (cb !== ca) return cb - ca;
-          const ra = typeof a.risk_score === "number" ? a.risk_score : -1;
-          const rb = typeof b.risk_score === "number" ? b.risk_score : -1;
-          if (rb !== ra) return rb - ra;
-          return String(b.published_at ?? "").localeCompare(String(a.published_at ?? ""));
-        });
-    }
+    staleTime: 8_000,
+    refetchInterval: moduleKey === "dashboard" || moduleKey === "vulns" ? livePollMs : false,
+    refetchIntervalInBackground: false
   });
 
   const topPriorityQuery = useQuery({
     queryKey: ["cves", "dashboard", "topPriority", "latest", "rank", 80],
     enabled: moduleKey === "dashboard",
-    staleTime: 60_000,
-    refetchInterval: moduleKey === "dashboard" ? 120_000 : false,
+    staleTime: 8_000,
+    refetchInterval: moduleKey === "dashboard" ? livePollMs : false,
+    refetchIntervalInBackground: false,
     queryFn: async () => {
       const url = new URL(`/api/cves`, window.location.origin);
       url.searchParams.set("view", "latest");
@@ -378,7 +365,7 @@ export function Dashboard() {
   });
 
   const listQuery = useQuery({
-    queryKey: ["cves", view, limit, sort, kevOnly, minCvss, minEpss, vendorFilter, productFilter, qDebounced],
+    queryKey: ["cves", view, limit, sort, kevOnly, minCvss, minEpss, vendorFilter, productFilter, vulnClasses, exploitFilter, qDebounced],
     enabled: moduleKey === "vulns",
     queryFn: async () => {
       const url = new URL(`/api/cves`, window.location.origin);
@@ -388,17 +375,25 @@ export function Dashboard() {
       const upstreamSort =
         sort === "priority"
           ? "rank"
-          : view === "critical" || view === "critical_v2"
-            ? sort
-            : sort === "rank"
-              ? "fresh"
-              : sort;
+          : view === "exploit" && sort === "rank"
+            ? "exploit"
+            : view === "critical" || view === "critical_v2"
+              ? sort
+              : sort === "rank"
+                ? "fresh"
+                : sort;
       url.searchParams.set("sort", upstreamSort);
       if (kevOnly) url.searchParams.set("kevOnly", "true");
+      if (exploitFilter === "vckev_only") url.searchParams.set("vckevOnly", "true");
+      if (exploitFilter === "epss_spike") url.searchParams.set("epssSpike", "true");
+      if (exploitFilter === "has_poc") url.searchParams.set("hasPoc", "true");
+      if (exploitFilter === "has_public_exploit") url.searchParams.set("hasPublicExploit", "true");
+      if (exploitFilter === "new_vckev_7d") url.searchParams.set("newVckev7d", "true");
       if (minCvss != null) url.searchParams.set("minCvss", String(minCvss));
       if (minEpss != null) url.searchParams.set("minEpss", String(minEpss));
       if (vendorFilter) url.searchParams.set("vendor", vendorFilter);
       if (productFilter) url.searchParams.set("product", productFilter);
+      for (const cls of vulnClasses) url.searchParams.append("vulnClass", cls);
       if (qDebounced) url.searchParams.set("q", qDebounced);
       const res = await apiFetch(url.toString(), { cache: "no-store" });
       if (!res.ok) throw new Error(`Failed to fetch list (${res.status})`);
@@ -451,7 +446,78 @@ export function Dashboard() {
     return entries.sort((a, b) => b.priority - a.priority);
   }, [visibleItems, bduListQuery.data?.items, qDebounced]);
 
-  const bduTriageKey = (bduId: string) => `BDU:${bduId}`;
+  /** Точный CVE в поиске — сразу открыть карточку, если запись есть в списке. */
+  useEffect(() => {
+    const needle = qDebounced.trim();
+    if (!/^cve-\d{4}-\d+/i.test(needle)) return;
+    const cveId = needle.toUpperCase();
+    const hit = (listQuery.data ?? []).find((it) => it.cve_id.toUpperCase() === cveId);
+    if (!hit) return;
+    setSelectedBdu(null);
+    setSelected(hit.cve_id);
+  }, [qDebounced, listQuery.data]);
+
+  const activePreview = useMemo(
+    () => pinnedPreview ?? kbdPreview ?? hoveredPreview,
+    [pinnedPreview, kbdPreview, hoveredPreview]
+  );
+
+  const activePreviewVulnClass = useMemo(() => {
+    if (!activePreview || activePreview.kind !== "cve") return null;
+    const hit = vulnListEntries.find((e) => e.kind === "cve" && e.item.cve_id === activePreview.id);
+    return hit?.kind === "cve" ? (hit.item.vuln_class ?? null) : null;
+  }, [activePreview, vulnListEntries]);
+
+  const setHoveredDebounced = useCallback((next: VulnPreviewRef | null) => {
+    if (pinnedPreview) return;
+    if (hoverDebounceRef.current != null) {
+      window.clearTimeout(hoverDebounceRef.current);
+      hoverDebounceRef.current = null;
+    }
+    hoverDebounceRef.current = window.setTimeout(() => {
+      setHoveredPreview(next);
+      if (next) setKbdPreview(null);
+    }, 120);
+  }, [pinnedPreview]);
+
+  const scrollPreviewIntoView = useCallback((ref: VulnPreviewRef) => {
+    requestAnimationFrame(() => {
+      document
+        .querySelector(`[data-vuln-preview-key="${vulnPreviewKey(ref)}"]`)
+        ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    });
+  }, []);
+
+  const openPreviewFullCard = useCallback((ref: VulnPreviewRef) => {
+    if (ref.kind === "cve") {
+      setSelectedBdu(null);
+      setSelected(ref.id);
+    } else {
+      setSelected(null);
+      setSelectedBdu(ref.id);
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (hoverDebounceRef.current != null) window.clearTimeout(hoverDebounceRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (moduleKey !== "vulns") {
+      setPinnedPreview(null);
+      setKbdPreview(null);
+      setHoveredPreview(null);
+    }
+  }, [moduleKey]);
+
+  useEffect(() => {
+    if (selected || selectedBdu) {
+      setPinnedPreview(null);
+      setKbdPreview(null);
+    }
+  }, [selected, selectedBdu]);
 
   const exportCsv = () => {
     const rows = (listQuery.data ?? []).map((it) => ({
@@ -463,7 +529,7 @@ export function Dashboard() {
       cvss_base: typeof it.cvss_base === "number" ? it.cvss_base : "",
       exploit_known: it.exploit_known ? "true" : "false",
       ai_ready: it.ai_ready ? "true" : "false",
-      triage: triage[it.cve_id] ?? ""
+      triage: isDone(cveRefKey(it.cve_id)) ? "done" : ""
     }));
     const header = Object.keys(rows[0] ?? { cve_id: "" });
     const esc = (v: unknown) => {
@@ -509,6 +575,80 @@ export function Dashboard() {
     },
     refetchIntervalInBackground: false
   });
+
+  const previewCveQuery = useQuery({
+    queryKey: ["cve", "preview", activePreview?.kind === "cve" ? activePreview.id : null],
+    enabled: moduleKey === "vulns" && !selected && !selectedBdu && activePreview?.kind === "cve",
+    staleTime: 25_000,
+    refetchOnWindowFocus: false,
+    queryFn: () =>
+      activePreview?.kind === "cve" ? fetchCveDetail(activePreview.id) : Promise.reject(new Error("no cve preview"))
+  });
+
+  const previewBduQuery = useQuery({
+    queryKey: ["bdu", "preview", activePreview?.kind === "bdu" ? activePreview.id : null],
+    enabled: moduleKey === "vulns" && !selected && !selectedBdu && activePreview?.kind === "bdu",
+    staleTime: 25_000,
+    refetchOnWindowFocus: false,
+    queryFn: () =>
+      activePreview?.kind === "bdu" ? fetchBduDetail(activePreview.id) : Promise.reject(new Error("no bdu preview"))
+  });
+
+  useEffect(() => {
+    if (moduleKey !== "vulns" || selected || selectedBdu) return;
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName ?? "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target?.isContentEditable) return;
+
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (!vulnListEntries.length) return;
+        e.preventDefault();
+        const curIdx = findVulnPreviewIndex(vulnListEntries, activePreview);
+        const nextIdx =
+          e.key === "ArrowDown"
+            ? Math.min(vulnListEntries.length - 1, curIdx < 0 ? 0 : curIdx + 1)
+            : Math.max(0, curIdx < 0 ? 0 : curIdx - 1);
+        const next = vulnPreviewFromEntry(vulnListEntries[nextIdx]!);
+        setKbdPreview(next);
+        setHoveredPreview(null);
+        scrollPreviewIntoView(next);
+        return;
+      }
+
+      if (e.key === "Enter" && activePreview) {
+        e.preventDefault();
+        openPreviewFullCard(activePreview);
+        return;
+      }
+
+      if (e.key === "Escape") {
+        if (pinnedPreview) {
+          e.preventDefault();
+          setPinnedPreview(null);
+        } else if (kbdPreview || hoveredPreview) {
+          e.preventDefault();
+          setKbdPreview(null);
+          setHoveredPreview(null);
+        }
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    moduleKey,
+    selected,
+    selectedBdu,
+    vulnListEntries,
+    activePreview,
+    pinnedPreview,
+    kbdPreview,
+    hoveredPreview,
+    scrollPreviewIntoView,
+    openPreviewFullCard
+  ]);
 
   /** Пока enrich идёт для другой CVE, опрашиваем её отдельно (selected уже переключили). */
   const enrichPollOffscreenQuery = useQuery({
@@ -664,18 +804,14 @@ export function Dashboard() {
   const refreshOverview = useCallback(async () => {
     await Promise.all([
       summaryQuery.refetch(),
-      hotCvesQuery.refetch(),
-      hotBduQuery.refetch(),
       topPriorityQuery.refetch(),
       vendorsQuery.refetch(),
       queueHealthQuery.refetch()
     ]);
-  }, [summaryQuery, hotCvesQuery, hotBduQuery, topPriorityQuery, vendorsQuery, queueHealthQuery]);
+  }, [summaryQuery, topPriorityQuery, vendorsQuery, queueHealthQuery]);
 
   const overviewRefreshing =
     summaryQuery.isFetching ||
-    hotCvesQuery.isFetching ||
-    hotBduQuery.isFetching ||
     topPriorityQuery.isFetching ||
     vendorsQuery.isFetching ||
     queueHealthQuery.isFetching;
@@ -910,6 +1046,31 @@ export function Dashboard() {
     if (next !== "tasks") setTasksSelectedId(null);
   };
 
+  const openExploitFilter = useCallback((filter: ExploitRadarFilter) => {
+    switchModule("vulns");
+    setView("exploit");
+    setSort("exploit");
+    setExploitFilter(filter);
+    setKevOnly(false);
+    setQ("");
+    setSelected(null);
+    setSelectedBdu(null);
+  }, []);
+
+  const captureSavedViewState = (): SavedView["state"] => ({
+    view,
+    sort,
+    limit,
+    kevOnly,
+    minCvss,
+    minEpss,
+    vendorFilter,
+    productFilter,
+    vulnClasses,
+    exploitFilter,
+    q
+  });
+
   return (
     <div className="mx-auto max-w-[1400px]">
       <div className="mt-6 grid min-h-[calc(100vh-48px)] grid-cols-[56px_minmax(0,1fr)] gap-6">
@@ -941,6 +1102,19 @@ export function Dashboard() {
             title="Уязвимости"
           >
             <ShieldAlert className="h-5 w-5" />
+          </button>
+          <button
+            onClick={() => switchModule("threat")}
+            className={cn(
+              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+              "hover:bg-slate-100 dark:hover:bg-black/25",
+              moduleKey === "threat"
+                ? "border-accent/30 bg-accent/10"
+                : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
+            )}
+            title="Threat feed"
+          >
+            <Target className="h-5 w-5" />
           </button>
             <button
               onClick={() => switchModule("tasks")}
@@ -1017,16 +1191,15 @@ export function Dashboard() {
                 error={summaryQuery.isError ? (summaryQuery.error as Error) : null}
                 vendors={vendorsQuery.data}
                 vendorsLoading={vendorsQuery.isLoading}
-                hotCves={hotCvesQuery.data}
-                hotLoading={hotCvesQuery.isLoading}
-                hotBdu={hotBduQuery.data}
-                hotBduLoading={hotBduQuery.isLoading}
-                onHotBduClick={openDashboardBduModal}
+                onOpenCve={openDashboardModal}
+                onOpenBdu={openDashboardBduModal}
+                onOpenTgLink={(link) => {
+                  if (link) window.open(link, "_blank", "noopener,noreferrer");
+                }}
                 topPriorityCves={topPriorityItems}
                 topPriorityLoading={topPriorityQuery.isLoading}
                 onTopPriorityCveClick={openDashboardModal}
                 dashboardHighlightCveIds={dashboardHighlightSet}
-                onHotCveClick={openDashboardModal}
                 onVendorSelect={(v) => {
                   switchModule("vulns");
                   setView("last24h");
@@ -1045,10 +1218,12 @@ export function Dashboard() {
                 onOpenDlq={() => setDlqOpen(true)}
                 onRefresh={() => void refreshOverview()}
                 refreshing={overviewRefreshing}
+                onExploitFilter={openExploitFilter}
+                exploitFilter={exploitFilter}
               />
             </div>
           ) : moduleKey === "vulns" ? (
-            <div className="mt-0 grid grid-cols-12 gap-6">
+            <div className="mt-0 grid grid-cols-12 items-start gap-6">
               {selectedBdu ? (
                 <section className="col-span-12 space-y-4">
                   <div className="glass rounded-2xl p-3 sm:p-4">
@@ -1094,8 +1269,14 @@ export function Dashboard() {
                 </section>
               ) : null}
 
-              <section className={cn("col-span-12 lg:col-span-4", (selected || selectedBdu) && "hidden")}>
-                <div className="glass overflow-visible rounded-2xl p-4">
+              <section
+                className={cn(
+                  "col-span-12 lg:col-span-4",
+                  (selected || selectedBdu) && "hidden",
+                  "lg:sticky lg:top-4 lg:max-h-[calc(100vh-5.5rem)] lg:self-start"
+                )}
+              >
+                <div className="glass flex max-h-[calc(100vh-5.5rem)] flex-col overflow-hidden rounded-2xl p-4">
                   <div className="mb-1 flex items-start justify-between gap-2">
                     <div className="min-w-0 space-y-0.5">
                       <div className="text-sm font-medium">Уязвимости</div>
@@ -1135,6 +1316,7 @@ export function Dashboard() {
                     onClearFilters={() => {
                       setVendorFilter(null);
                       setProductFilter(null);
+                      setVulnClasses([]);
                     }}
                   />
                   <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -1185,7 +1367,9 @@ export function Dashboard() {
                         <select
                           value={sort}
                           onChange={(e) =>
-                            setSort(e.target.value as "rank" | "fresh" | "risk" | "epss" | "cvss" | "priority")
+                            setSort(
+                              e.target.value as "rank" | "fresh" | "risk" | "epss" | "cvss" | "exploit" | "priority"
+                            )
                           }
                           className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-fg/90 dark:border-border dark:bg-black/20"
                           title="Сортировка"
@@ -1195,6 +1379,7 @@ export function Dashboard() {
                           <option value="risk">Риск</option>
                           <option value="epss">EPSS</option>
                           <option value="cvss">CVSS</option>
+                          <option value="exploit">Exploit spike</option>
                           <option value="fresh">Свежесть</option>
                         </select>
                         <button
@@ -1212,16 +1397,27 @@ export function Dashboard() {
                         >
                           KEV
                         </button>
+                        {exploitFilter ? (
+                          <button
+                            type="button"
+                            onClick={() => setExploitFilter(null)}
+                            className="rounded-full border border-accent/35 bg-accent/10 px-2 py-0.5 text-[11px] text-accent"
+                            title={EXPLOIT_RADAR_FILTER_LABELS[exploitFilter].hint}
+                          >
+                            {EXPLOIT_RADAR_FILTER_LABELS[exploitFilter].title} ×
+                          </button>
+                        ) : null}
                       </div>
                     </div>
 
                     <Tabs.Root value={view} onValueChange={(v: string) => setView(v as typeof view)}>
-                      <Tabs.List className="mt-2 grid grid-cols-5 gap-2">
+                      <Tabs.List className="mt-2 grid grid-cols-6 gap-2">
                         {[
                           ["critical_v2", "Критичные"],
                           ["latest", "Свежие"],
                           ["last24h", "24 ч"],
                           ["kev", "KEV"],
+                          ["exploit", "Exploit"],
                           ["all", "Все"]
                         ].map(([k, label]) => (
                           <Tabs.Trigger
@@ -1302,6 +1498,8 @@ export function Dashboard() {
                         </button>
                       </div>
 
+                      <VulnClassFilter value={vulnClasses} onChange={setVulnClasses} className="w-full" />
+
                       {(vendorFilter || productFilter) && (
                         <div className="flex flex-wrap items-center gap-2">
                           {vendorFilter ? (
@@ -1328,71 +1526,163 @@ export function Dashboard() {
                     </div>
                   </div>
 
-                  <div className="space-y-3">
-                    {vulnListEntries.map((entry) =>
-                      entry.kind === "bdu" ? (
-                        <BduCard
-                          key={`bdu-${entry.item.bduId}`}
-                          item={entry.item}
-                          selected={selectedBdu === entry.item.bduId}
-                          onSelect={() => {
-                            setSelected(null);
-                            setSelectedBdu(entry.item.bduId);
-                          }}
-                          triage={triage[bduTriageKey(entry.item.bduId)]}
-                        />
+                  <div className="mt-1 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-0.5">
+                    <div className="space-y-3 pb-1">
+                    {vulnListEntries.map((entry) => {
+                      const previewRef = vulnPreviewFromEntry(entry);
+                      const previewActive =
+                        activePreview != null &&
+                        activePreview.kind === previewRef.kind &&
+                        activePreview.id === previewRef.id;
+                      return entry.kind === "bdu" ? (
+                        <div key={`bdu-${entry.item.bduId}`} data-vuln-preview-key={vulnPreviewKey(previewRef)}>
+                          <BduCard
+                            item={entry.item}
+                            selected={selectedBdu === entry.item.bduId}
+                            previewActive={previewActive}
+                            onSelect={() => {
+                              setSelected(null);
+                              setSelectedBdu(entry.item.bduId);
+                            }}
+                            onHover={() => setHoveredDebounced(previewRef)}
+                            onUnhover={() => setHoveredDebounced(null)}
+                          />
+                        </div>
                       ) : (
-                        <CveCard
-                          key={entry.item.cve_id}
-                          item={entry.item}
-                          selected={selected === entry.item.cve_id}
-                          onSelect={() => {
-                            setSelectedBdu(null);
-                            setSelected(entry.item.cve_id);
-                          }}
-                          triage={triage[entry.item.cve_id]}
-                          showCheckbox={bulkMode}
-                          checked={Boolean(selectedIds[entry.item.cve_id])}
-                          onToggleChecked={(next) =>
-                            setSelectedIds((m) => {
-                              const n = { ...m };
-                              if (next) n[entry.item.cve_id] = true;
-                              else delete n[entry.item.cve_id];
-                              return n;
-                            })
-                          }
-                        />
-                      )
-                    )}
+                        <div key={entry.item.cve_id} data-vuln-preview-key={vulnPreviewKey(previewRef)}>
+                          <CveCard
+                            item={entry.item}
+                            selected={selected === entry.item.cve_id}
+                            previewActive={previewActive}
+                            onSelect={() => {
+                              setSelectedBdu(null);
+                              setSelected(entry.item.cve_id);
+                            }}
+                            onHover={() => setHoveredDebounced(previewRef)}
+                            onUnhover={() => setHoveredDebounced(null)}
+                            showCheckbox={bulkMode}
+                            checked={Boolean(selectedIds[entry.item.cve_id])}
+                            onToggleChecked={(next) =>
+                              setSelectedIds((m) => {
+                                const n = { ...m };
+                                if (next) n[entry.item.cve_id] = true;
+                                else delete n[entry.item.cve_id];
+                                return n;
+                              })
+                            }
+                          />
+                        </div>
+                      );
+                    })}
                     {vulnListEntries.length === 0 ? (
                       <div className="text-sm text-muted">
                         {qDebounced.trim() ? "Ничего не найдено." : "Для этого вида пока нет записей."}
                       </div>
                     ) : null}
+                    </div>
                   </div>
                 </div>
               </section>
 
-              <section className={cn("col-span-12 lg:col-span-8", (selected || selectedBdu) && "hidden")}>
-                <div className="glass rounded-2xl p-5 sm:p-6">
-                  <div>
-                    <div className="text-sm font-medium">Анализ</div>
-                    <div className="mt-2 text-sm text-muted">
-                      Выбери CVE слева — откроем детальную карточку на весь экран (без прыжков вправо).
-                    </div>
-                    <div className="mt-4 grid grid-cols-2 gap-3 text-[11px]">
-                      <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
-                        <div className="text-muted">Приоритизация</div>
-                        <div className="mt-1 text-fg/85">Сначала приоритет/риск, потом детали и источники</div>
-                      </div>
-                      <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
-                        <div className="text-muted">Экспорт</div>
-                        <div className="mt-1 text-fg/85">XLSX с картой атаки и ссылками на источники</div>
+              <section
+                className={cn(
+                  "col-span-12 lg:col-span-8",
+                  (selected || selectedBdu) && "hidden",
+                  "lg:sticky lg:top-4 lg:max-h-[calc(100vh-5.5rem)] lg:self-start"
+                )}
+              >
+                <div className="glass flex max-h-[calc(100vh-5.5rem)] flex-col overflow-hidden rounded-2xl p-5 sm:p-6">
+                  <div className="shrink-0 flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium">Превью</div>
+                      <div className="mt-2 text-sm text-muted">
+                        Наведи курсор или жми ↑↓ — описание и рекомендации справа. Enter — открыть карточку, Esc — сброс.
                       </div>
                     </div>
+                    <div className="flex shrink-0 flex-wrap items-center gap-2">
+                      {activePreview ? (
+                        <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] text-fg/80 dark:border-border dark:bg-black/20">
+                          <span>
+                            {activePreview.kind === "cve" ? "CVE" : "BDU"}:{" "}
+                            <span className="font-mono">{activePreview.id}</span>
+                          </span>
+                          {activePreview.kind === "cve" ? (
+                            <VulnClassBadge vulnClass={activePreviewVulnClass} />
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {activePreview ? (
+                        <button
+                          type="button"
+                          onClick={() => openPreviewFullCard(activePreview)}
+                          className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-fg/90 hover:bg-slate-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
+                        >
+                          Открыть
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        disabled={!activePreview}
+                        onClick={() => {
+                          if (pinnedPreview) {
+                            setPinnedPreview(null);
+                          } else if (activePreview) {
+                            setPinnedPreview(activePreview);
+                            setKbdPreview(null);
+                            setHoveredPreview(null);
+                          }
+                        }}
+                        className={cn(
+                          "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] transition",
+                          pinnedPreview
+                            ? "border-accent/40 bg-accent/10 text-fg/90"
+                            : "border-slate-200 bg-white text-fg/90 hover:bg-slate-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/30",
+                          !activePreview && "cursor-not-allowed opacity-50"
+                        )}
+                        title={pinnedPreview ? "Открепить превью (Esc)" : "Закрепить текущее превью"}
+                      >
+                        {pinnedPreview ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
+                        {pinnedPreview ? "Открепить" : "Закрепить"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-0.5">
+                    {activePreview?.kind === "cve" ? (
+                      <AiSummaryPanel
+                        data={previewCveQuery.data ?? null}
+                        loading={previewCveQuery.isLoading}
+                        aiPending={false}
+                        aiStalled={previewCveQuery.isError}
+                        manualEnrichAllowed={false}
+                      />
+                    ) : activePreview?.kind === "bdu" ? (
+                      <AiSummaryPanel
+                        data={previewBduQuery.data ?? null}
+                        loading={previewBduQuery.isLoading}
+                        aiPending={false}
+                        aiStalled={previewBduQuery.isError}
+                        manualEnrichAllowed={false}
+                      />
+                    ) : (
+                      <div className="grid grid-cols-2 gap-3 text-[11px]">
+                        <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
+                          <div className="text-muted">Фокус без кликов</div>
+                          <div className="mt-1 text-fg/85">Просматривай много уязвимостей подряд — карточки не прыгают.</div>
+                        </div>
+                        <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
+                          <div className="text-muted">Клавиатура</div>
+                          <div className="mt-1 text-fg/85">↑↓ — листать список, Enter — открыть, Esc — сброс превью.</div>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </section>
+            </div>
+          ) : moduleKey === "threat" ? (
+            <div className="glass rounded-2xl p-5 sm:p-6">
+              <ThreatFeedPanel onOpenCve={openDashboardModal} onFilter={openExploitFilter} />
             </div>
           ) : moduleKey === "tasks" ? (
             <div className="glass rounded-2xl p-5 sm:p-6">
@@ -1570,6 +1860,22 @@ export function Dashboard() {
               </div>
 
               <div className="p-5">
+                <div className="mb-4 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs text-fg/90 hover:bg-accent/15"
+                    onClick={() => {
+                      const name = window.prompt("Имя сохранённого вида");
+                      if (!name?.trim()) return;
+                      setSavedViews((xs) => [
+                        ...xs,
+                        { id: crypto.randomUUID(), name: name.trim(), state: captureSavedViewState() }
+                      ]);
+                    }}
+                  >
+                    Сохранить текущий
+                  </button>
+                </div>
                 {savedViews.length ? (
                   <div className="space-y-2">
                     {savedViews.map((v) => (
@@ -1588,6 +1894,14 @@ export function Dashboard() {
                             setMinEpss(v.state.minEpss);
                             setVendorFilter(v.state.vendorFilter);
                             setProductFilter(v.state.productFilter);
+                            setVulnClasses(
+                              Array.isArray(v.state.vulnClasses)
+                                ? v.state.vulnClasses.filter(isVulnClassId)
+                                : v.state.vulnClass && isVulnClassId(v.state.vulnClass)
+                                  ? [v.state.vulnClass]
+                                  : []
+                            );
+                            setExploitFilter(v.state.exploitFilter ?? null);
                             setQ(v.state.q);
                             setSavedViewsOpen(false);
                           }}

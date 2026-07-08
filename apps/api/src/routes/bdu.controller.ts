@@ -13,7 +13,8 @@ import {
   bduFstecUrl,
   isLlmEnrichFailureRow,
   isLlmNotConfiguredEnrichment,
-  normalizeBduId
+  normalizeBduId,
+  sqlBduFstecAttentionWithinHours
 } from "@vuln-intel/shared";
 import { BduEnrichRunnerService } from "../services/bdu-enrich-runner.service.js";
 import { DbService } from "../services/db.service.js";
@@ -200,10 +201,11 @@ export class BduController {
     let urgentCvssParamIdx = 0;
 
     if (publishedLast24h) {
-      where.push(
-        `b.publication_date ~ '^\\d{2}\\.\\d{2}\\.\\d{4}$'
-         AND to_timestamp(b.publication_date, 'DD.MM.YYYY') >= now() - interval '24 hours'`
+      const windowHours = Math.max(
+        1,
+        Math.min(168, Number(process.env.BDU_ATTENTION_WINDOW_HOURS ?? 24))
       );
+      where.push(sqlBduFstecAttentionWithinHours("b", windowHours));
     }
 
     if (urgentOnly) {

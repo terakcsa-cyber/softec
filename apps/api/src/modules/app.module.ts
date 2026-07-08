@@ -23,7 +23,15 @@ import { CveEnrichRunnerService } from "../services/cve-enrich-runner.service.js
 import { RedisEnrichCacheService } from "../services/redis-enrich-cache.service.js";
 import { SchemaService } from "../services/schema.service.js";
 import { CveVendorIndexService } from "../services/cve-vendor-index.service.js";
+import { CveNvdImportService } from "../services/cve-nvd-import.service.js";
 import { VulnTaskService } from "../services/vuln-task.service.js";
+import { VocCaseService } from "../services/voc-case.service.js";
+import { VocShiftService } from "../services/voc-shift.service.js";
+import { VocService } from "../services/voc.service.js";
+import { ThreatFeedService } from "../services/threat-feed.service.js";
+import { ThreatDigestPdfService } from "../services/threat-digest-pdf.service.js";
+import { ThreatIntelRefreshService } from "../services/threat-intel-refresh.service.js";
+import { VocController } from "../routes/voc.controller.js";
 import { IntegrationSettingsService } from "../services/integration-settings.service.js";
 
 @Module({
@@ -49,7 +57,8 @@ import { IntegrationSettingsService } from "../services/integration-settings.ser
     IntegrationSettingsController,
     BduController,
     FstecBulletinController,
-    TelegramController
+    TelegramController,
+    VocController
   ],
   providers: [
     SchemaService,
@@ -61,7 +70,14 @@ import { IntegrationSettingsService } from "../services/integration-settings.ser
     CveEnrichRunnerService,
     BduEnrichRunnerService,
     CveVendorIndexService,
+    CveNvdImportService,
     VulnTaskService,
+    VocCaseService,
+    VocShiftService,
+    VocService,
+    ThreatFeedService,
+    ThreatDigestPdfService,
+    ThreatIntelRefreshService,
     { provide: APP_GUARD, useClass: JwtAuthGuard }
   ]
 })

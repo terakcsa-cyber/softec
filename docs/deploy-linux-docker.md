@@ -159,8 +159,7 @@ Volumes:
 
 ```bash
 git pull
-docker compose --env-file .env.production -f infra/docker-compose.prod.yml build
-docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d
+./deploy.sh --yes
 ```
 
 Схема БД поддерживается API при старте через `SchemaService`; отдельной команды миграции сейчас нет.
