@@ -1,0 +1,165 @@
+redis-1  | 1:C 09 Jul 2026 11:00:23.398 * oO0OoO0OoO0Oo Redis is starting oO0OoO0OoO0Oo
+redis-1  | 1:C 09 Jul 2026 11:00:23.398 * Redis version=7.4.9, bits=64, commit=00000000, modified=0, pid=1, just started
+redis-1  | 1:C 09 Jul 2026 11:00:23.398 * Configuration loaded
+redis-1  | 1:M 09 Jul 2026 11:00:23.398 * Increased maximum number of open files to 10032 (it was originally set to 1024).
+redis-1  | 1:M 09 Jul 2026 11:00:23.398 * monotonic clock: POSIX clock_gettime
+redis-1  | 1:M 09 Jul 2026 11:00:23.399 * Running mode=standalone, port=6379.
+redis-1  | 1:M 09 Jul 2026 11:00:23.400 * Server initialized
+redis-1  | 1:M 09 Jul 2026 11:00:23.402 * Reading RDB base file on AOF loading...
+redis-1  | 1:M 09 Jul 2026 11:00:23.402 * Loading RDB produced by version 7.4.9
+redis-1  | 1:M 09 Jul 2026 11:00:23.402 * RDB age 3847663 seconds
+redis-1  | 1:M 09 Jul 2026 11:00:23.402 * RDB memory usage when created 0.90 Mb
+redis-1  | 1:M 09 Jul 2026 11:00:23.402 * RDB is base AOF
+redis-1  | 1:M 09 Jul 2026 11:00:23.402 * Done loading RDB, keys loaded: 0, keys expired: 0.
+redis-1  | 1:M 09 Jul 2026 11:00:23.402 * DB loaded from base file appendonly.aof.1.base.rdb: 0.001 seconds
+redis-1  | 1:M 09 Jul 2026 11:00:23.402 * DB loaded from append only file: 0.001 seconds
+redis-1  | 1:M 09 Jul 2026 11:00:23.402 * Opening AOF incr file appendonly.aof.1.incr.aof on server start
+redis-1  | 1:M 09 Jul 2026 11:00:23.402 * Ready to accept connections tcp
+rabbitmq-1  | 2026-07-09 11:00:26.868388+00:00 [info] <0.254.0> Running boot step rabbit_exchange_type_topic defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.868435+00:00 [info] <0.254.0> Running boot step rabbit_mirror_queue_mode_all defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.868482+00:00 [info] <0.254.0> Running boot step rabbit_mirror_queue_mode_exactly defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.868524+00:00 [info] <0.254.0> Running boot step rabbit_mirror_queue_mode_nodes defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.868569+00:00 [info] <0.254.0> Running boot step rabbit_priority_queue defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.868585+00:00 [info] <0.254.0> Priority queues enabled, real BQ is rabbit_variable_queue
+rabbitmq-1  | 2026-07-09 11:00:26.868642+00:00 [info] <0.254.0> Running boot step rabbit_queue_location_client_local defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.868670+00:00 [info] <0.254.0> Running boot step rabbit_queue_location_min_masters defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.868697+00:00 [info] <0.254.0> Running boot step rabbit_queue_location_random defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.868715+00:00 [info] <0.254.0> Running boot step kernel_ready defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.868737+00:00 [info] <0.254.0> Running boot step rabbit_sysmon_minder defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.868856+00:00 [info] <0.254.0> Running boot step rabbit_epmd_monitor defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.869695+00:00 [info] <0.564.0> epmd monitor knows us, inter-node communication (distribution) port: 25672
+rabbitmq-1  | 2026-07-09 11:00:26.869781+00:00 [info] <0.254.0> Running boot step guid_generator defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.870858+00:00 [info] <0.254.0> Running boot step rabbit_node_monitor defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.871029+00:00 [info] <0.568.0> Starting rabbit_node_monitor (in ignore mode)
+rabbitmq-1  | 2026-07-09 11:00:26.871169+00:00 [info] <0.254.0> Running boot step delegate_sup defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.871484+00:00 [info] <0.254.0> Running boot step rabbit_memory_monitor defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.871597+00:00 [info] <0.254.0> Running boot step rabbit_fifo_dlx_sup defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.871646+00:00 [info] <0.254.0> Running boot step core_initialized defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.871673+00:00 [info] <0.254.0> Running boot step rabbit_channel_tracking_handler defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.871713+00:00 [info] <0.254.0> Running boot step rabbit_connection_tracking_handler defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.871729+00:00 [info] <0.254.0> Running boot step rabbit_definitions_hashing defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.871755+00:00 [info] <0.254.0> Running boot step rabbit_exchange_parameters defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.888374+00:00 [info] <0.254.0> Running boot step rabbit_mirror_queue_misc defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.888679+00:00 [info] <0.254.0> Running boot step rabbit_policies defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.889001+00:00 [info] <0.254.0> Running boot step rabbit_policy defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.889056+00:00 [info] <0.254.0> Running boot step rabbit_queue_location_validator defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.889133+00:00 [info] <0.254.0> Running boot step rabbit_quorum_memory_manager defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.889195+00:00 [info] <0.254.0> Running boot step rabbit_quorum_queue defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.889265+00:00 [info] <0.254.0> Running boot step rabbit_stream_coordinator defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.889386+00:00 [info] <0.254.0> Running boot step rabbit_vhost_limit defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.889457+00:00 [info] <0.254.0> Running boot step rabbit_federation_parameters defined by app rabbitmq_federation
+rabbitmq-1  | 2026-07-09 11:00:26.889522+00:00 [info] <0.254.0> Running boot step rabbit_federation_supervisor defined by app rabbitmq_federation
+rabbitmq-1  | 2026-07-09 11:00:26.893912+00:00 [info] <0.254.0> Running boot step rabbit_federation_queue defined by app rabbitmq_federation
+rabbitmq-1  | 2026-07-09 11:00:26.894073+00:00 [info] <0.254.0> Running boot step rabbit_federation_upstream_exchange defined by app rabbitmq_federation
+rabbitmq-1  | 2026-07-09 11:00:26.894281+00:00 [info] <0.254.0> Running boot step rabbit_mgmt_reset_handler defined by app rabbitmq_management
+rabbitmq-1  | 2026-07-09 11:00:26.894343+00:00 [info] <0.254.0> Running boot step rabbit_mgmt_db_handler defined by app rabbitmq_management_agent
+rabbitmq-1  | 2026-07-09 11:00:26.894405+00:00 [info] <0.254.0> Management plugin: using rates mode 'basic'
+rabbitmq-1  | 2026-07-09 11:00:26.894665+00:00 [info] <0.254.0> Running boot step recovery defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.903520+00:00 [info] <0.254.0> Running boot step empty_db_check defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.903553+00:00 [info] <0.254.0> Will seed default virtual host and user...
+rabbitmq-1  | 2026-07-09 11:00:26.903619+00:00 [info] <0.254.0> Adding vhost '/' (description: 'Default virtual host', tags: [])
+rabbitmq-1  | 2026-07-09 11:00:26.910903+00:00 [info] <0.628.0> Making sure data directory '/var/lib/rabbitmq/mnesia/rabbit@5267b8bb3652/msg_stores/vhosts/628WB79CIFDYO9LJI6DKMI09L' for vhost '/' exists
+rabbitmq-1  | 2026-07-09 11:00:26.911951+00:00 [info] <0.628.0> Setting segment_entry_count for vhost '/' with 0 queues to '2048'
+rabbitmq-1  | 2026-07-09 11:00:26.921690+00:00 [info] <0.628.0> Starting message stores for vhost '/'
+rabbitmq-1  | 2026-07-09 11:00:26.921801+00:00 [info] <0.637.0> Message store "628WB79CIFDYO9LJI6DKMI09L/msg_store_transient": using rabbit_msg_store_ets_index to provide index
+rabbitmq-1  | 2026-07-09 11:00:26.922782+00:00 [info] <0.628.0> Started message store of type transient for vhost '/'
+rabbitmq-1  | 2026-07-09 11:00:26.922885+00:00 [info] <0.641.0> Message store "628WB79CIFDYO9LJI6DKMI09L/msg_store_persistent": using rabbit_msg_store_ets_index to provide index
+rabbitmq-1  | 2026-07-09 11:00:26.923276+00:00 [warning] <0.641.0> Message store "628WB79CIFDYO9LJI6DKMI09L/msg_store_persistent": rebuilding indices from scratch
+rabbitmq-1  | 2026-07-09 11:00:26.923853+00:00 [info] <0.628.0> Started message store of type persistent for vhost '/'
+rabbitmq-1  | 2026-07-09 11:00:26.923918+00:00 [info] <0.628.0> Recovering 0 queues of type rabbit_classic_queue took 11ms
+rabbitmq-1  | 2026-07-09 11:00:26.923937+00:00 [info] <0.628.0> Recovering 0 queues of type rabbit_quorum_queue took 0ms
+rabbitmq-1  | 2026-07-09 11:00:26.923961+00:00 [info] <0.628.0> Recovering 0 queues of type rabbit_stream_queue took 0ms
+rabbitmq-1  | 2026-07-09 11:00:26.925204+00:00 [info] <0.254.0> Created user 'vuln'
+rabbitmq-1  | 2026-07-09 11:00:26.925941+00:00 [info] <0.254.0> Successfully set user tags for user 'vuln' to [administrator]
+rabbitmq-1  | 2026-07-09 11:00:26.926700+00:00 [info] <0.254.0> Successfully set permissions for user 'vuln' in virtual host '/' to '.*', '.*', '.*'
+rabbitmq-1  | 2026-07-09 11:00:26.926743+00:00 [info] <0.254.0> Running boot step rabbit_observer_cli defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.926866+00:00 [info] <0.254.0> Running boot step rabbit_looking_glass defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.926886+00:00 [info] <0.254.0> Running boot step rabbit_core_metrics_gc defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.927281+00:00 [info] <0.254.0> Running boot step background_gc defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.927348+00:00 [info] <0.254.0> Running boot step routing_ready defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.927361+00:00 [info] <0.254.0> Running boot step pre_flight defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.927375+00:00 [info] <0.254.0> Running boot step notify_cluster defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.927388+00:00 [info] <0.254.0> Running boot step networking defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.927398+00:00 [info] <0.254.0> Running boot step rabbit_quorum_queue_periodic_membership_reconciliation defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.927436+00:00 [info] <0.254.0> Running boot step definition_import_worker_pool defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.927452+00:00 [info] <0.315.0> Starting worker pool 'definition_import_pool' with 2 processes in it
+rabbitmq-1  | 2026-07-09 11:00:26.927534+00:00 [info] <0.254.0> Running boot step cluster_name defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.927597+00:00 [info] <0.254.0> Initialising internal cluster ID to 'rabbitmq-cluster-id-Fin2p_9AvjCwnTUnLQrH6Q'
+rabbitmq-1  | 2026-07-09 11:00:26.928127+00:00 [info] <0.254.0> Running boot step virtual_host_reconciliation defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.928314+00:00 [info] <0.254.0> Running boot step direct_client defined by app rabbit
+rabbitmq-1  | 2026-07-09 11:00:26.928400+00:00 [info] <0.254.0> Running boot step rabbit_federation_exchange defined by app rabbitmq_federation
+rabbitmq-1  | 2026-07-09 11:00:26.928488+00:00 [info] <0.254.0> Running boot step rabbit_management_load_definitions defined by app rabbitmq_management
+rabbitmq-1  | 2026-07-09 11:00:26.928864+00:00 [info] <0.676.0> Resetting node maintenance status
+rabbitmq-1  | 2026-07-09 11:00:27.044148+00:00 [warning] <0.705.0> Deprecated features: `management_metrics_collection`: Feature `management_metrics_collection` is deprecated.
+rabbitmq-1  | 2026-07-09 11:00:27.044148+00:00 [warning] <0.705.0> By default, this feature can still be used for now.
+rabbitmq-1  | 2026-07-09 11:00:27.044148+00:00 [warning] <0.705.0> Its use will not be permitted by default in a future minor RabbitMQ version and the feature will be removed from a future major RabbitMQ version; actual versions to be determined.
+rabbitmq-1  | 2026-07-09 11:00:27.044148+00:00 [warning] <0.705.0> To continue using this feature when it is not permitted by default, set the following parameter in your configuration:
+rabbitmq-1  | 2026-07-09 11:00:27.044148+00:00 [warning] <0.705.0>     "deprecated_features.permit.management_metrics_collection = true"
+rabbitmq-1  | 2026-07-09 11:00:27.044148+00:00 [warning] <0.705.0> To test RabbitMQ as if the feature was removed, set this in your configuration:
+rabbitmq-1  | 2026-07-09 11:00:27.044148+00:00 [warning] <0.705.0>     "deprecated_features.permit.management_metrics_collection = false"
+rabbitmq-1  | 2026-07-09 11:00:29.045823+00:00 [info] <0.742.0> Management plugin: HTTP (non-TLS) listener started on port 15672
+rabbitmq-1  | 2026-07-09 11:00:29.045963+00:00 [info] <0.772.0> Statistics database started.
+rabbitmq-1  | 2026-07-09 11:00:29.046034+00:00 [info] <0.771.0> Starting worker pool 'management_worker_pool' with 3 processes in it
+rabbitmq-1  | 2026-07-09 11:00:29.051888+00:00 [info] <0.790.0> Prometheus metrics: HTTP (non-TLS) listener started on port 15692
+rabbitmq-1  | 2026-07-09 11:00:29.051981+00:00 [info] <0.676.0> Ready to start client connection listeners
+rabbitmq-1  | 2026-07-09 11:00:29.052861+00:00 [info] <0.834.0> started TCP listener on [::]:5672
+rabbitmq-1  |  completed with 5 plugins.
+rabbitmq-1  | 2026-07-09 11:00:29.111568+00:00 [info] <0.676.0> Server startup complete; 5 plugins started.
+rabbitmq-1  | 2026-07-09 11:00:29.111568+00:00 [info] <0.676.0>  * rabbitmq_prometheus
+rabbitmq-1  | 2026-07-09 11:00:29.111568+00:00 [info] <0.676.0>  * rabbitmq_federation
+rabbitmq-1  | 2026-07-09 11:00:29.111568+00:00 [info] <0.676.0>  * rabbitmq_management
+rabbitmq-1  | 2026-07-09 11:00:29.111568+00:00 [info] <0.676.0>  * rabbitmq_management_agent
+rabbitmq-1  | 2026-07-09 11:00:29.111568+00:00 [info] <0.676.0>  * rabbitmq_web_dispatch
+rabbitmq-1  | 2026-07-09 11:00:29.140325+00:00 [info] <0.9.0> Time to start RabbitMQ: 5366 ms
+rabbitmq-1  | 2026-07-09 11:00:43.729847+00:00 [info] <0.841.0> accepting AMQP connection <0.841.0> (172.18.0.6:42000 -> 172.18.0.3:5672)
+rabbitmq-1  | 2026-07-09 11:00:43.777131+00:00 [info] <0.841.0> connection <0.841.0> (172.18.0.6:42000 -> 172.18.0.3:5672): user 'vuln' authenticated and granted access to vhost '/'
+rabbitmq-1  | 2026-07-09 11:00:43.841183+00:00 [warning] <0.841.0> closing AMQP connection <0.841.0> (172.18.0.6:42000 -> 172.18.0.3:5672, vhost: '/', user: 'vuln'):
+rabbitmq-1  | 2026-07-09 11:00:43.841183+00:00 [warning] <0.841.0> client unexpectedly closed TCP connection
+rabbitmq-1  | 2026-07-09 11:00:44.278296+00:00 [info] <0.876.0> accepting AMQP connection <0.876.0> (172.18.0.5:42068 -> 172.18.0.3:5672)
+rabbitmq-1  | 2026-07-09 11:00:44.325581+00:00 [info] <0.876.0> connection <0.876.0> (172.18.0.5:42068 -> 172.18.0.3:5672): user 'vuln' authenticated and granted access to vhost '/'
+rabbitmq-1  | 2026-07-09 11:00:44.434252+00:00 [warning] <0.876.0> closing AMQP connection <0.876.0> (172.18.0.5:42068 -> 172.18.0.3:5672, vhost: '/', user: 'vuln'):
+rabbitmq-1  | 2026-07-09 11:00:44.434252+00:00 [warning] <0.876.0> client unexpectedly closed TCP connection
+rabbitmq-1  | 2026-07-09 11:00:45.830642+00:00 [info] <0.958.0> accepting AMQP connection <0.958.0> (172.18.0.6:42016 -> 172.18.0.3:5672)
+rabbitmq-1  | 2026-07-09 11:00:45.879484+00:00 [info] <0.958.0> connection <0.958.0> (172.18.0.6:42016 -> 172.18.0.3:5672): user 'vuln' authenticated and granted access to vhost '/'
+rabbitmq-1  | 2026-07-09 11:00:45.929348+00:00 [warning] <0.958.0> closing AMQP connection <0.958.0> (172.18.0.6:42016 -> 172.18.0.3:5672, vhost: '/', user: 'vuln'):
+rabbitmq-1  | 2026-07-09 11:00:45.929348+00:00 [warning] <0.958.0> client unexpectedly closed TCP connection
+rabbitmq-1  | 2026-07-09 11:00:46.727135+00:00 [info] <0.987.0> accepting AMQP connection <0.987.0> (172.18.0.5:42078 -> 172.18.0.3:5672)
+rabbitmq-1  | 2026-07-09 11:00:46.770783+00:00 [info] <0.987.0> connection <0.987.0> (172.18.0.5:42078 -> 172.18.0.3:5672): user 'vuln' authenticated and granted access to vhost '/'
+rabbitmq-1  | 2026-07-09 11:00:46.824808+00:00 [warning] <0.987.0> closing AMQP connection <0.987.0> (172.18.0.5:42078 -> 172.18.0.3:5672, vhost: '/', user: 'vuln'):
+rabbitmq-1  | 2026-07-09 11:00:46.824808+00:00 [warning] <0.987.0> client unexpectedly closed TCP connection
+rabbitmq-1  | 2026-07-09 11:00:47.758116+00:00 [info] <0.1014.0> accepting AMQP connection <0.1014.0> (172.18.0.6:42028 -> 172.18.0.3:5672)
+rabbitmq-1  | 2026-07-09 11:00:47.806507+00:00 [info] <0.1014.0> connection <0.1014.0> (172.18.0.6:42028 -> 172.18.0.3:5672): user 'vuln' authenticated and granted access to vhost '/'
+rabbitmq-1  | 2026-07-09 11:00:47.851769+00:00 [warning] <0.1014.0> closing AMQP connection <0.1014.0> (172.18.0.6:42028 -> 172.18.0.3:5672, vhost: '/', user: 'vuln'):
+rabbitmq-1  | 2026-07-09 11:00:47.851769+00:00 [warning] <0.1014.0> client unexpectedly closed TCP connection
+rabbitmq-1  | 2026-07-09 11:00:49.048976+00:00 [info] <0.1031.0> accepting AMQP connection <0.1031.0> (172.18.0.5:42090 -> 172.18.0.3:5672)
+rabbitmq-1  | 2026-07-09 11:00:49.095916+00:00 [info] <0.1031.0> connection <0.1031.0> (172.18.0.5:42090 -> 172.18.0.3:5672): user 'vuln' authenticated and granted access to vhost '/'
+rabbitmq-1  | 2026-07-09 11:00:49.164644+00:00 [warning] <0.1031.0> closing AMQP connection <0.1031.0> (172.18.0.5:42090 -> 172.18.0.3:5672, vhost: '/', user: 'vuln'):
+rabbitmq-1  | 2026-07-09 11:00:49.164644+00:00 [warning] <0.1031.0> client unexpectedly closed TCP connection
+postgres-1  | 
+postgres-1  | PostgreSQL Database directory appears to contain a database; Skipping initialization
+postgres-1  | 
+postgres-1  | 2026-07-09 11:00:23.522 UTC [1] LOG:  starting PostgreSQL 16.14 on x86_64-pc-linux-musl, compiled by gcc (Alpine 15.2.0) 15.2.0, 64-bit
+postgres-1  | 2026-07-09 11:00:23.524 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+postgres-1  | 2026-07-09 11:00:23.527 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+postgres-1  | 2026-07-09 11:00:23.527 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+postgres-1  | 2026-07-09 11:00:23.535 UTC [27] LOG:  database system was shut down at 2026-07-09 10:37:53 UTC
+postgres-1  | 2026-07-09 11:00:23.545 UTC [1] LOG:  database system is ready to accept connections
+postgres-1  | 2026-07-09 11:00:43.794 UTC [39] FATAL:  password authentication failed for user "vuln"
+postgres-1  | 2026-07-09 11:00:43.794 UTC [39] DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+postgres-1  | 2026-07-09 11:00:43.810 UTC [40] FATAL:  password authentication failed for user "vuln"
+postgres-1  | 2026-07-09 11:00:43.810 UTC [40] DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+postgres-1  | 2026-07-09 11:00:44.404 UTC [41] FATAL:  password authentication failed for user "vuln"
+postgres-1  | 2026-07-09 11:00:44.404 UTC [41] DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+postgres-1  | 2026-07-09 11:00:45.891 UTC [42] FATAL:  password authentication failed for user "vuln"
+postgres-1  | 2026-07-09 11:00:45.891 UTC [42] DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+postgres-1  | 2026-07-09 11:00:45.913 UTC [43] FATAL:  password authentication failed for user "vuln"
+postgres-1  | 2026-07-09 11:00:45.913 UTC [43] DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+postgres-1  | 2026-07-09 11:00:46.799 UTC [44] FATAL:  password authentication failed for user "vuln"
+postgres-1  | 2026-07-09 11:00:46.799 UTC [44] DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+postgres-1  | 2026-07-09 11:00:47.820 UTC [45] FATAL:  password authentication failed for user "vuln"
+postgres-1  | 2026-07-09 11:00:47.820 UTC [45] DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+postgres-1  | 2026-07-09 11:00:47.833 UTC [46] FATAL:  password authentication failed for user "vuln"
+postgres-1  | 2026-07-09 11:00:47.833 UTC [46] DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+postgres-1  | 2026-07-09 11:00:49.133 UTC [47] FATAL:  password authentication failed for user "vuln"
+postgres-1  | 2026-07-09 11:00:49.133 UTC [47] DETAIL:  Connection matched file "/var/lib/postgresql/data/pg_hba.conf" line 128: "host all all all scram-sha-256"
+[deploy] ERROR: Production stack failed. See diagnostics above.
