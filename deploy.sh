@@ -10,6 +10,10 @@ INIT_ONLY=0
 NO_BUILD=0
 YES=0
 AUTO_INSTALL=1
+KEEP_DATA=0
+DEPLOY_MODE=""
+ADMIN_EMAIL="${ADMIN_EMAIL:-}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 COMPOSE=()
 DOCKER=(docker)
 
@@ -24,6 +28,11 @@ Options:
   --force-env           Regenerate env file even if it already exists
   --init-only           Only create/check env file, do not start containers
   --no-build            Run compose up without --build
+  --fresh               Fresh install: delete Docker volumes (Postgres/Redis/RabbitMQ)
+  --update              Platform update: keep Docker volumes (preserve data)
+  --keep-data           Alias for --update
+  --admin-email=EMAIL   Bootstrap admin email for fresh install (default: admin@example.com)
+  --admin-password=PW   Bootstrap admin password (12+ chars). If omitted, will be prompted.
   --yes, -y             Non-interactive defaults and automatic dependency install
   --no-auto-install     Do not install missing Docker/Compose packages
   -h, --help            Show this help
@@ -48,6 +57,11 @@ for arg in "$@"; do
     --force-env) FORCE_ENV=1 ;;
     --init-only) INIT_ONLY=1 ;;
     --no-build) NO_BUILD=1 ;;
+    --fresh) DEPLOY_MODE="fresh" ;;
+    --update) DEPLOY_MODE="update" ;;
+    --keep-data) DEPLOY_MODE="update" ;;
+    --admin-email=*) ADMIN_EMAIL="${arg#*=}" ;;
+    --admin-password=*) ADMIN_PASSWORD="${arg#*=}" ;;
     --yes|-y) YES=1 ;;
     --no-auto-install) AUTO_INSTALL=0 ;;
     -h|--help) usage; exit 0 ;;
@@ -76,6 +90,97 @@ confirm() {
   local answer
   read -r -p "$prompt [Y/n] " answer
   [[ -z "$answer" || "$answer" =~ ^[YyДд] ]]
+}
+
+choose_deploy_mode() {
+  # If explicitly set by args, use it.
+  if [[ "$DEPLOY_MODE" == "fresh" ]]; then
+    KEEP_DATA=0
+  elif [[ "$DEPLOY_MODE" == "update" ]]; then
+    KEEP_DATA=1
+  else
+    # Interactive default: ask. Non-interactive default: fresh.
+    if [[ "$YES" == "1" || ! is_tty ]]; then
+      KEEP_DATA=0
+    else
+      echo
+      echo "[deploy] Выберите режим:"
+      echo "  1) Чистая установка (сбросить данные: удалит Docker volumes Postgres/Redis/RabbitMQ)"
+      echo "  2) Обновление платформы (сохранить данные: обновит только контейнеры/код)"
+      echo
+      local choice=""
+      while true; do
+        read -r -p "Режим [1/2]: " choice
+        case "${choice:-}" in
+          1) KEEP_DATA=0; break ;;
+          2) KEEP_DATA=1; break ;;
+          *) echo "[deploy] Введите 1 или 2." ;;
+        esac
+      done
+    fi
+  fi
+
+  if [[ "$KEEP_DATA" == "1" && "$FORCE_ENV" == "1" ]]; then
+    die "--force-env несовместим с режимом «Обновление платформы» (обновление сохраняет volumes; force-env меняет пароли). Используйте --fresh или уберите --force-env."
+  fi
+}
+
+prompt_admin_bootstrap() {
+  # Only meaningful for fresh installs, or when env is being regenerated.
+  local env_exists=0
+  [[ -f "$ENV_FILE" ]] && env_exists=1
+
+  if [[ "$KEEP_DATA" == "1" && "$FORCE_ENV" != "1" ]]; then
+    # Update mode: do not touch bootstrap creds.
+    return 0
+  fi
+
+  # If user passed both values explicitly, just validate.
+  local email pw
+  email="${ADMIN_EMAIL:-}"
+  pw="${ADMIN_PASSWORD:-}"
+
+  if [[ -z "$email" ]]; then
+    email="admin@example.com"
+    if [[ "$YES" != "1" && is_tty ]]; then
+      email="$(prompt_value "Email администратора (bootstrap)" "$email")"
+    fi
+  fi
+
+  # In non-interactive mode, require explicit password to avoid accidental insecure default.
+  if [[ "$YES" == "1" || ! is_tty ]]; then
+    if [[ -z "$pw" ]]; then
+      die "--admin-password обязателен в неинтерактивном режиме (--yes)."
+    fi
+  else
+    if [[ -z "$pw" ]]; then
+      echo
+      echo "[deploy] Задайте пароль администратора (12+ символов)."
+      while true; do
+        read -r -s -p "Пароль: " pw
+        echo
+        read -r -s -p "Повтор: " pw2
+        echo
+        if [[ "$pw" != "$pw2" ]]; then
+          echo "[deploy] Пароли не совпадают, попробуйте снова."
+          continue
+        fi
+        if (( ${#pw} < 12 )); then
+          echo "[deploy] Пароль должен быть минимум 12 символов."
+          continue
+        fi
+        break
+      done
+    fi
+  fi
+
+  if (( ${#pw} < 12 )); then
+    die "Admin password must be at least 12 characters."
+  fi
+
+  # Persist into env for API bootstrap on first run (only if auth_user is empty).
+  ADMIN_EMAIL="$email"
+  ADMIN_PASSWORD="$pw"
 }
 
 prompt_value() {
@@ -517,10 +622,17 @@ ensure_docker_cli
 ensure_docker_daemon
 ensure_compose
 check_host_capacity
+choose_deploy_mode
 prepare_interactive_env_inputs
 ensure_port_available "$WEB_PORT"
 create_or_update_env
 normalize_env_file
+prompt_admin_bootstrap
+if [[ "$KEEP_DATA" != "1" || "$FORCE_ENV" == "1" ]]; then
+  # fresh install or env regeneration: write bootstrap creds
+  write_env_value AUTH_BOOTSTRAP_EMAIL "$ADMIN_EMAIL" "$ENV_FILE"
+  write_env_value AUTH_BOOTSTRAP_PASSWORD "$ADMIN_PASSWORD" "$ENV_FILE"
+fi
 validate_env_file
 
 if [[ "$INIT_ONLY" == "1" ]]; then
@@ -536,6 +648,11 @@ fi
 
 log "Validating compose config"
 APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml config >/dev/null
+
+if [[ "$KEEP_DATA" != "1" ]]; then
+  log "Fresh install: stopping stack and deleting volumes (use --keep-data to preserve DB)."
+  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml down -v --remove-orphans >/dev/null 2>&1 || true
+fi
 
 log "Starting production stack"
 up_args=( "up" "-d" )

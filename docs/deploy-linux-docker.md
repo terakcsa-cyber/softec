@@ -117,6 +117,8 @@ curl -fsS http://127.0.0.1:${WEB_PUBLISHED_PORT:-3000}/api/health
 
 Для headless-развёртывания остаётся fallback: можно заранее задать `AUTH_BOOTSTRAP_EMAIL` и `AUTH_BOOTSTRAP_PASSWORD` в `.env.production`. Тогда API создаст первого пользователя автоматически, если `auth_user` пустая. После первого успешного входа уберите bootstrap-переменные и перезапустите `api`.
 
+`deploy.sh` умеет задать bootstrap-пользователя автоматически: в режиме **Чистая установка** он спросит email/пароль администратора и запишет их в `.env.production` как `AUTH_BOOTSTRAP_EMAIL` / `AUTH_BOOTSTRAP_PASSWORD`.
+
 ```bash
 docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d api
 ```
@@ -163,6 +165,24 @@ git pull
 ```
 
 Схема БД поддерживается API при старте через `SchemaService`; отдельной команды миграции сейчас нет.
+
+Важно: по умолчанию `deploy.sh` делает **чистую установку** и удаляет Docker volumes (Postgres/Redis/RabbitMQ), чтобы не ловить ошибки от “старых” паролей/схемы.  
+Если нужно сохранить данные, используйте:
+
+```bash
+./deploy.sh --yes --keep-data
+```
+
+При интерактивном запуске без `--yes` скрипт спросит режим:
+- **Чистая установка** — сброс данных (удалит volumes)
+- **Обновление платформы** — данные сохраняются (volumes не трогаются)
+
+Явные флаги:
+
+```bash
+./deploy.sh --fresh
+./deploy.sh --update
+```
 
 ## Preflight перед переносом
 

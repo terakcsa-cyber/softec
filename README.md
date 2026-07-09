@@ -258,7 +258,7 @@ rm -f .dev.lock
 ./deploy.sh
 ```
 
-`deploy.sh` автоматически создаёт `.env.production`, генерирует сильные секреты, проверяет compose config, собирает и поднимает stack. Наружу публикуется только web (`WEB_PUBLISHED_PORT`, по умолчанию **3000**); API и зависимости остаются внутри Docker network. Подробная инструкция: `docs/deploy-linux-docker.md`.
+`deploy.sh` автоматически создаёт `.env.production`, генерирует сильные секреты, проверяет compose config, собирает и поднимает stack. При интерактивном запуске спросит режим: **«Чистая установка»** (удалит Docker volumes Postgres/Redis/RabbitMQ) или **«Обновление платформы»** (данные сохраняются). Флаги: `--fresh` / `--update` (или `--keep-data`). Наружу публикуется только web (`WEB_PUBLISHED_PORT`, по умолчанию **3000**); API и зависимости остаются внутри Docker network. Подробная инструкция: `docs/deploy-linux-docker.md`.
 
 ### Отключение AI‑fanout при недоступной LLM
 
