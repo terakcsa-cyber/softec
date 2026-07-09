@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Flame, Send, Sparkles, TrendingUp, ClipboardPlus } from "lucide-react";
+import { Flame, Send, Sparkles, TrendingUp, ClipboardPlus } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
 import { useLivePollInterval } from "@/lib/live-refresh";
@@ -202,8 +202,11 @@ export function ThreatFeedPanel({
   const [sinceVisit] = useState(() => readThreatLastVisit());
   const [digestPending, setDigestPending] = useState(false);
   const [digestMsg, setDigestMsg] = useState<string | null>(null);
-  const [refreshPending, setRefreshPending] = useState(false);
-  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
+  const [digestPrep, setDigestPrep] = useState<{
+    phase: "idle" | "preparing" | "sending";
+    total: number;
+    done: number;
+  }>({ phase: "idle", total: 0, done: 0 });
   const [casePending, setCasePending] = useState<string | null>(null);
   const [caseMsg, setCaseMsg] = useState<string | null>(null);
   const limit = 40;
@@ -218,29 +221,17 @@ export function ThreatFeedPanel({
 
   useEffect(() => {
     let cancelled = false;
-    setRefreshPending(true);
-    setRefreshMsg("Синхронизация VulnCheck и пересчёт TI…");
     void (async () => {
       try {
         const res = await apiFetch("/api/stats/threat-feed/refresh?force=true", { method: "POST" });
-        const body = (await res.json()) as {
-          ok?: boolean;
-          vulncheck?: { skipped?: boolean; touched?: number };
-          exploitIntel?: { refreshed?: number };
-        };
-        if (!res.ok || body.ok === false) throw new Error(`refresh (${res.status})`);
+        const body = (await res.json()) as { ok?: boolean };
+        if (!res.ok || body.ok === false) return;
         if (!cancelled) {
-          const vc = body.vulncheck?.skipped ? "VulnCheck пропущен (нет токена)" : `VulnCheck: ${body.vulncheck?.touched ?? 0} CVE`;
-          setRefreshMsg(`${vc} · intel: ${body.exploitIntel?.refreshed ?? 0}`);
           void queryClient.invalidateQueries({ queryKey: ["stats", "threat-feed"] });
           void queryClient.invalidateQueries({ queryKey: ["stats", "exploit-radar"] });
         }
-      } catch (e) {
-        if (!cancelled) {
-          setRefreshMsg(e instanceof Error ? e.message : "Не удалось обновить TI");
-        }
-      } finally {
-        if (!cancelled) setRefreshPending(false);
+      } catch {
+        // TI refresh is best-effort; use «Здоровье системы» for manual retry / status.
       }
     })();
     return () => {
@@ -292,7 +283,7 @@ export function ThreatFeedPanel({
   });
 
   const data = feedQuery.data;
-  const items = data?.items ?? [];
+  const items = useMemo(() => data?.items ?? [], [data?.items]);
   const total = data?.total ?? 0;
   const page = Math.floor(offset / limit) + 1;
   const pages = Math.max(1, Math.ceil(total / limit));
@@ -313,17 +304,55 @@ export function ThreatFeedPanel({
   const sendDigest = async () => {
     setDigestPending(true);
     setDigestMsg(null);
+    setDigestPrep({ phase: "preparing", total: 0, done: 0 });
     try {
+      // 1) Prepare: enqueue LLM enrich for digest CVEs and show progress.
+      const prep = await apiFetch("/api/stats/threat-digest/prepare", { method: "POST" });
+      const prepBody = (await prep.json()) as { ok?: boolean; jobId?: string; total?: number; enqueued?: number; error?: string };
+      if (!prep.ok || !prepBody.ok || !prepBody.jobId) throw new Error(prepBody.error ?? `HTTP ${prep.status}`);
+
+      const jobId = prepBody.jobId;
+      const total = Number(prepBody.total ?? 0);
+      setDigestPrep({ phase: "preparing", total, done: 0 });
+      if (total > 0) setDigestMsg(`Подготовка дайджеста: 0/${total} (enqueued ${prepBody.enqueued ?? 0})`);
+
+      // 2) Poll status for a limited time (avoid hanging forever).
+      const deadlineMs = Date.now() + 8 * 60_000;
+      let done = 0;
+      let completed = total <= 0;
+      while (Date.now() < deadlineMs) {
+        const st = await apiFetch(`/api/stats/threat-digest/prepare/status?jobId=${encodeURIComponent(jobId)}`, {
+          cache: "no-store"
+        });
+        const stBody = (await st.json()) as { ok?: boolean; total?: number; done?: number; completed?: boolean; error?: string };
+        if (!st.ok || !stBody.ok) throw new Error(stBody.error ?? `HTTP ${st.status}`);
+        done = Number(stBody.done ?? 0);
+        const t = Number(stBody.total ?? total);
+        setDigestPrep({ phase: "preparing", total: t, done });
+        setDigestMsg(`Подготовка дайджеста: ${done}/${t}`);
+        if (stBody.completed) {
+          completed = true;
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      if (!completed) {
+        throw new Error(
+          `Подготовка не завершена за 8 мин (${done}/${total}). Дайджест не отправлен — дождитесь LLM или повторите позже.`
+        );
+      }
+
+      // 3) Send digest only after preparation completed.
+      setDigestPrep((cur) => ({ ...cur, phase: "sending" }));
       const res = await apiFetch("/api/stats/threat-digest/telegram", { method: "POST" });
       const body = (await res.json()) as { ok?: boolean; sent?: number; pdf?: { ok?: boolean }; error?: string };
       if (!res.ok || !body.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      setDigestMsg(
-        `Digest отправлен: ${body.sent ?? 1} сообщ. + PDF${body.pdf?.ok === false ? " (PDF не удалось)" : ""}`
-      );
+      setDigestMsg(`Digest отправлен: ${body.sent ?? 1} сообщ. + PDF${body.pdf?.ok === false ? " (PDF не удалось)" : ""}`);
     } catch (e) {
       setDigestMsg(e instanceof Error ? e.message : "Ошибка отправки");
     } finally {
       setDigestPending(false);
+      setDigestPrep((cur) => ({ ...cur, phase: "idle" }));
     }
   };
 
@@ -454,8 +483,49 @@ export function ThreatFeedPanel({
           </div>
         </div>
 
-        {refreshMsg ? (
-          <div className={cn("mt-2 text-[11px] text-muted", refreshPending && "animate-pulse")}>{refreshMsg}</div>
+        {digestPrep.phase !== "idle" ? (
+          <div className="mt-2 rounded-lg border border-border bg-white/60 px-3 py-2 dark:bg-black/20">
+            <div className="flex items-center justify-between gap-3 text-[11px]">
+              <div className="flex items-center gap-2 text-muted">
+                <Sparkles className={cn("h-3.5 w-3.5", digestPrep.phase === "preparing" && "animate-pulse")} />
+                <span className="font-medium text-fg/90">
+                  {digestPrep.phase === "sending" ? "Отправка дайджеста…" : "Обогащение LLM для дайджеста…"}
+                </span>
+              </div>
+              <div className="tabular-nums text-muted">
+                {digestPrep.total > 0 ? (
+                  <>
+                    {Math.min(digestPrep.done, digestPrep.total)}/{digestPrep.total}
+                    <span className="ml-2 text-[10px]">
+                      {Math.round((Math.min(digestPrep.done, digestPrep.total) / Math.max(digestPrep.total, 1)) * 100)}%
+                    </span>
+                  </>
+                ) : (
+                  <span>—</span>
+                )}
+              </div>
+            </div>
+            <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200/70 dark:bg-white/10">
+              <div
+                className={cn(
+                  "h-full rounded-full transition-[width] duration-500",
+                  digestPrep.phase === "sending" ? "bg-accent" : "bg-warn"
+                )}
+                style={{
+                  width:
+                    digestPrep.total > 0
+                      ? `${Math.max(
+                          3,
+                          Math.min(
+                            100,
+                            (Math.min(digestPrep.done, digestPrep.total) / Math.max(digestPrep.total, 1)) * 100
+                          )
+                        )}%`
+                      : "12%"
+                }}
+              />
+            </div>
+          </div>
         ) : null}
         {digestMsg ? <div className="mt-2 text-[11px] text-muted">{digestMsg}</div> : null}
         {caseMsg ? <div className="mt-2 text-[11px] text-accent">{caseMsg}</div> : null}

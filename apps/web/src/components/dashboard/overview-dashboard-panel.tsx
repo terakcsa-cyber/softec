@@ -274,8 +274,7 @@ export function OverviewDashboardPanel({
   vendors,
   onVendorSelect,
   onProductSelect,
-  queueHealth,
-  onOpenDlq,
+  onOpenSystemHealth,
   onOpenCve,
   onOpenBdu,
   onOpenTgLink,
@@ -283,7 +282,7 @@ export function OverviewDashboardPanel({
   topPriorityLoading,
   onTopPriorityCveClick,
   vendorsLoading,
-  dashboardHighlightCveIds,
+  dashboardHighlightCveIds: _dashboardHighlightCveIds,
   onRefresh,
   refreshing,
   onExploitFilter,
@@ -306,8 +305,7 @@ export function OverviewDashboardPanel({
   };
   onVendorSelect?: (vendor: string) => void;
   onProductSelect?: (vendor: string, product: string) => void;
-  queueHealth?: unknown;
-  onOpenDlq?: () => void;
+  onOpenSystemHealth?: () => void;
   onOpenCve?: (cveId: string) => void;
   onOpenBdu?: (bduId: string) => void;
   onOpenTgLink?: (link: string) => void;
@@ -323,61 +321,6 @@ export function OverviewDashboardPanel({
   exploitFilter?: import("@/lib/exploit-intel-client").ExploitRadarFilter | null;
 }) {
   const { isDone } = useVocTriage();
-  const qh = (queueHealth ?? null) as null | {
-    ok?: boolean;
-    error?: unknown;
-    queues?: Record<string, { messages?: number; consumers?: number }>;
-    llm?: {
-      configured?: boolean;
-      ok?: boolean;
-      endpoint?: string | null;
-      model?: string | null;
-      ms?: number;
-      status?: number;
-      error?: string;
-      requiresApiKey?: boolean;
-      hasApiKey?: boolean;
-      authReady?: boolean;
-      authHint?: string | null;
-    };
-    nvd?: {
-      configured?: boolean;
-      ok?: boolean;
-      apiProbeOk?: boolean;
-      endpoint?: string | null;
-      ms?: number;
-      status?: number;
-      error?: string | null;
-      hasApiKey?: boolean;
-      watermarkTs?: string | null;
-      watermarkEnd?: string | null;
-      lastProcessed?: number | null;
-      lastAttemptProcessed?: number | null;
-      watermarkPartial?: boolean;
-      ingestStale?: boolean;
-      ingestStaleHint?: string | null;
-    };
-    bdu?: {
-      configured?: boolean;
-      ok?: boolean;
-      sourceProbeOk?: boolean;
-      endpoint?: string | null;
-      ms?: number;
-      status?: number;
-      error?: string | null;
-      tlsInsecure?: boolean;
-      recordCount?: number;
-      cveLinkCount?: number;
-      maxBduId?: string | null;
-      maxPublicationAt?: string | null;
-      lastIngestAt?: string | null;
-      lastIngestRecords?: number | null;
-      lastIngestMaxBduId?: string | null;
-      lastIngestUsedFallback?: boolean | null;
-      ingestStale?: boolean;
-      ingestStaleHint?: string | null;
-    };
-  };
   const metrics = useMemo(() => {
     if (!data) return null;
     const total = data.totalCves;
@@ -532,7 +475,7 @@ export function OverviewDashboardPanel({
         ) : topPriorityCves?.length ? (
           <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
             {topPriorityCves.slice(0, 20).map((it) => {
-              const p = computeCvePriority(it as any);
+              const p = computeCvePriority(it);
               const per = computePerimeterScore(it);
               const pillCls =
                 p.level === "critical"
@@ -551,14 +494,14 @@ export function OverviewDashboardPanel({
                       ? "border-accent/30 bg-accent/10 text-fg/80"
                       : "border-slate-200 bg-slate-50 text-fg/75 dark:border-white/10 dark:bg-white/5";
               const epss =
-                typeof (it as any).epss === "number" && Number.isFinite((it as any).epss)
-                  ? `${(((it as any).epss as number) * 100).toFixed(2)}%`
+                typeof it.epss === "number" && Number.isFinite(it.epss)
+                  ? `${(it.epss * 100).toFixed(2)}%`
                   : "—";
               const cvss =
-                typeof (it as any).cvss_base === "number" && Number.isFinite((it as any).cvss_base)
-                  ? ((it as any).cvss_base as number).toFixed(1)
+                typeof it.cvss_base === "number" && Number.isFinite(it.cvss_base)
+                  ? it.cvss_base.toFixed(1)
                   : "—";
-              const cveId = String((it as any).cve_id);
+              const cveId = String(it.cve_id);
               const processedKey = cveRefKey(cveId);
               const done = isDone(processedKey);
               return (
@@ -581,13 +524,13 @@ export function OverviewDashboardPanel({
                       </div>
                       <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-fg/80">
                         {[
-                          (it as any).vp_vendor ?? null,
-                          (it as any).vp_product ?? null
+                          it.vp_vendor ?? null,
+                          it.vp_product ?? null
                         ].filter(Boolean).join(" / ") || "—"}{" "}
-                        {(it as any).short_ru
-                          ? `— ${String((it as any).short_ru)}`
-                          : (it as any).short_description
-                            ? `— ${String((it as any).short_description)}`
+                        {it.short_ru
+                          ? `— ${String(it.short_ru)}`
+                          : it.short_description
+                            ? `— ${String(it.short_description)}`
                             : ""}
                       </div>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
@@ -606,16 +549,16 @@ export function OverviewDashboardPanel({
                         <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 tabular-nums dark:border-white/10 dark:bg-white/5">
                           CVSS <span className="text-fg/80">{cvss}</span>
                         </span>
-                        {(it as any).exploit_known ? (
+                        {it.exploit_known ? (
                           <span className="rounded-full border border-danger/30 bg-danger/15 px-2 py-0.5 text-danger">
                             KEV
                           </span>
                         ) : null}
-                        <ExploitIntelBadges item={it as any} compact />
+                        <ExploitIntelBadges item={it} compact />
                       </div>
                     </div>
                     <div className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-medium tabular-nums text-fg/80 dark:border-white/10 dark:bg-white/5">
-                      {(it as any).risk_score ?? "—"}
+                      {(it.risk_score ?? "—")}
                     </div>
                   </div>
                 </button>
@@ -727,167 +670,24 @@ export function OverviewDashboardPanel({
         </dl>
       </div>
 
-      <div className="rounded-2xl border border-border bg-white p-4 shadow-sm dark:bg-black/15 dark:shadow-none">
-        <div className="mb-3 flex items-center gap-2 text-xs font-medium text-fg/90">
-          <Activity className="h-3.5 w-3.5 text-muted" />
-          Очереди
-          {onOpenDlq ? (
-            <button
-              onClick={onOpenDlq}
-              className="ml-auto rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-fg/85 hover:bg-slate-100 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
-              title="Открыть DLQ"
-            >
-              DLQ
-            </button>
-          ) : null}
-        </div>
-        {qh?.ok ? (
-          <div className="grid gap-2 text-[11px] sm:grid-cols-2">
-            {[
-              ["ai.enrich depth", qh.queues?.enrich?.messages],
-              ["ai.score depth", qh.queues?.score?.messages],
-              ["dlq.ai.enrich", qh.queues?.dlqEnrich?.messages],
-              ["dlq.ai.score", qh.queues?.dlqScore?.messages]
-            ].map(([k, v]) => (
-              <div
-                key={k}
-                className="flex justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 dark:border-white/[0.04] dark:bg-black/25"
-              >
-                <div className="text-muted">{k}</div>
-                <div className="tabular-nums text-fg/85">{typeof v === "number" ? v.toLocaleString() : "—"}</div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-[11px] text-muted">
-            {qh?.error ? `Очереди недоступны: ${String(qh.error)}` : "Загрузка…"}
-          </div>
-        )}
-
-        {qh?.ok && qh?.llm ? (
-          <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] dark:border-white/[0.04] dark:bg-black/25">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="text-muted">
-                LLM{" "}
-                {qh.llm.configured === false ? (
-                  <span className="text-danger">не настроен</span>
-                ) : qh.llm.ok ? (
-                  <span className="text-ok">OK</span>
-                ) : (
-                  <span className="text-danger">DOWN</span>
-                )}
-              </div>
-              <div className="font-mono tabular-nums text-fg/80">{typeof qh.llm.ms === "number" ? `${qh.llm.ms}ms` : "—"}</div>
-            </div>
-            {qh.llm.endpoint ? <div className="mt-1 truncate font-mono text-[10px] text-fg/80">{qh.llm.endpoint}</div> : null}
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted">
-              {qh.llm.model ? <span>model: {qh.llm.model}</span> : null}
-              {typeof qh.llm.status === "number" ? <span>status: {qh.llm.status}</span> : null}
-              {qh.llm.error ? <span className="truncate text-danger">{String(qh.llm.error)}</span> : null}
-            </div>
-            {qh.llm.authReady === false && qh.llm.authHint ? (
-              <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn">
-                {qh.llm.authHint}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
-        {qh?.ok && qh?.nvd ? (
-          <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] dark:border-white/[0.04] dark:bg-black/25">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="text-muted">
-                NVD{" "}
-                {qh.nvd.ok ? (
-                  <span className="text-ok">OK</span>
-                ) : (
-                  <span className="text-danger">DOWN</span>
-                )}
-                {qh.nvd.apiProbeOk === false && qh.nvd.ok ? (
-                  <span className="ml-1 text-warn">· API probe медленный</span>
-                ) : null}
-                {qh.nvd.ingestStale ? <span className="ml-1 text-warn">· ingest устарел</span> : null}
-              </div>
-              <div className="font-mono tabular-nums text-fg/80">{typeof qh.nvd.ms === "number" ? `${qh.nvd.ms}ms` : "—"}</div>
-            </div>
-            {qh.nvd.endpoint ? <div className="mt-1 truncate font-mono text-[10px] text-fg/80">{qh.nvd.endpoint}</div> : null}
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted">
-              {qh.nvd.hasApiKey ? <span>API key: да</span> : <span>API key: нет (лимиты жёстче)</span>}
-              {typeof qh.nvd.status === "number" ? <span>HTTP: {qh.nvd.status}</span> : null}
-              {typeof qh.nvd.lastProcessed === "number" ? (
-                <span>
-                  посл. успешный цикл: {qh.nvd.lastProcessed.toLocaleString()} CVE
-                  {qh.nvd.watermarkPartial ? " (частично)" : ""}
-                </span>
-              ) : typeof qh.nvd.lastAttemptProcessed === "number" ? (
-                <span>посл. попытка: {qh.nvd.lastAttemptProcessed.toLocaleString()} CVE</span>
-              ) : null}
-              {qh.nvd.watermarkEnd ? <span>окно до: {fmtTs(qh.nvd.watermarkEnd)}</span> : null}
-              {qh.nvd.watermarkTs ? <span>запись: {fmtTs(qh.nvd.watermarkTs)}</span> : null}
-            </div>
-            {qh.nvd.error && !qh.nvd.ok ? (
-              <div className="mt-1 text-[10px] text-danger">{String(qh.nvd.error)}</div>
-            ) : qh.nvd.error && qh.nvd.ok ? (
-              <div className="mt-1 text-[10px] text-warn">{String(qh.nvd.error)}</div>
-            ) : null}
-            {qh.nvd.ingestStale && qh.nvd.ingestStaleHint ? (
-              <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn">
-                {qh.nvd.ingestStaleHint}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-
-        {qh?.ok && qh?.bdu ? (
-          <div className="mt-3 rounded-xl border border-teal-200/80 bg-teal-50/80 px-3 py-2 text-[11px] dark:border-teal-900/50 dark:bg-teal-950/25">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="text-muted">
-                БДУ ФСТЭК{" "}
-                {qh.bdu.ok ? (
-                  <span className="text-ok">OK</span>
-                ) : (
-                  <span className="text-danger">DOWN</span>
-                )}
-                {qh.bdu.sourceProbeOk === false && qh.bdu.ok ? (
-                  <span className="ml-1 text-warn">· источник медленный</span>
-                ) : null}
-                {qh.bdu.ingestStale ? <span className="ml-1 text-warn">· ingest устарел</span> : null}
-                {qh.bdu.lastIngestUsedFallback ? (
-                  <span className="ml-1 text-warn">· зеркало</span>
-                ) : null}
-              </div>
-              <div className="font-mono tabular-nums text-fg/80">{typeof qh.bdu.ms === "number" ? `${qh.bdu.ms}ms` : "—"}</div>
-            </div>
-            {qh.bdu.endpoint ? <div className="mt-1 truncate font-mono text-[10px] text-fg/80">{qh.bdu.endpoint}</div> : null}
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-muted">
-              {typeof qh.bdu.recordCount === "number" ? (
-                <span>записей: {qh.bdu.recordCount.toLocaleString()}</span>
-              ) : null}
-              {typeof qh.bdu.cveLinkCount === "number" ? (
-                <span>связей CVE: {qh.bdu.cveLinkCount.toLocaleString()}</span>
-              ) : null}
-              {typeof qh.bdu.status === "number" ? <span>HTTP: {qh.bdu.status}</span> : null}
-              {qh.bdu.tlsInsecure ? <span className="text-warn">TLS insecure</span> : null}
-              {qh.bdu.maxBduId ? <span>max id: {qh.bdu.maxBduId}</span> : null}
-              {typeof qh.bdu.lastIngestRecords === "number" ? (
-                <span>посл. цикл: {qh.bdu.lastIngestRecords.toLocaleString()} записей</span>
-              ) : null}
-              {qh.bdu.lastIngestAt ? <span>ingest: {fmtTs(qh.bdu.lastIngestAt)}</span> : null}
-              {qh.bdu.maxPublicationAt ? <span>публ.: {fmtTs(qh.bdu.maxPublicationAt)}</span> : null}
-            </div>
-            {qh.bdu.error && !qh.bdu.ok ? (
-              <div className="mt-1 text-[10px] text-danger">{String(qh.bdu.error)}</div>
-            ) : qh.bdu.error && qh.bdu.ok ? (
-              <div className="mt-1 text-[10px] text-warn">{String(qh.bdu.error)}</div>
-            ) : null}
-            {qh.bdu.ingestStale && qh.bdu.ingestStaleHint ? (
-              <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn">
-                {qh.bdu.ingestStaleHint}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
+      {onOpenSystemHealth ? (
+        <button
+          type="button"
+          onClick={onOpenSystemHealth}
+          className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-left text-xs text-fg/90 shadow-sm hover:bg-slate-100 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
+        >
+          <span className="flex items-center gap-2">
+            <Activity className="h-4 w-4 text-accent" />
+            <span>
+              <span className="font-medium">Здоровье системы</span>
+              <span className="mt-0.5 block text-[10px] text-muted">
+                Очереди, DLQ, LLM, конвейеры и управление
+              </span>
+            </span>
+          </span>
+          <span className="text-muted">→</span>
+        </button>
+      ) : null}
 
       {vendorsLoading ? (
         <div className="space-y-3">
@@ -913,7 +713,7 @@ export function OverviewDashboardPanel({
 
       <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-4 text-xs text-muted dark:border-white/10 dark:bg-black/10">
         <span className="font-medium text-fg/80">Подсказка:</span> клик по CVE открывает плавающее окно; клик по БДУ — модуль «Уязвимости» с карточкой
-        ФСТЭК. Мониторинг БДУ — в блоке «Очереди» и в «Настройки → Интеграции».
+        ФСТЭК. Мониторинг очередей и DLQ — в модуле «Здоровье системы» (иконка пульса внизу слева).
       </div>
     </div>
   );

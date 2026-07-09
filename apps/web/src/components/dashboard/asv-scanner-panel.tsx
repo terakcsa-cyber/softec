@@ -372,8 +372,8 @@ export function AsvScannerPanel() {
   const [msfText, setMsfText] = useState<string>("");
   const [msfFindingId, setMsfFindingId] = useState<string | null>(null);
   const [msfMode, setMsfMode] = useState<"safe" | "exploit">("safe");
-  const [msfAction, setMsfAction] = useState<"search" | "check" | "run" | "exploit">("check");
-  const [msfModule, setMsfModule] = useState<string>("");
+  const [, setMsfAction] = useState<"search" | "check" | "run" | "exploit">("check");
+  const [, setMsfModule] = useState<string>("");
   const [msfAck, setMsfAck] = useState(false);
   const [msfOptRhosts, setMsfOptRhosts] = useState("");
   const [msfOptRport, setMsfOptRport] = useState<string>("443");
@@ -822,7 +822,7 @@ export function AsvScannerPanel() {
   const runs = useMemo(() => runsQuery.data ?? [], [runsQuery.data]);
   const findings = useMemo(() => findingsQuery.data ?? [], [findingsQuery.data]);
   const issues = useMemo(() => issuesQuery.data ?? [], [issuesQuery.data]);
-  const artifacts = artifactsQuery.data ?? [];
+  const artifacts = useMemo(() => artifactsQuery.data ?? [], [artifactsQuery.data]);
   const ports = portsQuery.data ?? [];
   const httpObs = httpQuery.data ?? [];
   const profiles = profilesQuery.data ?? [];

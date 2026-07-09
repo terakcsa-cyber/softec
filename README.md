@@ -2,6 +2,9 @@
 
 Монорепозиторий на **pnpm + Turbo** для сбора и нормализации данных об уязвимостях (CVE, EPSS, KEV, бюллетени вендоров), **ИИ‑обогащения** карточек CVE, веб‑интерфейса для аналитики и модуля **ASV** (Attack Surface / сканирование поверхности атаки с **Nuclei**).
 
+**Документация:** [docs/README.md](docs/README.md) — полный индекс.  
+**Пользователям:** [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · **Администраторам:** [docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md) · **Зрелость:** [docs/MATURITY.md](docs/MATURITY.md)
+
 Цели проекта:
 
 - быстрый поиск и просмотр CVE с метриками и контекстом;
@@ -175,10 +178,15 @@ pnpm infra:up
 Остановка **без удаления томов** (данные БД сохраняются):
 
 ```bash
-docker compose -f infra/docker-compose.yml down
+pnpm infra:stop    # docker compose stop
+pnpm infra:down    # docker compose down (без -v)
 ```
 
-Скрипт **`pnpm infra:down`** в корне вызывает `down **-v**` — **удаляет именованные volumes**; используйте его только если осознанно нужен «чистый» старт.
+**Явное удаление данных** (только осознанно):
+
+```bash
+pnpm infra:wipe    # docker compose down -v
+```
 
 ### 2. Переменные окружения
 
@@ -329,6 +337,37 @@ rm -f .dev.lock
 - Инвентаризация поверхности: `docs/SECURITY_SURFACE.md`.  
 - SAST: `pnpm security:sast` (pnpm audit по воркспейсу + Semgrep; отчёт `semgrep-out.json`, см. `docs/SECURITY_SAST_FINDINGS.md`). Строгий режим Semgrep: `SEMGREP_STRICT=1 pnpm security:sast`.  
 - Локальный DAST smoke + опционально ZAP baseline: `pnpm security:dast`; ZAP: `RUN_ZAP=1 pnpm security:dast` (нужен Docker).
+
+### CI и тесты
+
+```bash
+pnpm typecheck        # все пакеты
+pnpm test             # unit + coverage gate (≥40% critical shared)
+pnpm test:integration # testcontainers + chaos restart (Docker)
+pnpm audit:high       # 0 high/critical vulnerabilities
+pnpm lint             # eslint + next lint (0 warnings)
+pnpm test:e2e         # Playwright (web+api подняты)
+```
+
+GitHub Actions (`.github/workflows/ci.yml`):
+
+- **quality** — typecheck, test, audit:high, lint, SAST, E2E (optional)
+- **integration** — testcontainers + chaos
+- **dast** — curl smoke (optional)
+
+### Staging (pre-production)
+
+Изолированный Docker-стек на порту **3080** (отдельные volumes от production):
+
+```bash
+pnpm deploy:staging:init
+./deploy.sh --staging --yes --admin-password='YourLongPassword123'
+```
+
+После деплоя: post-deploy smoke + chaos restart (`api` → `ingest` → `ai` → `web`).  
+Отключить chaos: `SKIP_CHAOS_SMOKE=1 ./deploy.sh --staging …`
+
+### Production deploy
 
 ---
 

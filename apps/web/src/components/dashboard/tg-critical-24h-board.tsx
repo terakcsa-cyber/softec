@@ -57,7 +57,7 @@ export function TgCritical24hBoard({
 }) {
   const [cat, setCat] = useState<TgCategory>("all");
   const { isDone } = useVocTriage();
-  const list = rows ?? [];
+  const list = useMemo(() => rows ?? [], [rows]);
 
   const stats = useMemo(() => {
     const kev = list.filter((r) => r.cveIntel.some((c) => c.exploit_known)).length;

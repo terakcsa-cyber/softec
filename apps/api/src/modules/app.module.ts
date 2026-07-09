@@ -1,9 +1,12 @@
 import { Module } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
-import { ThrottlerModule } from "@nestjs/throttler";
+import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
+import { RolesGuard } from "../auth/roles.guard.js";
+import { WriteRoleGuard } from "../auth/write-role.guard.js";
 import { AuthModule } from "../auth/auth.module.js";
 import { HealthController } from "../routes/health.controller.js";
+import { MetricsController } from "../routes/metrics.controller.js";
 import { CveController } from "../routes/cve.controller.js";
 import { StatsController } from "../routes/stats.controller.js";
 import { VendorAdvisoryController } from "../routes/vendor-advisory.controller.js";
@@ -31,8 +34,11 @@ import { VocService } from "../services/voc.service.js";
 import { ThreatFeedService } from "../services/threat-feed.service.js";
 import { ThreatDigestPdfService } from "../services/threat-digest-pdf.service.js";
 import { ThreatIntelRefreshService } from "../services/threat-intel-refresh.service.js";
+import { ReconciliationService } from "../services/reconciliation.service.js";
 import { VocController } from "../routes/voc.controller.js";
 import { IntegrationSettingsService } from "../services/integration-settings.service.js";
+import { MigrationService } from "../services/migration.service.js";
+import { MetricsPollerService } from "../services/metrics-poller.service.js";
 
 @Module({
   imports: [
@@ -49,6 +55,7 @@ import { IntegrationSettingsService } from "../services/integration-settings.ser
   ],
   controllers: [
     HealthController,
+    MetricsController,
     CveController,
     StatsController,
     VendorAdvisoryController,
@@ -62,6 +69,9 @@ import { IntegrationSettingsService } from "../services/integration-settings.ser
   ],
   providers: [
     SchemaService,
+    MigrationService,
+    ReconciliationService,
+    MetricsPollerService,
     FstecBulletinService,
     MpvmSyncService,
     TelegramPostService,
@@ -78,7 +88,10 @@ import { IntegrationSettingsService } from "../services/integration-settings.ser
     ThreatFeedService,
     ThreatDigestPdfService,
     ThreatIntelRefreshService,
-    { provide: APP_GUARD, useClass: JwtAuthGuard }
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
+    { provide: APP_GUARD, useClass: WriteRoleGuard }
   ]
 })
 export class AppModule {}

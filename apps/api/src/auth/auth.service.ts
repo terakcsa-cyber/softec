@@ -12,6 +12,7 @@ import argon2 from "argon2";
 import { generateSecret, verifySync } from "otplib";
 import QRCode from "qrcode";
 import { DbService } from "../services/db.service.js";
+import { UserRole, parseUserRole } from "@vuln-intel/shared";
 
 const ACCESS_TTL_SEC = 60 * 15;
 const REFRESH_TTL_SEC = 60 * 60 * 24 * 7;
@@ -39,6 +40,7 @@ type UserRow = {
   totp_secret: string | null;
   totp_pending_secret: string | null;
   totp_enabled: boolean;
+  role: string;
 };
 
 function normalizeEmail(emailRaw: string): string {
@@ -84,8 +86,8 @@ export class AuthService implements OnApplicationBootstrap {
     const hash = await argon2.hash(password, { type: argon2.argon2id });
     try {
       await this.db.query(
-        `INSERT INTO auth_user (email, password_hash) VALUES ($1, $2)`,
-        [email, hash]
+        `INSERT INTO auth_user (email, password_hash, role) VALUES ($1, $2, $3)`,
+        [email, hash, UserRole.Admin]
       );
       this.logger.log(`Bootstrap: created first user ${email}`);
     } catch (e: unknown) {
@@ -104,11 +106,11 @@ export class AuthService implements OnApplicationBootstrap {
     assertPasswordPolicy(password);
     const hash = await argon2.hash(password, { type: argon2.argon2id });
     const inserted = await this.db.query<UserRow>(
-      `INSERT INTO auth_user (email, password_hash)
-       SELECT $1, $2
+      `INSERT INTO auth_user (email, password_hash, role)
+       SELECT $1, $2, $3
         WHERE NOT EXISTS (SELECT 1 FROM auth_user)
-       RETURNING id, email, password_hash, totp_secret, totp_pending_secret, totp_enabled`,
-      [email, hash]
+       RETURNING id, email, password_hash, totp_secret, totp_pending_secret, totp_enabled, role`,
+      [email, hash, UserRole.Admin]
     );
     const row = inserted.rows[0];
     if (!row) {
@@ -133,8 +135,8 @@ export class AuthService implements OnApplicationBootstrap {
     const hash = await argon2.hash(password, { type: argon2.argon2id });
     try {
       await this.db.query(
-        `INSERT INTO auth_user (email, password_hash) VALUES ($1, $2)`,
-        [email, hash]
+        `INSERT INTO auth_user (email, password_hash, role) VALUES ($1, $2, $3)`,
+        [email, hash, UserRole.Analyst]
       );
     } catch (e: unknown) {
       const err = e as { code?: string };
@@ -244,16 +246,27 @@ export class AuthService implements OnApplicationBootstrap {
     return { ok: true };
   }
 
-  async me(userId: string): Promise<{ id: string; email: string; totpEnabled: boolean }> {
+  async me(userId: string): Promise<{
+    id: string;
+    email: string;
+    totpEnabled: boolean;
+    role: UserRole;
+  }> {
     if (userId === "internal") {
-      return { id: "internal", email: "internal@system", totpEnabled: false };
+      return {
+        id: "internal",
+        email: "internal@system",
+        totpEnabled: false,
+        role: UserRole.Admin
+      };
     }
     const row = await this.findUserById(userId);
     if (!row) throw new UnauthorizedException();
     return {
       id: row.id,
       email: row.email,
-      totpEnabled: row.totp_enabled
+      totpEnabled: row.totp_enabled,
+      role: parseUserRole(row.role, UserRole.Analyst)
     };
   }
 
@@ -325,7 +338,7 @@ export class AuthService implements OnApplicationBootstrap {
 
   private async findUserByEmail(email: string): Promise<UserRow | null> {
     const res = await this.db.query<UserRow>(
-      `SELECT id, email, password_hash, totp_secret, totp_pending_secret, totp_enabled
+      `SELECT id, email, password_hash, totp_secret, totp_pending_secret, totp_enabled, role
          FROM auth_user
         WHERE lower(email) = lower($1)
         LIMIT 1`,
@@ -341,7 +354,7 @@ export class AuthService implements OnApplicationBootstrap {
 
   private async findUserById(id: string): Promise<UserRow | null> {
     const res = await this.db.query<UserRow>(
-      `SELECT id, email, password_hash, totp_secret, totp_pending_secret, totp_enabled
+      `SELECT id, email, password_hash, totp_secret, totp_pending_secret, totp_enabled, role
          FROM auth_user
         WHERE id = $1`,
       [id]
@@ -359,7 +372,8 @@ export class AuthService implements OnApplicationBootstrap {
   }
 
   private async issueTokenPair(row: UserRow) {
-    const accessToken = await this.signAccess(row.id, row.email);
+    const role = parseUserRole(row.role, UserRole.Analyst);
+    const accessToken = await this.signAccess(row.id, row.email, role);
     const refreshRaw = randomBytes(48).toString("hex");
     const tokenHash = sha256Hex(refreshRaw);
     const expiresAt = new Date(Date.now() + REFRESH_TTL_SEC * 1000);
@@ -375,11 +389,11 @@ export class AuthService implements OnApplicationBootstrap {
     };
   }
 
-  private async signAccess(userId: string, email: string): Promise<string> {
+  private async signAccess(userId: string, email: string, role: UserRole): Promise<string> {
     const secret = process.env.JWT_SECRET?.trim();
     if (!secret) throw new Error("JWT_SECRET missing");
     return this.jwt.signAsync(
-      { sub: userId, email, typ: "access" },
+      { sub: userId, email, role, typ: "access" },
       { secret, expiresIn: ACCESS_TTL_SEC }
     );
   }

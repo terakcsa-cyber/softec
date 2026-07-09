@@ -12,6 +12,12 @@ async function bootstrap() {
   loadDotenv({ path: rootEnvPath });
 
   await NestFactory.createApplicationContext(AppModule, { bufferLogs: true });
+  const { startMetricsServer } = await import("@vuln-intel/shared");
+  if (process.env.METRICS_ENABLED?.trim() !== "false") {
+    startMetricsServer({
+      port: Number(process.env.METRICS_PORT ?? "9091")
+    });
+  }
 }
 
 bootstrap().catch((err) => {

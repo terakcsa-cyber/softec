@@ -30,7 +30,7 @@ function buildStatusPayload(preset: TrafficPreset | null, detail: string): strin
   if (!d) throw new Error("Введите текст статуса");
   const emoji =
     preset === "red" ? "🔴" : preset === "green" ? "🟢" : preset === "white" ? "⚪" : preset === "yellow" ? "🟡" : "";
-  if (/^[🟡🔴🟢⚪]/.test(d)) return d;
+  if (/^[🟡🔴🟢⚪]/u.test(d)) return d;
   if (emoji) return `${emoji} ${d}`;
   return d;
 }
@@ -130,7 +130,7 @@ export function TelegramPostButton({
 
   const applyPreset = (p: (typeof STATUS_PRESETS)[number]) => {
     setPreset(p.id);
-    setDetail(p.hint.replace(/^[🟡🔴🟢⚪]\s*/, ""));
+    setDetail(p.hint.replace(/^[🟡🔴🟢⚪]\s*/u, ""));
   };
 
   const handleOpenChange = (nextOpen: boolean) => {

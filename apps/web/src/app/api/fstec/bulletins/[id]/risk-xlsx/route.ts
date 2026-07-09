@@ -431,7 +431,7 @@ export async function GET(req: Request, ctx: Ctx) {
     status: 200,
     headers: {
       "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "content-disposition": `attachment; filename=\"${filename}\"`,
+      "content-disposition": `attachment; filename="${filename}"`,
       "cache-control": "no-store"
     }
   });

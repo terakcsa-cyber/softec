@@ -2,12 +2,14 @@ import { Injectable, UnauthorizedException } from "@nestjs/common";
 import { PassportStrategy } from "@nestjs/passport";
 import type { Request } from "express";
 import { ExtractJwt, Strategy } from "passport-jwt";
+import { UserRole, parseUserRole } from "@vuln-intel/shared";
 
-export type AuthUser = { userId: string; email: string };
+export type AuthUser = { userId: string; email: string; role: UserRole };
 
 type AccessPayload = {
   sub: string;
   email: string;
+  role?: string;
   typ: string;
 };
 
@@ -30,6 +32,10 @@ export class JwtStrategy extends PassportStrategy(Strategy, "jwt") {
     if (payload.typ !== "access") {
       throw new UnauthorizedException();
     }
-    return { userId: payload.sub, email: payload.email };
+    return {
+      userId: payload.sub,
+      email: payload.email,
+      role: parseUserRole(payload.role, UserRole.Analyst)
+    };
   }
 }

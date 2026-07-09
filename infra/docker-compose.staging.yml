@@ -1,0 +1,148 @@
+name: vuln-intel-staging
+
+# Staging stack — isolated volumes, same images as production.
+# Usage: ./deploy.sh --staging  OR  pnpm deploy:staging
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    command: ["postgres", "-c", "max_connections=200"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-vuln_intel_staging}
+    volumes:
+      - pg_staging_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_staging_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?set RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?set RABBITMQ_DEFAULT_PASS}
+      RABBITMQ_DEFAULT_VHOST: ${RABBITMQ_DEFAULT_VHOST:-/}
+    volumes:
+      - rabbitmq_staging_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: ${APP_ENV_FILE:-../.env.staging}
+        required: false
+    environment:
+      NODE_ENV: production
+      API_HOST: 0.0.0.0
+      PORT: 4001
+      DEPLOY_ENV: staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:4001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 30
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: ${APP_ENV_FILE:-../.env.staging}
+        required: false
+    environment:
+      NODE_ENV: production
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 3000
+      UPSTREAM_API_BASE: http://api:4001/api
+      DEPLOY_ENV: staging
+    ports:
+      - "${WEB_PUBLISHED_PORT:-3080}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 30
+
+  ingest:
+    build:
+      context: ..
+      dockerfile: apps/ingest/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: ${APP_ENV_FILE:-../.env.staging}
+        required: false
+    environment:
+      NODE_ENV: production
+      BDU_ALLOW_MIRROR_FALLBACK: ${BDU_ALLOW_MIRROR_FALLBACK:-true}
+      DEPLOY_ENV: staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  ai:
+    build:
+      context: ..
+      dockerfile: apps/ai/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: ${APP_ENV_FILE:-../.env.staging}
+        required: false
+    environment:
+      NODE_ENV: production
+      DEPLOY_ENV: staging
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  pg_staging_data:
+  redis_staging_data:
+  rabbitmq_staging_data:

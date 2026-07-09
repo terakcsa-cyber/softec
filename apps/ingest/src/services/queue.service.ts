@@ -34,7 +34,7 @@ async function connectAmqpWithRetry(url: string): Promise<ChannelModel> {
 @Injectable()
 export class QueueService implements OnModuleInit, OnModuleDestroy {
   private conn?: ChannelModel;
-  private channel?: Channel;
+  channel?: Channel;
 
   async onModuleInit() {
     const url = process.env.RABBITMQ_URL ?? "amqp://vuln:vuln@localhost:5672/";

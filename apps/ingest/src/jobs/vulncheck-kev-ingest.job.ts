@@ -1,11 +1,9 @@
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
-import { v4 as uuidv4 } from "uuid";
 import {
+  buildScoreEventsForCveIds,
   ensureVulncheckKevSchema,
   ingestVulncheckKev,
-  QueueEventType,
-  sha256Hex,
-  stableJsonStringify
+  publishScoreEvents
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
@@ -24,8 +22,13 @@ export class VulncheckKevIngestJob implements OnModuleInit {
     setTimeout(() => {
       this.runForever(intervalMs).catch((e) => {
         // eslint-disable-next-line no-console
-        console.error(e);
-        process.exit(1);
+        console.error("[ingest:vulncheck-kev] runForever crashed — restarting in 60s", e);
+        setTimeout(() => {
+          this.runForever(intervalMs).catch((err) => {
+            // eslint-disable-next-line no-console
+            console.error("[ingest:vulncheck-kev] runForever crashed again", err);
+          });
+        }, 60_000);
       });
     }, initialDelayMs);
   }
@@ -61,20 +64,11 @@ export class VulncheckKevIngestJob implements OnModuleInit {
   }
 
   private async enqueueScoring(cveIds: string[]) {
-    if (!cveIds.length) return;
-    const nowIso = new Date().toISOString();
-    for (const cveId of cveIds) {
-      const idempotencyKey = await sha256Hex(
-        stableJsonStringify({ t: "vulncheck-kev", cveId, ts: nowIso.slice(0, 10) })
-      );
-      this.queue.publish("vuln.events", "vuln.score.requested.v1", {
-        id: uuidv4(),
-        type: QueueEventType.ScoreCveRequested,
-        ts: nowIso,
-        producer: { service: "ingest", version: "0.0.1" },
-        idempotencyKey: `score:${idempotencyKey}`,
-        payload: { cveId }
-      });
-    }
+    const events = await buildScoreEventsForCveIds(cveIds, {
+      producer: { service: "ingest", version: "0.0.1" },
+      tag: "vulncheck-kev",
+      tsBucket: "day"
+    });
+    publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
   }
 }

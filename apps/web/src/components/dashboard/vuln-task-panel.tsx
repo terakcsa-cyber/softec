@@ -36,9 +36,15 @@ type TaskListRow = {
 };
 
 type TaskDetail = {
-  task: any;
-  cves: Array<any>;
-  events: Array<any>;
+  task: (TaskListRow & { evidence?: string | null; decision_notes?: string | null; [k: string]: unknown }) | null;
+  cves: Array<{
+    cve_id: string;
+    exploit_known?: boolean;
+    epss?: number;
+    cvss_base?: number;
+    [k: string]: unknown;
+  }>;
+  events: Array<{ id?: string; action?: string; actor?: string; ts?: string; meta?: unknown; [k: string]: unknown }>;
 };
 
 type TaskStatus = "new" | "in_progress" | "closed";
@@ -244,6 +250,7 @@ export function VulnTaskPanel({
   selectedTaskId?: string | null;
   onSelectTaskId?: (taskId: string | null) => void;
 }) {
+  type DragTaskData = { taskId?: string; fromStatus?: string; containerId?: string };
   const [q, setQ] = useState("");
   const [status, setStatus] = useState<string>(""); // empty = all
   const [selected, setSelected] = useState<string | null>(null);
@@ -285,7 +292,7 @@ export function VulnTaskPanel({
     }
   });
 
-  const items = listQuery.data?.items ?? [];
+  const items = useMemo(() => listQuery.data?.items ?? [], [listQuery.data?.items]);
   const draggingTask = useMemo(() => {
     if (!draggingTaskId) return null;
     return items.find((t) => t.id === draggingTaskId) ?? null;
@@ -412,13 +419,17 @@ export function VulnTaskPanel({
     try {
       const v = window.localStorage.getItem("vip:vulnTask:rightTab");
       if (v === "cves" || v === "fields" || v === "events") setRightTab(v);
-    } catch {}
+    } catch {
+      // localStorage может быть недоступен (private mode / policy)
+    }
   }, []);
 
   useEffect(() => {
     try {
       window.localStorage.setItem("vip:vulnTask:rightTab", rightTab);
-    } catch {}
+    } catch {
+      // localStorage может быть недоступен (private mode / policy)
+    }
   }, [rightTab]);
 
   // Keep form fields readable even if user hasn't blurred yet (status validation needs them).
@@ -462,7 +473,7 @@ export function VulnTaskPanel({
       url.searchParams.set("sort", "rank");
       const res = await apiFetch(url.toString(), { cache: "no-store" });
       if (!res.ok) throw new Error(`search failed (${res.status})`);
-      return (await res.json()) as { items: Array<any> };
+      return (await res.json()) as { items: Array<Record<string, unknown>> };
     },
     staleTime: 10_000
   });
@@ -487,13 +498,16 @@ export function VulnTaskPanel({
       })
     });
     if (!res.ok) throw new Error("create failed");
-    const j = (await res.json()) as any;
+    const j = (await res.json()) as unknown;
     setCreateOpen(false);
     setNewTitle("");
     setNewProduct("");
     // Keep vendor selection for fast batching
     await listQuery.refetch();
-    if (j?.id) setSelected(String(j.id));
+    if (j && typeof j === "object" && !Array.isArray(j) && "id" in j) {
+      const id = (j as Record<string, unknown>).id;
+      if (typeof id === "string" && id) setSelected(id);
+    }
   }, [newVendor, newProduct, newTitle, listQuery]);
 
   const savePatch = useCallback(async (patch: Record<string, unknown>) => {
@@ -678,17 +692,20 @@ export function VulnTaskPanel({
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
 
   const onDragStart = useCallback((e: DragStartEvent) => {
-    const taskId = (e.active.data.current as any)?.taskId as string | undefined;
+    const data = (e.active.data.current ?? null) as DragTaskData | null;
+    const taskId = typeof data?.taskId === "string" ? data.taskId : undefined;
     if (taskId) setDraggingTaskId(taskId);
   }, []);
 
   const onDragEnd = useCallback(
     async (e: DragEndEvent) => {
       setDraggingTaskId(null);
-      const taskId = (e.active.data.current as any)?.taskId as string | undefined;
-      const fromStatus = (e.active.data.current as any)?.fromStatus as string | undefined;
+      const activeData = (e.active.data.current ?? null) as DragTaskData | null;
+      const taskId = typeof activeData?.taskId === "string" ? activeData.taskId : undefined;
+      const fromStatus = typeof activeData?.fromStatus === "string" ? activeData.fromStatus : undefined;
       const overId = e.over?.id ? String(e.over.id) : null;
-      const overContainerId = (e.over?.data.current as any)?.containerId as string | undefined;
+      const overData = (e.over?.data.current ?? null) as DragTaskData | null;
+      const overContainerId = typeof overData?.containerId === "string" ? overData.containerId : undefined;
       const toStatus =
         overId && overId.startsWith("col:")
           ? overId.slice("col:".length)
@@ -1039,26 +1056,35 @@ export function VulnTaskPanel({
                   </button>
                 </div>
                 <div className="mt-2 grid items-start gap-2 sm:grid-cols-2">
-                  {(cveSearchQuery.data?.items ?? []).slice(0, 20).map((c: any) => (
+                  {(cveSearchQuery.data?.items ?? []).slice(0, 20).map((c) => (
                     <label
-                      key={String(c.cve_id)}
+                      key={String((c as Record<string, unknown>).cve_id ?? "")}
                       className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-white/10 dark:bg-black/20"
                     >
                       <input
                         type="checkbox"
-                        checked={Boolean(addPicked[String(c.cve_id)])}
+                        checked={Boolean(addPicked[String((c as Record<string, unknown>).cve_id ?? "")])}
                         onChange={(e) =>
                           setAddPicked((m) => {
                             const n = { ...m };
-                            if (e.target.checked) n[String(c.cve_id)] = true;
-                            else delete n[String(c.cve_id)];
+                            const id = String((c as Record<string, unknown>).cve_id ?? "");
+                            if (e.target.checked) n[id] = true;
+                            else delete n[id];
                             return n;
                           })
                         }
                       />
                       <div className="min-w-0">
-                        <div className="font-mono text-[12px] font-semibold">{String(c.cve_id)}</div>
-                        <div className="mt-1 line-clamp-2 text-[11px] text-muted">{String(c.short_ru ?? c.short_description ?? "")}</div>
+                        <div className="font-mono text-[12px] font-semibold">
+                          {String((c as Record<string, unknown>).cve_id ?? "")}
+                        </div>
+                        <div className="mt-1 line-clamp-2 text-[11px] text-muted">
+                          {String(
+                            (c as Record<string, unknown>).short_ru ??
+                              (c as Record<string, unknown>).short_description ??
+                              ""
+                          )}
+                        </div>
                       </div>
                     </label>
                   ))}
@@ -1223,7 +1249,7 @@ export function VulnTaskPanel({
             </div>
             {activeEvents.length ? (
               <div className="mt-3 max-h-[520px] space-y-2 overflow-auto pr-1">
-                {activeEvents.slice(0, 80).map((ev: any, idx: number) => (
+                {activeEvents.slice(0, 80).map((ev, idx: number) => (
                   <div
                     key={`${String(ev?.id ?? "")}-${idx}`}
                     className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] dark:border-white/10 dark:bg-white/5"
@@ -1338,7 +1364,7 @@ export function VulnTaskPanel({
                   </select>
                   <select
                     value={listSort}
-                    onChange={(e) => setListSort(e.target.value as any)}
+                    onChange={(e) => setListSort(e.target.value as "score" | "updated" | "title")}
                     className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/20"
                     title="Сортировка"
                   >
@@ -1704,8 +1730,8 @@ export function VulnTaskPanel({
 
                     {listItems.map((t) => {
                       const st = statusPill(t.status);
-                      const cveCount = (t.stats as any)?.cveCount ?? null;
-                      const kevCount = (t.stats as any)?.kevCount ?? null;
+                      const cveCount = t.stats?.cveCount ?? null;
+                      const kevCount = t.stats?.kevCount ?? null;
                       const activeRow = selected === t.id;
                       const picked = !!listPicked[t.id];
                       return (

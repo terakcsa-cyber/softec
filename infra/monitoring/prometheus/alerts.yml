@@ -1,0 +1,30 @@
+groups:
+  - name: vuln-intel
+    interval: 30s
+    rules:
+      - alert: VulnDlqDepthHigh
+        expr: vuln_queue_depth{queue=~"dlq\\..*"} > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "DLQ depth high ({{ $labels.queue }})"
+          description: "DLQ {{ $labels.queue }} has {{ $value }} messages for 15m+"
+
+      - alert: VulnEnrichQueueBacklog
+        expr: vuln_queue_depth{queue="ai.enrich"} > 500
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ai.enrich backlog"
+          description: "Enrich queue depth {{ $value }} — check LLM and workers"
+
+      - alert: VulnIngestStale
+        expr: vuln_reconcile_lag_hours > 12
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ingest stale ({{ $labels.source }})"
+          description: "No ingest activity for {{ $value }}h on {{ $labels.source }}"

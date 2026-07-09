@@ -74,14 +74,22 @@ export async function GET(req: Request, ctx: { params: Promise<{ cveId: string }
     });
   }
 
-  const payload = (await res.json()) as any;
+  const payload = (await res.json()) as {
+    found?: boolean;
+    cve?: Record<string, unknown>;
+    links?: { nvd?: string | null; kev?: string | null; epss?: string | null } | null;
+    vendorAdvisories?: unknown[];
+    ai?: { output_json?: unknown; output_text?: unknown; model?: unknown; prompt_version?: unknown; created_at?: unknown } | null;
+  };
   if (!payload?.found || !payload?.cve) {
     return NextResponse.json({ ok: false, message: "CVE not found" }, { status: 404 });
   }
 
   const cve = payload.cve as Record<string, unknown>;
   const links = (payload.links ?? null) as null | { nvd?: string | null; kev?: string | null; epss?: string | null };
-  const advisories = Array.isArray(payload.vendorAdvisories) ? payload.vendorAdvisories : [];
+  const advisories = Array.isArray(payload.vendorAdvisories)
+    ? (payload.vendorAdvisories as Array<Record<string, unknown>>)
+    : [];
   const ai = (payload.ai ?? null) as null | { output_json?: unknown; output_text?: unknown; model?: unknown; prompt_version?: unknown; created_at?: unknown };
   const out = asObj(ai?.output_json ?? null);
 
@@ -283,14 +291,6 @@ export async function GET(req: Request, ctx: { params: Promise<{ cveId: string }
     const services = [...byType("service"), ...byType("asset")].slice(0, 6);
     const impacts = byType("impact");
 
-    const col = {
-      attacker: { from: "B", to: "B" },
-      arrow1: "C",
-      vector: { from: "D", to: "D" },
-      arrow2: "E",
-      impact: { from: "F", to: "F" }
-    };
-
     // headers
     const headerRow = baseRow + 1;
     wsMap.getRow(headerRow).height = 18;
@@ -449,7 +449,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ cveId: string }
     status: 200,
     headers: {
       "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "content-disposition": `attachment; filename=\"${filename}\"`,
+      "content-disposition": `attachment; filename="${filename}"`,
       "cache-control": "no-store"
     }
   });

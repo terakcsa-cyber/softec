@@ -154,7 +154,7 @@ export function BduDetailPanel({
       }
       const blob = await res.blob();
       const cd = res.headers.get("content-disposition") ?? "";
-      const m = cd.match(/filename=\"([^\"]+)\"/i);
+      const m = cd.match(/filename="([^"]+)"/i);
       const filename = m?.[1] || `BDU-${bduId}-risk.xlsx`;
       const url = URL.createObjectURL(blob);
       try {

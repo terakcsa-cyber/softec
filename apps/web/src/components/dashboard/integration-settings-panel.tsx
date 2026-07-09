@@ -121,50 +121,6 @@ function emptyProfile(): LlmProfileUi {
   };
 }
 
-type QueueHealth = {
-  ok?: boolean;
-  bdu?: {
-    ok?: boolean;
-    sourceProbeOk?: boolean;
-    ms?: number;
-    status?: number;
-    error?: string | null;
-    tlsInsecure?: boolean;
-    recordCount?: number;
-    cveLinkCount?: number;
-    maxBduId?: string | null;
-    lastIngestAt?: string | null;
-    lastIngestRecords?: number | null;
-    lastIngestUsedFallback?: boolean | null;
-    ingestStale?: boolean;
-    ingestStaleHint?: string | null;
-    endpoint?: string | null;
-  };
-  nvd?: {
-    ok?: boolean;
-    apiProbeOk?: boolean;
-    ms?: number;
-    status?: number;
-    error?: string | null;
-    hasApiKey?: boolean;
-    watermarkTs?: string | null;
-    watermarkEnd?: string | null;
-    lastProcessed?: number | null;
-    lastAttemptProcessed?: number | null;
-    ingestStale?: boolean;
-    ingestStaleHint?: string | null;
-    endpoint?: string | null;
-    activeKeySource?: "db" | "env" | "none";
-    apiKeyRejected?: boolean;
-    catalogStatus?: string;
-    catalogActive?: boolean;
-    catalogPubCursor?: string | null;
-    catalogCveCount?: number;
-    catalogTotalUpserted?: number | null;
-    catalogCompletedAt?: string | null;
-  };
-};
-
 export function IntegrationSettingsPanel() {
   const qc = useQueryClient();
   const q = useQuery({
@@ -174,16 +130,6 @@ export function IntegrationSettingsPanel() {
       if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
       return (await res.json()) as IntegrationState;
     }
-  });
-
-  const queueQ = useQuery({
-    queryKey: ["stats", "queue"],
-    queryFn: async () => {
-      const res = await apiFetch("/api/stats/queue", { cache: "no-store" });
-      if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
-      return (await res.json()) as QueueHealth;
-    },
-    refetchInterval: 120_000
   });
 
   const [profiles, setProfiles] = useState<LlmProfileUi[] | null>(null);
@@ -562,8 +508,6 @@ export function IntegrationSettingsPanel() {
 
   const data = q.data!;
   const list = merged?.profiles ?? [];
-  const nvdH = queueQ.data?.nvd;
-  const bduH = queueQ.data?.bdu;
 
   return (
     <div className="space-y-8">
@@ -588,63 +532,9 @@ export function IntegrationSettingsPanel() {
             Ключ в БД имеет приоритет над .env. Удалите или исправьте неверный NVD_API_KEY в .env, чтобы не путаться.
           </div>
         ) : null}
-        {nvdH ? (
-          <div className="mt-3 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] dark:border-white/10 dark:bg-black/30">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-muted">
-                Статус API{" "}
-                {nvdH.ok ? <span className="text-ok">OK</span> : <span className="text-danger">DOWN</span>}
-                {nvdH.ingestStale ? <span className="ml-1 text-warn">· ingest устарел</span> : null}
-              </span>
-              <span className="font-mono tabular-nums text-fg/80">{typeof nvdH.ms === "number" ? `${nvdH.ms}ms` : "—"}</span>
-            </div>
-            <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted">
-              {typeof nvdH.status === "number" ? <span>HTTP {nvdH.status}</span> : null}
-              {typeof nvdH.lastProcessed === "number" ? (
-                <span>посл. успешный: {nvdH.lastProcessed} CVE</span>
-              ) : typeof nvdH.lastAttemptProcessed === "number" ? (
-                <span>посл. попытка: {nvdH.lastAttemptProcessed} CVE</span>
-              ) : null}
-              {nvdH.watermarkEnd ? (
-                <span>окно до: {new Date(nvdH.watermarkEnd).toLocaleString()}</span>
-              ) : null}
-              {nvdH.watermarkTs ? <span>запись: {new Date(nvdH.watermarkTs).toLocaleString()}</span> : null}
-            </div>
-            {nvdH.activeKeySource ? (
-              <span className="text-fg/75">ключ: {sourceLabel(nvdH.activeKeySource)}</span>
-            ) : null}
-            {nvdH.apiKeyRejected ? (
-              <span className="text-danger"> · ключ отклонён (404)</span>
-            ) : null}
-            {nvdH.error ? (
-              <div className={cn("mt-1 text-[10px]", nvdH.ok ? "text-warn" : "text-danger")}>{nvdH.error}</div>
-            ) : null}
-            {nvdH.catalogActive ? (
-              <div className="mt-2 rounded border border-sky-300/40 bg-sky-500/10 px-2 py-1.5 text-[10px] text-sky-800 dark:text-sky-200">
-                Загрузка каталога CVE:{" "}
-                <span className="font-medium tabular-nums">{nvdH.catalogCveCount ?? "—"}</span> в базе
-                {nvdH.catalogPubCursor ? (
-                  <span>
-                    {" "}
-                    · с сегодня вглубь до {new Date(nvdH.catalogPubCursor).toLocaleDateString()}
-                  </span>
-                ) : null}
-              </div>
-            ) : nvdH.catalogStatus === "complete" ? (
-              <div className="mt-2 text-[10px] text-ok">
-                Каталог CVE загружен ({nvdH.catalogCveCount ?? "—"} записей) — работает инкрементальный ingest.
-              </div>
-            ) : null}
-            {nvdH.ingestStale && nvdH.ingestStaleHint ? (
-              <div className="mt-2 text-[10px] text-warn">{nvdH.ingestStaleHint}</div>
-            ) : null}
-          </div>
-        ) : queueQ.isLoading ? (
-          <div className="mt-2 flex items-center gap-2 text-[11px] text-muted">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Проверка NVD…
-          </div>
-        ) : null}
+        <div className="mt-2 text-[10px] text-muted">
+          Статус NVD ingest и очередей — в «Здоровье системы».
+        </div>
         <input
           type="password"
           autoComplete="off"
@@ -950,47 +840,7 @@ export function IntegrationSettingsPanel() {
           . Override: <span className="font-mono">BDU_XML_URL</span>, зеркало:{" "}
           <span className="font-mono">BDU_ALLOW_MIRROR_FALLBACK=true</span>.
         </div>
-        {bduH ? (
-          <div className="mt-3 rounded-lg border border-teal-200/80 bg-white px-3 py-2 text-[11px] dark:border-teal-900/40 dark:bg-black/30">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-muted">
-                Статус{" "}
-                {bduH.ok ? <span className="text-ok">OK</span> : <span className="text-danger">DOWN</span>}
-                {bduH.sourceProbeOk === false && bduH.ok ? (
-                  <span className="ml-1 text-warn">· URL probe</span>
-                ) : null}
-                {bduH.ingestStale ? <span className="ml-1 text-warn">· ingest устарел</span> : null}
-                {bduH.lastIngestUsedFallback ? <span className="ml-1 text-warn">· fallback</span> : null}
-              </span>
-              <span className="font-mono tabular-nums text-fg/80">{typeof bduH.ms === "number" ? `${bduH.ms}ms` : "—"}</span>
-            </div>
-            {bduH.endpoint ? (
-              <div className="mt-1 truncate font-mono text-[10px] text-fg/80">{bduH.endpoint}</div>
-            ) : null}
-            <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted">
-              {typeof bduH.status === "number" ? <span>HTTP {bduH.status}</span> : null}
-              {typeof bduH.recordCount === "number" ? <span>в БД: {bduH.recordCount.toLocaleString()}</span> : null}
-              {typeof bduH.cveLinkCount === "number" ? <span>связей CVE: {bduH.cveLinkCount.toLocaleString()}</span> : null}
-              {bduH.tlsInsecure ? <span className="text-warn">BDU_TLS_INSECURE</span> : null}
-              {bduH.maxBduId ? <span>max: {bduH.maxBduId}</span> : null}
-              {typeof bduH.lastIngestRecords === "number" ? (
-                <span>посл. ingest: {bduH.lastIngestRecords.toLocaleString()}</span>
-              ) : null}
-              {bduH.lastIngestAt ? <span>{new Date(bduH.lastIngestAt).toLocaleString()}</span> : null}
-            </div>
-            {bduH.error ? (
-              <div className={cn("mt-1 text-[10px]", bduH.ok ? "text-warn" : "text-danger")}>{bduH.error}</div>
-            ) : null}
-            {bduH.ingestStale && bduH.ingestStaleHint ? (
-              <div className="mt-2 text-[10px] text-warn">{bduH.ingestStaleHint}</div>
-            ) : null}
-          </div>
-        ) : queueQ.isLoading ? (
-          <div className="mt-2 flex items-center gap-2 text-[11px] text-muted">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            Проверка БДУ…
-          </div>
-        ) : null}
+        <div className="mt-2 text-[10px] text-muted">Статус БДУ ingest — в «Здоровье системы».</div>
       </div>
 
       <div className="rounded-xl border border-dashed border-slate-300/90 bg-white/60 p-4 text-[11px] leading-relaxed text-muted dark:border-white/10 dark:bg-black/10">

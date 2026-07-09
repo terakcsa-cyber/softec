@@ -78,7 +78,7 @@ export function Bdu24hBoard({
     return { total: arr.length, exploit, cvss9, linked };
   }, [items]);
 
-  const list = items ?? [];
+  const list = useMemo(() => items ?? [], [items]);
   const filtered = useMemo(() => {
     const base = filterByCategory(list, cat);
     return [...base].sort(cat === "all24h" ? byUrgencyDesc : byPublishedDesc);

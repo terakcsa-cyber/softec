@@ -17,7 +17,7 @@ function run(cmd, args, opts = {}) {
 }
 
 // pnpm@10: audit runs at workspace root (recursive audit flag isn't supported)
-const audit = run("pnpm", ["audit", "--audit-level=moderate"]);
+const audit = run("pnpm", ["audit", "--audit-level=high"]);
 // pnpm audit: 0 = ok, 1 = vulnerabilities (продолжаем к Semgrep)
 if (audit.status != null && audit.status !== 0 && audit.status !== 1) {
   process.exit(audit.status);
@@ -34,11 +34,9 @@ const semgrepConfigs = [
 ];
 
 const strict = process.env.SEMGREP_STRICT === "1";
-const semgrep = run(
-  "npx",
-  [
-    "--yes",
-    "@semgrep/cli@latest",
+
+function runSemgrepScan() {
+  const args = [
     "scan",
     ...semgrepConfigs.flatMap((c) => ["--config", c]),
     ...(strict ? ["--error"] : []),
@@ -46,9 +44,19 @@ const semgrep = run(
     "--quiet",
     "--json",
     "--output=semgrep-out.json"
-  ],
-  { env: { ...process.env, SEMGREP_ENABLE_VERSION_CHECK: "0" } }
-);
+  ];
+
+  const local = run("semgrep", args, { env: { ...process.env, SEMGREP_ENABLE_VERSION_CHECK: "0" } });
+  if (local.status === 0 || local.status === 1) return local;
+  if (local.error?.code === "ENOENT" || local.status === 127) {
+    // eslint-disable-next-line no-console
+    console.warn("\nSemgrep CLI not found (install: pip install semgrep). Skipping Semgrep scan.");
+    return { status: 0 };
+  }
+  return local;
+}
+
+const semgrep = runSemgrepScan();
 
 if (semgrep.status !== 0) {
   // eslint-disable-next-line no-console

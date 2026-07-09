@@ -16,6 +16,7 @@ import {
   Bandage,
   BarChart3,
   ClipboardList,
+  HeartPulse,
   Loader2,
   Pin,
   PinOff,
@@ -31,10 +32,9 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "../ui/cn";
 import { CveCard } from "./cve-card";
 import { AiSummaryPanel } from "./ai-summary-panel";
-import { RiskBreakdownPanel } from "./risk-breakdown-panel";
 import { OverviewDashboardPanel } from "./overview-dashboard-panel";
+import { SystemHealthPanel } from "./system-health-panel";
 import { ThreatFeedPanel } from "./threat-feed-panel";
-import { CveSourcesPanel } from "./cve-sources-panel";
 import { computeCvePriority } from "@/lib/cve-priority";
 import { computeBduPriority } from "@/lib/bdu-priority";
 import { cveRefKey } from "@/lib/voc-ref-keys";
@@ -132,7 +132,7 @@ type SavedView = {
   };
 };
 
-type ModuleKey = "dashboard" | "vulns" | "threat" | "tasks" | "fstec" | "patches" | "asv" | "settings";
+type ModuleKey = "dashboard" | "vulns" | "threat" | "tasks" | "fstec" | "patches" | "asv" | "systemHealth" | "settings";
 type VulnPreviewRef = { kind: "cve" | "bdu"; id: string };
 
 function vulnPreviewKey(ref: VulnPreviewRef): string {
@@ -207,48 +207,6 @@ export function Dashboard() {
   }, [q]);
 
   const livePollMs = useLivePollInterval();
-
-  const queueHealthQuery = useQuery({
-    queryKey: ["stats", "queue"],
-    queryFn: async () => {
-      const res = await apiFetch(`/api/stats/queue`, { cache: "no-store" });
-      if (!res.ok) throw new Error(`Failed to fetch queue (${res.status})`);
-      return (await res.json()) as unknown;
-    },
-    staleTime: 8_000,
-    refetchInterval: moduleKey === "dashboard" ? livePollMs : false,
-    refetchIntervalInBackground: false
-  });
-
-  const [dlqOpen, setDlqOpen] = useState(false);
-  const [dlqQueue, setDlqQueue] = useState<"dlq.ai.enrich" | "dlq.ai.score">("dlq.ai.enrich");
-  const dlqSampleQuery = useQuery({
-    queryKey: ["stats", "dlq", "sample", dlqQueue],
-    enabled: dlqOpen,
-    queryFn: async () => {
-      const res = await apiFetch(`/api/stats/dlq/sample?queue=${encodeURIComponent(dlqQueue)}&limit=8`, {
-        cache: "no-store"
-      });
-      if (!res.ok) throw new Error(`Failed to fetch DLQ sample (${res.status})`);
-      return (await res.json()) as unknown;
-    }
-  });
-
-  const dlqRetry = async () => {
-    await apiFetch(`/api/stats/dlq/retry?queue=${encodeURIComponent(dlqQueue)}&limit=1000`, {
-      method: "POST"
-    });
-    await queueHealthQuery.refetch();
-    await dlqSampleQuery.refetch();
-  };
-
-  const dlqClear = async () => {
-    await apiFetch(`/api/stats/dlq/clear?queue=${encodeURIComponent(dlqQueue)}&limit=1000`, {
-      method: "POST"
-    });
-    await queueHealthQuery.refetch();
-    await dlqSampleQuery.refetch();
-  };
 
   /** After opening a CVE, POST /enrich once; poll until AI row exists or timeout. */
   const [enrichPosted, setEnrichPosted] = useState(false);
@@ -802,19 +760,11 @@ export function Dashboard() {
   ]);
 
   const refreshOverview = useCallback(async () => {
-    await Promise.all([
-      summaryQuery.refetch(),
-      topPriorityQuery.refetch(),
-      vendorsQuery.refetch(),
-      queueHealthQuery.refetch()
-    ]);
-  }, [summaryQuery, topPriorityQuery, vendorsQuery, queueHealthQuery]);
+    await Promise.all([summaryQuery.refetch(), topPriorityQuery.refetch(), vendorsQuery.refetch()]);
+  }, [summaryQuery, topPriorityQuery, vendorsQuery]);
 
   const overviewRefreshing =
-    summaryQuery.isFetching ||
-    topPriorityQuery.isFetching ||
-    vendorsQuery.isFetching ||
-    queueHealthQuery.isFetching;
+    summaryQuery.isFetching || topPriorityQuery.isFetching || vendorsQuery.isFetching;
 
   const topPriorityItems = useMemo(() => {
     const items = topPriorityQuery.data ?? [];
@@ -894,7 +844,6 @@ export function Dashboard() {
     void requestEnrich(selected, false);
   }, [selected, moduleKey, manualEnrichAllowed, detailsQuery.data, detailsQuery.isLoading, requestEnrich]);
 
-  const items = listQuery.data ?? [];
   const selectedDetails = detailsQuery.data?.found ? detailsQuery.data : null;
   const aiSummaryPending = Boolean(
     selectedDetails &&
@@ -903,21 +852,6 @@ export function Dashboard() {
       enrichTargetCveId === selected &&
       needsOnDemandEnrich(selectedDetails)
   );
-
-  const graph = useMemo(() => {
-    const ai = selectedDetails?.ai as { output_json?: unknown } | null | undefined;
-    const parsed = parseAiOutputJson(ai?.output_json ?? null);
-    const out = parsed?.graph;
-    if (out && typeof out === "object") return out;
-    return null;
-  }, [selectedDetails]);
-
-  const attackFlowSteps = useMemo(() => {
-    const ai = selectedDetails?.ai as { output_json?: unknown } | null | undefined;
-    const parsed = parseAiOutputJson(ai?.output_json ?? null);
-    const af = parsed?.attackFlow;
-    return Array.isArray(af) ? af.map(String).filter(Boolean) : [];
-  }, [selectedDetails]);
 
   const selectedBduDetails = bduDetailsQuery.data?.found ? bduDetailsQuery.data : null;
   const bduAiSummaryPending = Boolean(
@@ -1034,7 +968,7 @@ export function Dashboard() {
     });
   }, []);
 
-  const switchModule = (next: ModuleKey) => {
+  const switchModule = useCallback((next: ModuleKey) => {
     if (moduleKey === "dashboard" && next !== "dashboard") {
       setDashboardModals([]);
     }
@@ -1044,7 +978,7 @@ export function Dashboard() {
       setSelectedBdu(null);
     }
     if (next !== "tasks") setTasksSelectedId(null);
-  };
+  }, [moduleKey]);
 
   const openExploitFilter = useCallback((filter: ExploitRadarFilter) => {
     switchModule("vulns");
@@ -1055,7 +989,7 @@ export function Dashboard() {
     setQ("");
     setSelected(null);
     setSelectedBdu(null);
-  }, []);
+  }, [switchModule]);
 
   const captureSavedViewState = (): SavedView["state"] => ({
     view,
@@ -1167,19 +1101,34 @@ export function Dashboard() {
           >
             <Radar className="h-5 w-5" />
           </button>
-          <button
-            onClick={() => switchModule("settings")}
-            className={cn(
-              "mt-auto flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
-              "hover:bg-slate-100 dark:hover:bg-black/25",
-              moduleKey === "settings"
-                ? "border-accent/30 bg-accent/10"
-                : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
-            )}
-            title="Настройки"
-          >
-            <Settings className="h-5 w-5" />
-          </button>
+          <div className="mt-auto flex flex-col items-center gap-2">
+            <button
+              onClick={() => switchModule("systemHealth")}
+              className={cn(
+                "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+                "hover:bg-slate-100 dark:hover:bg-black/25",
+                moduleKey === "systemHealth"
+                  ? "border-accent/30 bg-accent/10"
+                  : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
+              )}
+              title="Здоровье системы"
+            >
+              <HeartPulse className="h-5 w-5" />
+            </button>
+            <button
+              onClick={() => switchModule("settings")}
+              className={cn(
+                "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+                "hover:bg-slate-100 dark:hover:bg-black/25",
+                moduleKey === "settings"
+                  ? "border-accent/30 bg-accent/10"
+                  : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
+              )}
+              title="Настройки"
+            >
+              <Settings className="h-5 w-5" />
+            </button>
+          </div>
         </aside>
 
         <main className="min-w-0">
@@ -1214,8 +1163,7 @@ export function Dashboard() {
                   setProductFilter(product);
                   setQ("");
                 }}
-                queueHealth={queueHealthQuery.data}
-                onOpenDlq={() => setDlqOpen(true)}
+                onOpenSystemHealth={() => switchModule("systemHealth")}
                 onRefresh={() => void refreshOverview()}
                 refreshing={overviewRefreshing}
                 onExploitFilter={openExploitFilter}
@@ -1710,6 +1658,10 @@ export function Dashboard() {
             <div className="glass rounded-2xl p-5 sm:p-6">
               <AsvScannerPanel />
             </div>
+          ) : moduleKey === "systemHealth" ? (
+            <div className="glass rounded-2xl p-5 sm:p-6">
+              <SystemHealthPanel onOpenSettings={() => switchModule("settings")} />
+            </div>
           ) : (
             <div className="glass rounded-2xl p-6">
               <div className="text-sm font-medium">Настройки</div>
@@ -1722,115 +1674,6 @@ export function Dashboard() {
           )}
         </main>
       </div>
-
-      <Dialog.Root open={dlqOpen} onOpenChange={setDlqOpen}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm" />
-          <Dialog.Content
-            className={cn(
-              "fixed left-1/2 top-1/2 z-50 w-[min(900px,calc(100vw-24px))] -translate-x-1/2 -translate-y-1/2",
-              "rounded-2xl border border-border bg-white shadow-2xl backdrop-blur-xl dark:bg-black/60",
-              "outline-none"
-            )}
-          >
-            <div className="glass rounded-2xl">
-              <div className="sticky top-0 z-10 rounded-t-2xl border-b border-slate-200 bg-white/95 px-5 py-4 backdrop-blur-xl dark:border-border dark:bg-black/60">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <Dialog.Title className="truncate text-sm font-semibold tracking-tight">Очередь DLQ</Dialog.Title>
-                    <Dialog.Description className="mt-1 text-xs text-muted">
-                      Просмотр сообщений, повторная постановка в очередь или очистка мёртвых писем.
-                    </Dialog.Description>
-                  </div>
-                  <Dialog.Close asChild>
-                    <button className="rounded-lg border border-slate-200 bg-slate-100 px-3 py-1.5 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/30 dark:hover:bg-black/40">
-                      Закрыть
-                    </button>
-                  </Dialog.Close>
-                </div>
-              </div>
-
-              <div className="p-5">
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <select
-                      value={dlqQueue}
-                      onChange={(e) => setDlqQueue(e.target.value as "dlq.ai.enrich" | "dlq.ai.score")}
-                      className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-fg/90 dark:border-border dark:bg-black/20"
-                    >
-                      <option value="dlq.ai.enrich">dlq.ai.enrich</option>
-                      <option value="dlq.ai.score">dlq.ai.score</option>
-                    </select>
-                    <button
-                      onClick={() => void dlqSampleQuery.refetch()}
-                      className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
-                    >
-                      Обновить
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => void dlqRetry()}
-                      className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs text-fg/90 hover:bg-accent/15"
-                      title="До 1000 сообщений вернуть в основные очереди"
-                    >
-                      Повторить 1000
-                    </button>
-                    <button
-                      onClick={() => void dlqClear()}
-                      className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger hover:bg-danger/15"
-                      title="Подтвердить и удалить до 1000 сообщений"
-                    >
-                      Очистить 1000
-                    </button>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  {dlqSampleQuery.isError ? (
-                    <div className="rounded-xl border border-danger/30 bg-danger/10 p-3 text-xs text-danger">
-                      {String((dlqSampleQuery.error as Error | null)?.message ?? "Failed to load DLQ sample")}
-                    </div>
-                  ) : null}
-
-                  {(
-                    (dlqSampleQuery.data as
-                      | { messages?: Array<{ body: string; headers?: Record<string, unknown>; redelivered?: boolean }> }
-                      | undefined)?.messages ?? []
-                  ).length ? (
-                    <div className="space-y-2">
-                      {(
-                        (dlqSampleQuery.data as
-                          | { messages?: Array<{ body: string; headers?: Record<string, unknown>; redelivered?: boolean }> }
-                          | undefined)?.messages ?? []
-                      ).map((m, idx) => (
-                        <div key={idx} className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/25">
-                          <div className="mb-2 flex items-center justify-between gap-2 text-[11px] text-muted">
-                            <div>повторная доставка: {String(Boolean(m.redelivered))}</div>
-                            <div className="truncate">
-                              x-death:{" "}
-                              <span className="text-fg/80">
-                                {Array.isArray(m.headers?.["x-death"]) ? (m.headers["x-death"] as unknown[]).length : 0}
-                              </span>
-                            </div>
-                          </div>
-                          <pre className="max-h-[220px] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-white p-3 text-[11px] text-fg/85 dark:border-white/10 dark:bg-black/30">
-                            {String(m.body ?? "").slice(0, 6000)}
-                          </pre>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-sm text-muted">
-                      {dlqSampleQuery.isFetching ? "Загрузка…" : "Очередь пуста"}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
 
       <Dialog.Root open={savedViewsOpen} onOpenChange={setSavedViewsOpen}>
         <Dialog.Portal>

@@ -4,6 +4,7 @@ import type { QueueEventEnvelope } from "@vuln-intel/shared";
 import {
   EnrichCveRequestedEventSchema,
   isLikelyOllamaOpenAiEndpoint,
+  isLlmEnrichFailureRow,
   isLlmNotConfiguredEnrichment,
   llmEndpointRequiresApiKey,
   QueueEventEnvelopeSchema,
@@ -27,6 +28,8 @@ function shouldApplyQueuePublishedWindow(idempotencyKey: string): boolean {
   if (idempotencyKey.includes(":dlq:")) return false;
   if (idempotencyKey.startsWith("enrich:backlog:")) return false;
   if (idempotencyKey.startsWith("enrich:manual:")) return false;
+  // Digest preparation: may include older CVEs with fresh exploit signals; do not drop by published_at window.
+  if (idempotencyKey.startsWith("enrich:digest:")) return false;
   return true;
 }
 
@@ -147,6 +150,30 @@ export class EnrichmentWorker implements OnModuleInit {
             this.queue.ack(msg);
             return;
           }
+        }
+
+        // If we already have a successful enrichment row, do not call the LLM again.
+        // This keeps the queue "real" even if producers accidentally enqueue duplicates.
+        const existing = await this.db.query<{ output_text: string | null; output_json: unknown }>(
+          `SELECT output_text, output_json
+             FROM enrichment_ai
+            WHERE cve_id = $1
+         ORDER BY created_at DESC
+            LIMIT 1`,
+          [payload.cveId]
+        );
+        const row = existing.rows[0];
+        if (
+          row &&
+          !isLlmNotConfiguredEnrichment(row) &&
+          !isLlmEnrichFailureRow({ output_json: row.output_json })
+        ) {
+          if (process.env.AI_LOG_DEDUPE === "true") {
+            // eslint-disable-next-line no-console
+            console.log(`[ai:enrich] already enriched; ack cve=${payload.cveId} key=${env.idempotencyKey}`);
+          }
+          this.queue.ack(msg);
+          return;
         }
 
         // Idempotency: if we've seen this key, ack and drop.

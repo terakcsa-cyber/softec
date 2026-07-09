@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Bandage, ExternalLink, Loader2, RefreshCw, Search, Volume2 } from "lucide-react";
+import { Bandage, ExternalLink, Loader2, RefreshCw, Volume2 } from "lucide-react";
 import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "../ui/cn";
 
@@ -36,14 +36,6 @@ function fmtPubDate(isoOrRfc: string | null): string {
     hour: "2-digit",
     minute: "2-digit"
   });
-}
-
-function matchQuery(it: PatchFeedItem, q: string): boolean {
-  if (!q) return true;
-  const needle = q.toLowerCase();
-  if (it.title.toLowerCase().includes(needle)) return true;
-  if ((it.descriptionText ?? "").toLowerCase().includes(needle)) return true;
-  return (it.cveIds ?? []).some((c) => c.toLowerCase().includes(needle));
 }
 
 function beepPatch() {
@@ -80,19 +72,12 @@ export function PatchManagementPanel({
   onOpenCve?: (cveId: string) => void;
 }) {
   const [channel, setChannel] = useState<string>("");
-  const [q, setQ] = useState("");
-  const [qDebounced, setQDebounced] = useState("");
   const [toast, setToast] = useState<{ title: string; body?: string } | null>(null);
   const toastTimer = useRef<number | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [detailId, setDetailId] = useState<string | null>(null);
 
   const storageKey = "vip:patch:lastSeenId";
-
-  useEffect(() => {
-    const t = window.setTimeout(() => setQDebounced(q.trim()), 350);
-    return () => window.clearTimeout(t);
-  }, [q]);
 
   const feedQuery = useQuery({
     queryKey: ["patch", "telegram", "feed"],
@@ -116,10 +101,8 @@ export function PatchManagementPanel({
   }, [detailId, itemsRaw]);
 
   const items = useMemo(() => {
-    return itemsRaw
-      .filter((it) => (channel ? it.channel.slug === channel : true))
-      .filter((it) => matchQuery(it, qDebounced));
-  }, [itemsRaw, channel, qDebounced]);
+    return itemsRaw.filter((it) => (channel ? it.channel.slug === channel : true));
+  }, [itemsRaw, channel]);
 
   const newest = itemsRaw.length ? itemsRaw[0] : null;
 

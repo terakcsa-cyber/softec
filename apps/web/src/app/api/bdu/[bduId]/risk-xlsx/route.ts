@@ -150,7 +150,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ bduId: string }
     { k: "CVSS", v: cvss == null ? "—" : cvss },
     { k: "CVSS vector", v: asStr(bdu.cvssVector) ?? "—" },
     { k: "Эксплойт", v: hasExploit ? "да" : "нет" },
-    { k: "Исправление", v: Boolean(bdu.hasFix) ? "да" : "нет" }
+    { k: "Исправление", v: bdu.hasFix ? "да" : "нет" }
   ]);
   ws.addRow({});
   ws.addRow({ k: "ФСТЭК", v: links?.fstec ?? asStr(bdu.fstecUrl) ?? "—" });
@@ -399,7 +399,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ bduId: string }
     status: 200,
     headers: {
       "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "content-disposition": `attachment; filename=\"${filename}\"`,
+      "content-disposition": `attachment; filename="${filename}"`,
       "cache-control": "no-store"
     }
   });

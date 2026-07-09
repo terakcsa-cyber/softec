@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 import {
   QueueEventType,
   SQL_EFFECTIVE_PUBLISHED_AT,
+  buildScoreEventsForCveIds,
   catalogBackfillActive,
   catalogReverseFloorReached,
   catalogScanHeadIso,
@@ -11,8 +12,12 @@ import {
   extractNvdPublishedIso,
   extractVendorProductPairsFromCveRaw,
   fingerprintNvdApiKey,
+  hot24ScoreHourBucket,
+  hot24ScoreIdempotencyKey,
   initialReverseCatalogCursor,
   isPublishedWithinHours,
+  listHot24CvesNeedingScore,
+  publishScoreEvents,
   NVD_CATALOG_FLOOR_ISO,
   NVD_CATALOG_SCAN_MODE,
   NVD_CATALOG_SETTINGS_KEY,
@@ -91,7 +96,7 @@ export class NvdIngestJob implements OnModuleInit {
     if (pubHotOnStartMs > 0 && process.env.NVD_PUB_HOT_SYNC !== "false") {
       setTimeout(() => {
         this.syncPublishedHotWindow()
-          .then(() => this.sweepHotWindowEnrich())
+          .then(() => this.sweepHotWindowPipelines())
           .catch((e) => {
             // eslint-disable-next-line no-console
             console.error("[ingest:nvd] published hot-window sync on start failed", e);
@@ -99,10 +104,10 @@ export class NvdIngestJob implements OnModuleInit {
       }, pubHotOnStartMs);
     }
 
-    const sweepOnStartMs = Number(process.env.HOT24_AI_SWEEP_ON_START_MS ?? 45_000);
-    if (sweepOnStartMs > 0 && process.env.HOT24_AI_SWEEP !== "false") {
+    const sweepOnStartMs = Number(process.env.HOT24_AI_SWEEP_ON_START_MS ?? 8_000);
+    if (sweepOnStartMs > 0 && (process.env.HOT24_AI_SWEEP !== "false" || process.env.HOT24_SCORE_SWEEP !== "false")) {
       setTimeout(() => {
-        this.sweepHotWindowEnrich().catch((e) => {
+        this.sweepHotWindowPipelines().catch((e) => {
           // eslint-disable-next-line no-console
           console.error("[ingest:nvd] hot24h sweep on start failed", e);
         });
@@ -110,9 +115,9 @@ export class NvdIngestJob implements OnModuleInit {
     }
 
     const sweepIntervalMs = Number(process.env.HOT24_AI_SWEEP_INTERVAL_MS ?? 0);
-    if (sweepIntervalMs > 0 && process.env.HOT24_AI_SWEEP !== "false") {
+    if (sweepIntervalMs > 0 && (process.env.HOT24_AI_SWEEP !== "false" || process.env.HOT24_SCORE_SWEEP !== "false")) {
       setInterval(() => {
-        this.sweepHotWindowEnrich().catch((e) => {
+        this.sweepHotWindowPipelines().catch((e) => {
           // eslint-disable-next-line no-console
           console.error("[ingest:nvd] hot24h sweep interval failed", e);
         });
@@ -377,7 +382,7 @@ export class NvdIngestJob implements OnModuleInit {
     );
 
     await this.backfillCvssBase();
-    await this.sweepHotWindowEnrich();
+    await this.sweepHotWindowPipelines();
 
     if (syncComplete) {
       await this.db.query(
@@ -990,13 +995,46 @@ export class NvdIngestJob implements OnModuleInit {
     }
   }
 
+  /** Догон enrich + score для CVE за 24ч (после каждого цикла NVD и по таймеру). */
+  private async sweepHotWindowPipelines() {
+    await Promise.all([this.sweepHotWindowEnrich(), this.sweepHotWindowScore()]);
+  }
+
+  /**
+   * Догоняем risk_score для CVE из окна 24ч без свежего score.
+   * Ключ idempotency `score:hot24h:…` — один прогон в час на CVE.
+   */
+  private async sweepHotWindowScore() {
+    if (process.env.HOT24_SCORE_SWEEP === "false") return;
+
+    const limit = Math.max(1, Math.min(2000, Number(process.env.HOT24_SCORE_SWEEP_LIMIT ?? 500)));
+    const staleHours = Math.max(0, Math.min(168, Number(process.env.HOT24_SCORE_STALE_HOURS ?? 6)));
+    const bucket = hot24ScoreHourBucket();
+    const rows = await listHot24CvesNeedingScore(this.db, { limit, staleHours, bucket });
+    if (!rows.length) return;
+
+    const events = await buildScoreEventsForCveIds(
+      rows.map((r) => r.cve_id),
+      {
+        producer: { service: "ingest", version: "0.0.1" },
+        tag: "hot24-sweep",
+        idempotencyKeyFor: (cveId) => hot24ScoreIdempotencyKey(cveId, bucket)
+      }
+    );
+    const n = publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
+    if (n > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`[ingest:nvd] hot24h score sweep enqueued=${n} (limit=${limit}, bucket=${bucket})`);
+    }
+  }
+
   /**
    * Догоняем ИИ для CVE из окна 24ч, у которых нет успешной записи в enrichment_ai:
    * бэкфилл без fanout, сбой до фикса LLM, «LLM not configured», последняя строка — enrich_error.
    * Ключ idempotency отдельный от ingest (`enrich:hot24h:…`), чтобы после настройки Llama повторить обработку.
    */
   private async sweepHotWindowEnrich() {
-    if (process.env.NVD_FANOUT_ENRICH === "false" || process.env.HOT24_AI_SWEEP === "false") return;
+    if (process.env.HOT24_AI_SWEEP === "false") return;
 
     const limit = Math.max(1, Math.min(500, Number(process.env.HOT24_AI_SWEEP_LIMIT ?? 200)));
     const hourBucket = new Date();
@@ -1014,6 +1052,12 @@ export class NvdIngestJob implements OnModuleInit {
            LIMIT 1
          ) latest ON true
         WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '24 hours'
+          AND NOT EXISTS (
+            SELECT 1
+              FROM idempotency_key k
+             WHERE k.scope = 'ai.enrich'
+               AND k.key = ('enrich:hot24h:' || c.cve_id || ':' || $2::text)
+          )
           AND (
             latest.output_text IS NULL
             OR latest.output_text = 'LLM not configured.'
@@ -1022,7 +1066,7 @@ export class NvdIngestJob implements OnModuleInit {
           )
      ORDER BY ${SQL_EFFECTIVE_PUBLISHED_AT} DESC NULLS LAST
         LIMIT $1`,
-      [limit]
+      [limit, bucket]
     );
 
     let n = 0;

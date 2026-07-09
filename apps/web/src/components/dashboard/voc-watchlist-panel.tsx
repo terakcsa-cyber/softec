@@ -38,7 +38,7 @@ export function VocWatchlistPanel({ className }: { className?: string }) {
     staleTime: 30_000
   });
 
-  const rules = watchlistQuery.data ?? [];
+  const rules = useMemo(() => watchlistQuery.data ?? [], [watchlistQuery.data]);
   const activeCount = useMemo(() => rules.filter((r) => r.active).length, [rules]);
 
   const invalidate = () => {

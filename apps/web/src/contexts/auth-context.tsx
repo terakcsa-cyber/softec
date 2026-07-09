@@ -18,7 +18,7 @@ import {
 import { AUTH_BFF_PREFIX } from "@/lib/auth-bff";
 import { refreshSession } from "@/lib/api-fetch";
 
-export type AuthUser = { id: string; email: string; totpEnabled: boolean };
+export type AuthUser = { id: string; email: string; totpEnabled: boolean; role?: string };
 
 type AuthContextValue = {
   user: AuthUser | null;

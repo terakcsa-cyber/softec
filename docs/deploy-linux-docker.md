@@ -129,9 +129,13 @@ docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d
 - `AUTH_ALLOW_REGISTER=false` для production.
 - Даже если `AUTH_ALLOW_REGISTER=true`, production-регистрация дополнительно требует `AUTH_ALLOW_REGISTER_IN_PRODUCTION=true`; держите его `false`.
 - `ALLOW_INTERNAL_API_BEARER=false`; включать только для доверенного service-to-service контура.
+- **`ADMIN_EMAILS`** — список email администраторов (через запятую) для DLQ, digest prepare/send. В production задайте явно.
+- **`DLQ_BOOT_RETRY=false`** в production (ручной retry через API после диагностики).
 - Наружу публикуется только `web`; `api`, `postgres`, `redis`, `rabbitmq` доступны только внутри Docker network.
 - Используйте reverse proxy с TLS перед `web` для реального production-доступа.
 - ASV/Nuclei и Metasploit по умолчанию выключены. Включайте только для разрешённых целей и после оценки риска активного сканирования.
+
+Подробнее: [ADMIN_GUIDE.md](./ADMIN_GUIDE.md), [MATURITY.md](./MATURITY.md).
 
 ## Backup и restore
 
@@ -190,7 +194,9 @@ git pull
 
 ```bash
 pnpm typecheck
+pnpm test
+pnpm lint
 APP_ENV_FILE=../.env.production.example docker compose --env-file .env.production.example -f infra/docker-compose.prod.yml config
 ```
 
-`pnpm lint` сейчас может падать на существующем web lint debt. Это не блокирует этот release-prep, но остаток нужно закрыть отдельным cleanup-проходом.
+`pnpm security:sast` — рекомендуется перед релизом (см. [SECURITY_SAST_FINDINGS.md](./SECURITY_SAST_FINDINGS.md)).

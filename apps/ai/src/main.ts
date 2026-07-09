@@ -6,6 +6,10 @@ import { AppModule } from "./modules/app.module.js";
 async function bootstrap() {
   // Worker-style app: no HTTP listener.
   await NestFactory.createApplicationContext(AppModule, { bufferLogs: true });
+  const { startMetricsServer } = await import("@vuln-intel/shared");
+  if (process.env.METRICS_ENABLED?.trim() !== "false") {
+    startMetricsServer();
+  }
 }
 
 bootstrap().catch((err) => {

@@ -1,16 +1,16 @@
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
-import { v4 as uuidv4 } from "uuid";
 import {
+  buildScoreEventsForCveIds,
   ensureExploitIntelSchema,
   ensureVulncheckKevSchema,
   ingestVulncheckKev,
-  QueueEventType,
-  refreshExploitIntelHot,
-  sha256Hex,
-  stableJsonStringify
+  publishScoreEvents,
+  refreshExploitIntelHot
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
+
+const INGEST_PRODUCER = { service: "ingest", version: "0.0.1" } as const;
 
 /** Стартовый прогон VulnCheck + exploit intel сразу после поднятия ingest. */
 @Injectable()
@@ -54,20 +54,11 @@ export class ThreatIntelBootJob implements OnModuleInit {
   }
 
   private async enqueueScoring(cveIds: string[]) {
-    if (!cveIds.length) return;
-    const nowIso = new Date().toISOString();
-    for (const cveId of cveIds) {
-      const idempotencyKey = await sha256Hex(
-        stableJsonStringify({ t: "vulncheck-kev", cveId, ts: nowIso.slice(0, 10) })
-      );
-      this.queue.publish("vuln.events", "vuln.score.requested.v1", {
-        id: uuidv4(),
-        type: QueueEventType.ScoreCveRequested,
-        ts: nowIso,
-        producer: { service: "ingest", version: "0.0.1" },
-        idempotencyKey: `score:${idempotencyKey}`,
-        payload: { cveId }
-      });
-    }
+    const events = await buildScoreEventsForCveIds(cveIds, {
+      producer: INGEST_PRODUCER,
+      tag: "vulncheck-kev",
+      tsBucket: "day"
+    });
+    publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
   }
 }

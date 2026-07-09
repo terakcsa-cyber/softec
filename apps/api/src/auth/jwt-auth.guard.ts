@@ -4,6 +4,7 @@ import { AuthGuard } from "@nestjs/passport";
 import type { Request } from "express";
 import { IS_PUBLIC_KEY } from "./public.decorator.js";
 import type { AuthUser } from "./jwt.strategy.js";
+import { UserRole } from "@vuln-intel/shared";
 
 @Injectable()
 export class JwtAuthGuard extends AuthGuard("jwt") {
@@ -27,7 +28,8 @@ export class JwtAuthGuard extends AuthGuard("jwt") {
     if (allowInternalBearer && internal && auth === `Bearer ${internal}`) {
       (req as Request & { user: AuthUser }).user = {
         userId: "internal",
-        email: "internal@system"
+        email: "internal@system",
+        role: UserRole.Admin
       };
       return true;
     }

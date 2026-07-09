@@ -10,6 +10,15 @@ import {
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
 
+/** Повтор из DLQ / hot24 / интеграции (EPSS, vulncheck) — не отбрасывать как «уже посчитано». */
+function shouldForceScoreRecompute(idempotencyKey: string): boolean {
+  if (idempotencyKey.includes(":dlq:")) return true;
+  if (idempotencyKey.startsWith("score:hot24h:")) return true;
+  // NVD fanout: score:<hash> без тега — допускаем fresh-skip. Интеграции: score:<tag>:<hash>
+  if (/^score:(epss|epss-boot|vulncheck-kev|hot24-boot|hot24-sweep):/.test(idempotencyKey)) return true;
+  return false;
+}
+
 @Injectable()
 export class ScoringWorker implements OnModuleInit {
   constructor(private readonly db: DbService, private readonly queue: QueueService) {}
@@ -34,6 +43,24 @@ export class ScoringWorker implements OnModuleInit {
 
         const payload = ScoreCveRequestedEventSchema.parse(env.payload);
         const scope = "ai.score";
+
+        const freshHoursRaw = process.env.AI_SCORE_SKIP_FRESH_HOURS;
+        const freshHours =
+          freshHoursRaw === undefined || freshHoursRaw === "" ? 2 : Number(freshHoursRaw);
+        if (freshHours > 0 && !shouldForceScoreRecompute(env.idempotencyKey)) {
+          const existing = await this.db.query<{ computed_at: Date }>(
+            `SELECT computed_at FROM risk_score WHERE cve_id = $1 LIMIT 1`,
+            [payload.cveId]
+          );
+          const computedAt = existing.rows[0]?.computed_at;
+          if (computedAt && !Number.isNaN(computedAt.getTime())) {
+            const ageMs = Date.now() - computedAt.getTime();
+            if (ageMs < freshHours * 60 * 60 * 1000) {
+              this.queue.ack(msg);
+              return;
+            }
+          }
+        }
 
         const inserted = await this.db.query(
           `INSERT INTO idempotency_key(key, scope, expires_at, metadata)

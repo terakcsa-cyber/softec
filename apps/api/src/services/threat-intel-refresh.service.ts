@@ -1,13 +1,11 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
-import { v4 as uuidv4 } from "uuid";
 import {
+  buildScoreEventsForCveIds,
   ensureExploitIntelSchema,
   ensureVulncheckKevSchema,
   ingestVulncheckKev,
-  QueueEventType,
-  refreshExploitIntelHot,
-  stableJsonStringify,
-  sha256Hex
+  publishScoreEvents,
+  refreshExploitIntelHot
 } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
 import { QueueService } from "./queue.service.js";
@@ -112,23 +110,11 @@ export class ThreatIntelRefreshService {
   }
 
   private async enqueueScoring(cveIds: string[]): Promise<number> {
-    if (!cveIds.length) return 0;
-    const nowIso = new Date().toISOString();
-    let n = 0;
-    for (const cveId of cveIds) {
-      const idempotencyKey = await sha256Hex(
-        stableJsonStringify({ t: "vulncheck-kev", cveId, ts: nowIso.slice(0, 10) })
-      );
-      this.queue.publish("vuln.events", "vuln.score.requested.v1", {
-        id: uuidv4(),
-        type: QueueEventType.ScoreCveRequested,
-        ts: nowIso,
-        producer: { service: "api", version: "0.0.1" },
-        idempotencyKey: `score:${idempotencyKey}`,
-        payload: { cveId }
-      });
-      n++;
-    }
-    return n;
+    const events = await buildScoreEventsForCveIds(cveIds, {
+      producer: { service: "api", version: "0.0.1" },
+      tag: "vulncheck-kev",
+      tsBucket: "day"
+    });
+    return publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
   }
 }

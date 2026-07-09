@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE=".env.production"
+COMPOSE_FILE="infra/docker-compose.prod.yml"
+STAGING=0
 ORIGIN=""
 WEB_PORT=""
 FORCE_ENV=0
@@ -34,6 +36,7 @@ Options:
   --admin-email=EMAIL   Bootstrap admin email for fresh install (default: admin@example.com)
   --admin-password=PW   Bootstrap admin password (12+ chars). If omitted, will be prompted.
   --yes, -y             Non-interactive defaults and automatic dependency install
+  --staging             Staging stack (.env.staging + docker-compose.staging.yml)
   --no-auto-install     Do not install missing Docker/Compose packages
   -h, --help            Show this help
 
@@ -49,6 +52,24 @@ die() { printf '[deploy] ERROR: %s\n' "$*" >&2; exit 1; }
 is_tty() { [[ -t 0 && -t 1 ]]; }
 is_linux() { [[ "$(uname -s 2>/dev/null || true)" == "Linux" ]]; }
 
+quote_env_value() {
+  local v="$1"
+  # Empty string is allowed; keep as empty.
+  if [[ -z "$v" ]]; then
+    printf '%s' ""
+    return 0
+  fi
+  # If it contains characters that commonly break dotenv/env_file parsing, wrap in single quotes.
+  # Compose supports quoted values; our Node env loader strips matching quotes.
+  if [[ "$v" =~ [[:space:]] || "$v" == *"#"* || "$v" == *"\""* || "$v" == *"'"* || "$v" == *"\\"* ]]; then
+    # Escape single quotes in single-quoted string: ' -> '\''  (close, escape, reopen)
+    local esc="${v//\'/\'\\\'\'}"
+    printf "'%s'" "$esc"
+    return 0
+  fi
+  printf '%s' "$v"
+}
+
 for arg in "$@"; do
   case "$arg" in
     --origin=*) ORIGIN="${arg#*=}" ;;
@@ -60,6 +81,7 @@ for arg in "$@"; do
     --fresh) DEPLOY_MODE="fresh" ;;
     --update) DEPLOY_MODE="update" ;;
     --keep-data) DEPLOY_MODE="update" ;;
+    --staging) STAGING=1; ENV_FILE=".env.staging"; COMPOSE_FILE="infra/docker-compose.staging.yml" ;;
     --admin-email=*) ADMIN_EMAIL="${arg#*=}" ;;
     --admin-password=*) ADMIN_PASSWORD="${arg#*=}" ;;
     --yes|-y) YES=1 ;;
@@ -467,8 +489,10 @@ create_or_update_env() {
 
   if [[ ! -f "$ENV_FILE" || "$FORCE_ENV" == "1" ]]; then
     log "Creating $ENV_FILE"
+    local init_script="scripts/init-production-env.mjs"
+    [[ "$STAGING" == "1" ]] && init_script="scripts/init-staging-env.mjs"
     if command -v node >/dev/null 2>&1; then
-      node scripts/init-production-env.mjs "${init_args[@]}"
+      node "$init_script" "${init_args[@]}"
     else
       log "Local Node.js not found; using temporary node:20-alpine container."
       "${DOCKER[@]}" run --rm \
@@ -476,7 +500,7 @@ create_or_update_env() {
         -v "$ROOT_DIR:/repo" \
         -w /repo \
         node:20-alpine \
-        node scripts/init-production-env.mjs "${init_args[@]}"
+        node "$init_script" "${init_args[@]}"
     fi
   else
     log "Using existing $ENV_FILE (use --force-env to regenerate)."
@@ -566,7 +590,7 @@ wait_for_web() {
     sleep 2
   done
 
-  warn "Web health check did not pass yet. Check logs with: ${COMPOSE[*]} --env-file $ENV_FILE -f infra/docker-compose.prod.yml logs -f web api"
+  warn "Web health check did not pass yet. Check logs with: ${COMPOSE[*]} --env-file $ENV_FILE -f "$COMPOSE_FILE" logs -f web api"
   return 0
 }
 
@@ -582,7 +606,7 @@ wait_for_bdu_ingest() {
   log "Waiting for BDU registry import (bdu_vuln > 0), up to ~25 minutes..."
   for i in $(seq 1 150); do
     count="$(
-      APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml \
+      APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
         exec -T postgres psql -U "$pg_user" -d "$pg_db" -tAc "SELECT COUNT(*) FROM bdu_vuln" 2>/dev/null \
         | tr -d '[:space:]' || true
     )"
@@ -594,7 +618,7 @@ wait_for_bdu_ingest() {
   done
 
   warn "BDU registry is still empty. Check ingest logs:"
-  warn "  ${COMPOSE[*]} --env-file $ENV_FILE -f infra/docker-compose.prod.yml logs --tail=80 ingest"
+  warn "  ${COMPOSE[*]} --env-file $ENV_FILE -f "$COMPOSE_FILE" logs --tail=80 ingest"
   warn "If TLS to bdu.fstec.ru fails, set BDU_TLS_INSECURE=1 and ensure BDU_ALLOW_MIRROR_FALLBACK=true in $ENV_FILE"
   warn "Manual one-shot: pnpm bdu:sync"
   return 0
@@ -606,18 +630,18 @@ dump_compose_diagnostics() {
 
   echo
   echo "===== docker compose ps ====="
-  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml ps -a || true
+  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" ps -a || true
 
   echo
   echo "===== api logs ====="
-  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml logs --tail=200 api || true
+  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs --tail=200 api || true
 
   echo
   echo "===== dependencies logs ====="
-  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml logs --tail=120 postgres rabbitmq redis || true
+  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" logs --tail=120 postgres rabbitmq redis || true
 }
 
-log "Starting production deploy from $ROOT_DIR"
+log "Starting ${STAGING:+staging }deploy from $ROOT_DIR"
 ensure_docker_cli
 ensure_docker_daemon
 ensure_compose
@@ -630,8 +654,8 @@ normalize_env_file
 prompt_admin_bootstrap
 if [[ "$KEEP_DATA" != "1" || "$FORCE_ENV" == "1" ]]; then
   # fresh install or env regeneration: write bootstrap creds
-  write_env_value AUTH_BOOTSTRAP_EMAIL "$ADMIN_EMAIL" "$ENV_FILE"
-  write_env_value AUTH_BOOTSTRAP_PASSWORD "$ADMIN_PASSWORD" "$ENV_FILE"
+  write_env_value AUTH_BOOTSTRAP_EMAIL "$(quote_env_value "$ADMIN_EMAIL")" "$ENV_FILE"
+  write_env_value AUTH_BOOTSTRAP_PASSWORD "$(quote_env_value "$ADMIN_PASSWORD")" "$ENV_FILE"
 fi
 validate_env_file
 
@@ -647,17 +671,17 @@ else
 fi
 
 log "Validating compose config"
-APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml config >/dev/null
+APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config >/dev/null
 
 if [[ "$KEEP_DATA" != "1" ]]; then
   log "Fresh install: stopping stack and deleting volumes (use --keep-data to preserve DB)."
-  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml down -v --remove-orphans >/dev/null 2>&1 || true
+  APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
 fi
 
 log "Starting production stack"
 up_args=( "up" "-d" )
 if [[ "$NO_BUILD" != "1" ]]; then up_args+=( "--build" ); fi
-if ! APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f infra/docker-compose.prod.yml "${up_args[@]}"; then
+if ! APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "${up_args[@]}"; then
   dump_compose_diagnostics "$app_env_file"
   die "Production stack failed. See diagnostics above."
 fi
@@ -668,10 +692,45 @@ public_origin="$(read_env_value PUBLIC_WEB_ORIGIN "$ENV_FILE" || true)"
 public_origin="${public_origin:-http://127.0.0.1:${published_port}}"
 
 wait_for_web "$published_port"
-wait_for_bdu_ingest "$app_env_file"
+if [[ "$STAGING" == "1" ]]; then
+  log "Staging: skip long BDU ingest wait (enable BDU_INGEST_ENABLED in $ENV_FILE if needed)"
+else
+  wait_for_bdu_ingest "$app_env_file"
+fi
+
+run_post_deploy_smoke() {
+  local port="$1"
+  log "Running post-deploy smoke (web + internal API)..."
+
+  if ! APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
+    exec -T api node -e "fetch('http://127.0.0.1:4001/api/health').then(r=>r.json()).then(j=>{if(!j.ok)process.exit(1)}).catch(()=>process.exit(1))" \
+    >/dev/null 2>&1; then
+    warn "API internal health check failed (api container)"
+    return 1
+  fi
+  log "ok api internal /health"
+
+  if ! SMOKE_WEB_URL="http://127.0.0.1:${port}" SMOKE_API_SKIP=1 node "$ROOT_DIR/scripts/post-deploy-smoke.mjs"; then
+    warn "Web post-deploy smoke failed"
+    return 1
+  fi
+  return 0
+}
+
+if ! run_post_deploy_smoke "$published_port"; then
+  warn "Post-deploy smoke reported issues. Stack is up; inspect logs if needed."
+fi
+
+if [[ "$STAGING" == "1" && "${SKIP_CHAOS_SMOKE:-0}" != "1" ]]; then
+  log "Staging chaos: restart services and verify health..."
+  if ! SMOKE_WEB_URL="http://127.0.0.1:${published_port}" ENV_FILE="$ENV_FILE" COMPOSE_FILE="$COMPOSE_FILE" \
+    node "$ROOT_DIR/scripts/chaos-restart-smoke.mjs"; then
+    warn "Chaos restart smoke failed (stack may still be usable)"
+  fi
+fi
 
 echo
 log "Done."
 log "Web: $public_origin"
 log "Local health: http://127.0.0.1:${published_port}/health"
-log "Logs: ${COMPOSE[*]} --env-file $ENV_FILE -f infra/docker-compose.prod.yml logs -f api web ingest ai"
+log "Logs: ${COMPOSE[*]} --env-file $ENV_FILE -f "$COMPOSE_FILE" logs -f api web ingest ai"

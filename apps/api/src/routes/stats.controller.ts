@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { Controller, Get, Logger, Post, Query } from "@nestjs/common";
-import { llmEndpointRequiresApiKey, parseBduVendorProductPairs } from "@vuln-intel/shared";
+import { Controller, ForbiddenException, Get, Logger, Post, Query } from "@nestjs/common";
+import { Throttle } from "@nestjs/throttler";
+import {
+  UserRole,
+  isAdminUser,
+  llmEndpointRequiresApiKey,
+  parseBduVendorProductPairs,
+  parseUserRole,
+  QueueEventType
+} from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
 import { sqlBduFstecAttentionWithinHours } from "@vuln-intel/shared";
@@ -8,7 +16,11 @@ import { IntegrationSettingsService } from "../services/integration-settings.ser
 import { ThreatFeedService } from "../services/threat-feed.service.js";
 import { ThreatDigestPdfService } from "../services/threat-digest-pdf.service.js";
 import { ThreatIntelRefreshService } from "../services/threat-intel-refresh.service.js";
+import { ReconciliationService } from "../services/reconciliation.service.js";
 import { TelegramPostService } from "../services/telegram-post.service.js";
+import { CurrentUser } from "../auth/current-user.decorator.js";
+import { Roles } from "../auth/roles.decorator.js";
+import type { AuthUser } from "../auth/jwt.strategy.js";
 
 type VendorAgg = { vendor: string; count: number };
 type ProductAgg = { vendor: string; product: string; count: number };
@@ -138,8 +150,22 @@ export class StatsController {
     private readonly threatFeedSvc: ThreatFeedService,
     private readonly threatDigestPdf: ThreatDigestPdfService,
     private readonly threatIntelRefresh: ThreatIntelRefreshService,
+    private readonly reconciliation: ReconciliationService,
     private readonly telegram: TelegramPostService
   ) {}
+
+  private isAdmin(user: AuthUser): boolean {
+    return isAdminUser({
+      userId: user.userId,
+      email: user.email,
+      role: user.role,
+      adminEmailsEnv: process.env.ADMIN_EMAILS
+    });
+  }
+
+  private requireAdmin(user: AuthUser) {
+    if (!this.isAdmin(user)) throw new ForbiddenException("admin only");
+  }
 
   @Get("summary")
   async summary() {
@@ -322,6 +348,7 @@ export class StatsController {
   }
 
   /** Синхронизация VulnCheck + пересчёт exploit intel (старт TI / ручной refresh). */
+  @Roles(UserRole.Admin)
   @Post("threat-feed/refresh")
   async threatFeedRefresh(@Query("force") forceRaw?: string) {
     const force = forceRaw === "1" || forceRaw === "true";
@@ -379,8 +406,11 @@ export class StatsController {
   }
 
   /** Отправить threat digest в Telegram. */
+  @Roles(UserRole.Admin)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @Post("threat-digest/telegram")
-  async threatDigestTelegram() {
+  async threatDigestTelegram(@CurrentUser() user: AuthUser) {
+    this.requireAdmin(user);
     const payload = await this.threatFeedSvc.collectDailyDigestPayload(20);
     const messages = await this.threatFeedSvc.buildDailyDigestMessages(20);
     const sent = await this.telegram.sendTelegramMessages(messages, { parseMode: "HTML" });
@@ -401,6 +431,8 @@ export class StatsController {
         `INSERT INTO audit_log (actor_type, action, metadata) VALUES ('user', 'telegram.threat_digest', $1::jsonb)`,
         [
           JSON.stringify({
+            actorUserId: user.userId,
+            actorEmail: user.email,
             ok: sent.ok && pdfSent.ok,
             parts: sent.sent,
             messageIds: sent.messageIds,
@@ -422,6 +454,154 @@ export class StatsController {
       messageIds: sent.messageIds,
       pdf: pdfSent,
       pdfFilename: pdf.filename
+    };
+  }
+
+  /**
+   * Подготовить дайджест: запустить LLM-обогащение CVE, которые попадут в суточный отчёт.
+   * UI может показать прогресс и дождаться готовности перед отправкой PDF в Telegram.
+   */
+  @Roles(UserRole.Admin)
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Post("threat-digest/prepare")
+  async threatDigestPrepare(
+    @CurrentUser() user: AuthUser,
+    @Query("hotLimit") hotLimitRaw?: string,
+    @Query("windowHours") windowHoursRaw?: string
+  ) {
+    this.requireAdmin(user);
+    // hotLimit — сколько hot CVE включить; windowHours зарезервирован (дайджест SQL = 24h).
+    void windowHoursRaw;
+    const hotLimit = Math.max(1, Math.min(100, Number(hotLimitRaw ?? 20)));
+    const payload = await this.threatFeedSvc.collectDailyDigestPayload(hotLimit);
+    const jobId = randomUUID();
+    const cveIds = (payload.hotCves ?? []).map((c) => c.cve_id).filter(Boolean);
+    const nowIso = new Date().toISOString();
+
+    if (!cveIds.length) {
+      return { ok: true, jobId, hotLimit, total: 0, enqueued: 0 };
+    }
+
+    // Determine which CVEs already have a successful enrichment.
+    const readyRows = await this.db.query<{ cve_id: string; ai_ready: boolean; raw: unknown; source: string }>(
+      `SELECT c.cve_id,
+              EXISTS (
+                SELECT 1 FROM enrichment_ai ea
+                 WHERE ea.cve_id = c.cve_id
+                   AND (ea.output_json->>'_enrich_error') IS DISTINCT FROM 'true'
+                   AND NOT (
+                     COALESCE(ea.output_text, '') = 'LLM not configured.'
+                     OR COALESCE(ea.output_json->>'summary', '') LIKE 'LLM not configured%'
+                   )
+              ) AS ai_ready,
+              c.raw,
+              c.source
+         FROM cve c
+        WHERE c.cve_id = ANY($1::text[])`,
+      [cveIds]
+    );
+    const ready = new Set(readyRows.rows.filter((r) => r.ai_ready).map((r) => r.cve_id));
+
+    let enqueued = 0;
+    const dayBucket = nowIso.slice(0, 10);
+    for (const row of readyRows.rows) {
+      if (ready.has(row.cve_id)) continue;
+      const idempotencyKey = `enrich:digest:${row.cve_id}:${dayBucket}`;
+      const raw =
+        row.raw != null && typeof row.raw === "object" && !Array.isArray(row.raw)
+          ? (row.raw as Record<string, unknown>)
+          : {};
+      await this.queue.publish(
+        "vuln.events",
+        "vuln.enrich.requested.v1",
+        {
+          id: randomUUID(),
+          type: QueueEventType.EnrichCveRequested,
+          ts: nowIso,
+          producer: { service: "api", version: "0.0.1" },
+          idempotencyKey,
+          payload: { cveId: row.cve_id, source: row.source ?? "other", raw }
+        },
+        { priority: 9 }
+      );
+      enqueued += 1;
+    }
+
+    try {
+      await this.db.query(
+        `INSERT INTO audit_log (actor_type, action, metadata) VALUES ('user', 'threat_digest.prepare', $1::jsonb)`,
+        [
+          JSON.stringify({
+            actorUserId: user.userId,
+            actorEmail: user.email,
+            jobId,
+            hotLimit,
+            total: cveIds.length,
+            enqueued,
+            cveIds,
+            ts: nowIso
+          })
+        ]
+      );
+    } catch {
+      // ignore audit failures
+    }
+
+    return {
+      ok: true,
+      jobId,
+      hotLimit,
+      total: cveIds.length,
+      enqueued
+    };
+  }
+
+  @Get("threat-digest/prepare/status")
+  async threatDigestPrepareStatus(@CurrentUser() user: AuthUser, @Query("jobId") jobIdRaw?: string) {
+    const jobId = String(jobIdRaw ?? "").trim();
+    if (!jobId) return { ok: false, error: "jobId required" };
+
+    const job = await this.db.query<{ ts: Date; metadata: any }>(
+      `SELECT ts, metadata
+         FROM audit_log
+        WHERE action = 'threat_digest.prepare'
+          AND metadata->>'jobId' = $1
+     ORDER BY ts DESC
+        LIMIT 1`,
+      [jobId]
+    );
+    const meta = job.rows[0]?.metadata ?? null;
+    if (meta?.actorUserId && String(meta.actorUserId) !== String(user.userId) && !this.isAdmin(user)) {
+      throw new ForbiddenException("Not your job");
+    }
+    const cveIds = Array.isArray(meta?.cveIds) ? (meta.cveIds as string[]).map(String) : [];
+    const total = Number(meta?.total ?? cveIds.length ?? 0);
+    if (!cveIds.length) return { ok: true, jobId, total, done: 0, pending: 0, completed: true };
+
+    const doneR = await this.db.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n
+         FROM cve c
+        WHERE c.cve_id = ANY($1::text[])
+          AND EXISTS (
+            SELECT 1 FROM enrichment_ai ea
+             WHERE ea.cve_id = c.cve_id
+               AND (ea.output_json->>'_enrich_error') IS DISTINCT FROM 'true'
+               AND NOT (
+                 COALESCE(ea.output_text, '') = 'LLM not configured.'
+                 OR COALESCE(ea.output_json->>'summary', '') LIKE 'LLM not configured%'
+               )
+          )`,
+      [cveIds]
+    );
+    const done = Number(doneR.rows[0]?.n ?? "0");
+    const pending = Math.max(0, total - done);
+    return {
+      ok: true,
+      jobId,
+      total,
+      done,
+      pending,
+      completed: pending === 0
     };
   }
 
@@ -527,6 +707,11 @@ export class StatsController {
     };
   }
 
+  @Get("reconciliation")
+  async reconciliationStatus() {
+    return this.reconciliation.reconcile();
+  }
+
   @Get("queue")
   async queueHealth() {
     try {
@@ -573,7 +758,11 @@ export class StatsController {
 
         const started = Date.now();
         const ac = new AbortController();
-        const timeoutMs = Math.max(800, Math.min(10_000, Number(process.env.LLM_HEALTH_TIMEOUT_MS ?? 2500)));
+        const defaultTimeoutMs = 12_000;
+        const timeoutMs = Math.max(
+          800,
+          Math.min(30_000, Number(process.env.LLM_HEALTH_TIMEOUT_MS ?? defaultTimeoutMs))
+        );
         const t = setTimeout(() => ac.abort(), timeoutMs);
         try {
           const headers: Record<string, string> = { accept: "application/json" };
@@ -581,7 +770,8 @@ export class StatsController {
 
           // For OpenAI-compatible chat endpoints, do a tiny POST. A plain GET often returns 404 (Gemini, OpenAI).
           const isChatCompletions = /\/chat\/completions\/?$/i.test(endpoint);
-          const isOllama = endpoint.includes("127.0.0.1:11434") || endpoint.includes("localhost:11434");
+          // Ollama is commonly hosted on :11434 (localhost or LAN). Prefer a cheap GET to root.
+          const isOllama = /(^|\/\/)[^/]+:11434(\/|$)/.test(endpoint);
 
           const res = isChatCompletions && model && !isOllama
             ? await fetch(endpoint, {
@@ -664,8 +854,10 @@ export class StatsController {
     }
   }
 
+  @Roles(UserRole.Admin)
   @Get("dlq/sample")
-  async dlqSample(@Query("queue") queueRaw?: string, @Query("limit") limitRaw?: string) {
+  async dlqSample(@CurrentUser() user: AuthUser, @Query("queue") queueRaw?: string, @Query("limit") limitRaw?: string) {
+    this.requireAdmin(user);
     const queue = String(queueRaw ?? "");
     if (queue !== "dlq.ai.enrich" && queue !== "dlq.ai.score") {
       return { ok: false, error: "Invalid queue (expected dlq.ai.enrich or dlq.ai.score)" };
@@ -679,8 +871,11 @@ export class StatsController {
     }
   }
 
+  @Roles(UserRole.Admin)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post("dlq/clear")
-  async dlqClear(@Query("queue") queueRaw?: string, @Query("limit") limitRaw?: string) {
+  async dlqClear(@CurrentUser() user: AuthUser, @Query("queue") queueRaw?: string, @Query("limit") limitRaw?: string) {
+    this.requireAdmin(user);
     const queue = String(queueRaw ?? "");
     if (queue !== "dlq.ai.enrich" && queue !== "dlq.ai.score") {
       return { ok: false, error: "Invalid queue (expected dlq.ai.enrich or dlq.ai.score)" };
@@ -694,8 +889,11 @@ export class StatsController {
     }
   }
 
+  @Roles(UserRole.Admin)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post("dlq/retry")
-  async dlqRetry(@Query("queue") queueRaw?: string, @Query("limit") limitRaw?: string) {
+  async dlqRetry(@CurrentUser() user: AuthUser, @Query("queue") queueRaw?: string, @Query("limit") limitRaw?: string) {
+    this.requireAdmin(user);
     const queue = String(queueRaw ?? "");
     if (queue !== "dlq.ai.enrich" && queue !== "dlq.ai.score") {
       return { ok: false, error: "Invalid queue (expected dlq.ai.enrich or dlq.ai.score)" };

@@ -578,25 +578,38 @@ export class ThreatDigestPdfService {
 
       // Sources
       const sources = (row.sources ?? []).slice(0, 4);
-      doc.fillColor(COLORS.ink).font("sans-bold").fontSize(9).text("Источники/рефы:", 60, headY + 98);
+      const colGap = 14;
+      const colLeftX = 60;
+      const colRightX = Math.floor(doc.page.width / 2) + colGap;
+      const colW = Math.floor(doc.page.width / 2) - 48 - colGap;
+
+      doc
+        .fillColor(COLORS.ink)
+        .font("sans-bold")
+        .fontSize(9)
+        .text("Источники/рефы:", colLeftX, headY + 98, { width: colW });
       let sy = headY + 112;
       doc.fillColor(COLORS.muted).font("sans").fontSize(7.5);
       if (!sources.length) {
-        doc.text("—", 60, sy);
+        doc.text("—", colLeftX, sy, { width: colW });
         sy += 12;
       } else {
         for (const s of sources) {
           const label = signalLabelRu(s.signal_type);
           const title = (s.title ?? "").trim();
           const base = title ? `${label}: ${title}` : `${label}: ${s.source}`;
-          doc.text(`• ${base}`, 66, sy, { width: doc.page.width - 150, ellipsis: true });
+          doc.text(`• ${base}`, colLeftX + 6, sy, { width: colW - 6, ellipsis: true });
           sy += 11;
         }
       }
 
       // Actions
       const actions = (row.remediation ?? row.next_steps ?? []).slice(0, 3);
-      doc.fillColor(COLORS.ink).font("sans-bold").fontSize(9).text("Что делать:", 60, headY + 98);
+      doc
+        .fillColor(COLORS.ink)
+        .font("sans-bold")
+        .fontSize(9)
+        .text("Что делать:", colRightX, headY + 98, { width: colW });
       let ay = headY + 112;
       doc.fillColor(COLORS.muted).font("sans").fontSize(7.5);
       if (!actions.length) {
@@ -606,12 +619,12 @@ export class ThreatDigestPdfService {
           "Проверить IoC/логи на попытки эксплуатации по публичным рефам."
         ];
         for (const g of generic) {
-          doc.text(`• ${g}`, doc.page.width / 2 + 10, ay, { width: doc.page.width / 2 - 70, ellipsis: true });
+          doc.text(`• ${g}`, colRightX, ay, { width: colW, ellipsis: true });
           ay += 11;
         }
       } else {
         for (const a of actions) {
-          doc.text(`• ${a}`, doc.page.width / 2 + 10, ay, { width: doc.page.width / 2 - 70, ellipsis: true });
+          doc.text(`• ${a}`, colRightX, ay, { width: colW, ellipsis: true });
           ay += 11;
         }
       }

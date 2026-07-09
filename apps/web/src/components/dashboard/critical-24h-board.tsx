@@ -143,6 +143,13 @@ export function Critical24hBoard({
     return { total: arr.length, kev, highEpss, criticalCvss };
   }, [items]);
 
+  const list = useMemo(() => items ?? [], [items]);
+  const filtered = useMemo(() => {
+    const base = filterByCategory(list, cat);
+    return sortByCategory(base, cat);
+  }, [list, cat]);
+  const tone = categoryTone(cat);
+
   if (loading) {
     return (
       <div className="space-y-4">
@@ -159,13 +166,6 @@ export function Critical24hBoard({
       </div>
     );
   }
-
-  const list = items ?? [];
-  const filtered = useMemo(() => {
-    const base = filterByCategory(list, cat);
-    return sortByCategory(base, cat);
-  }, [list, cat]);
-  const tone = categoryTone(cat);
 
   return (
     <div className="space-y-4">

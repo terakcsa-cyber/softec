@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
 import { LiveNumber } from "../ui/live-number";
 import { useLiveQueryOptions } from "@/lib/live-refresh";
@@ -71,7 +71,6 @@ export function VocHomePanel({
   onOpenBdu?: (bduId: string) => void;
   onOpenTgLink?: (link: string) => void;
 }) {
-  const queryClient = useQueryClient();
   const { userEmail, mergeItems, setStatus, pendingKey, error, clearError } = useVocQueueTriage();
   const [sourceTab, setSourceTab] = useState<SourceTab>("all");
   const [statusTab, setStatusTab] = useState<StatusTab>("active");
