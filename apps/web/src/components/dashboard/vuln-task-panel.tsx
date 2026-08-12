@@ -101,7 +101,7 @@ function BoardColumn({
     <div
       ref={setNodeRef}
       className={cn(
-        "flex w-[300px] shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-slate-50/80 dark:bg-white/[0.03]",
+        "flex w-[304px] shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-slate-50/70 dark:bg-white/[0.025]",
         "max-h-[min(680px,calc(100vh-260px))] border-t-[3px]",
         tint,
         isOver ? "ring-2 ring-accent/30" : "",
@@ -840,7 +840,7 @@ export function VulnTaskPanel({
           <div
             key={col.key}
             className={cn(
-              "flex w-[300px] shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-slate-50/80 dark:bg-white/[0.03]",
+              "flex w-[304px] shrink-0 flex-col overflow-hidden rounded-lg border border-border bg-slate-50/70 dark:bg-white/[0.025]",
               "max-h-[min(680px,calc(100vh-260px))] border-t-[3px]",
               statusMeta(col.key).colTint
             )}
