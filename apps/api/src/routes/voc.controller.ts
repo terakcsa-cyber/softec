@@ -111,6 +111,13 @@ export class VocController {
     });
   }
 
+  @Post("cases/backfill-tasks")
+  async backfillCaseTasks(@Query("limit") limitRaw?: string) {
+    return this.vocCases.backfillMissingTasks({
+      limit: limitRaw ? Number(limitRaw) : undefined
+    });
+  }
+
   @Post("cases/from-ref")
   async createCaseFromRef(
     @CurrentUser() user: AuthUser,

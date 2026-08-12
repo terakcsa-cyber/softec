@@ -5,7 +5,7 @@ import { AlertTriangle, Briefcase, Clock, Loader2, UserRound } from "lucide-reac
 import * as Dialog from "@radix-ui/react-dialog";
 import { useState } from "react";
 import { cn } from "../ui/cn";
-import { fetchVocCases, patchVocCase, type VocCaseRow } from "@/lib/voc-case-api";
+import { fetchVocCases, patchVocCase, backfillVocCaseTasks, type VocCaseRow } from "@/lib/voc-case-api";
 import { useLiveQueryOptions } from "@/lib/live-refresh";
 import { isSlaBreached, slaRemainingLabel, slaTone, vocCaseStatusLabel } from "@/lib/voc-case-client";
 import { vocPriorityLabel } from "@/lib/voc-labels";
@@ -24,7 +24,7 @@ export function VocCasesPanel({
   const liveOpts = useLiveQueryOptions();
   const casesQuery = useQuery({
     queryKey: ["voc", "cases", "active"],
-    queryFn: () => fetchVocCases({ status: "active", limit: 40 }),
+    queryFn: () => fetchVocCases({ status: "active", limit: 80 }),
     ...liveOpts
   });
 
@@ -37,8 +37,18 @@ export function VocCasesPanel({
     }
   });
 
+  const backfillMut = useMutation({
+    mutationFn: () => backfillVocCaseTasks(200),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["voc", "cases"] });
+      void queryClient.invalidateQueries({ queryKey: ["voc", "queue"] });
+      void queryClient.invalidateQueries({ queryKey: ["vuln-tasks"] });
+    }
+  });
+
   const cases = casesQuery.data ?? [];
   const breached = cases.filter((c) => isSlaBreached(c.slaDueAt)).length;
+  const missingTasks = cases.filter((c) => !c.taskId).length;
   const [resolveCaseId, setResolveCaseId] = useState<string | null>(null);
 
   return (
@@ -48,16 +58,40 @@ export function VocCasesPanel({
           <Briefcase className="h-4 w-4 text-violet-500" />
           Кейсы смены
         </div>
-        <div className="flex items-center gap-2 text-[10px] text-muted">
-          <span className="tabular-nums">{cases.length} активных</span>
-          {breached > 0 ? (
-            <span className="inline-flex items-center gap-0.5 rounded-full border border-danger/35 bg-danger/10 px-2 py-0.5 text-danger">
-              <AlertTriangle className="h-3 w-3" />
-              {breached} SLA
-            </span>
+        <div className="flex flex-wrap items-center gap-2">
+          {missingTasks > 0 ? (
+            <button
+              type="button"
+              disabled={backfillMut.isPending}
+              onClick={() => backfillMut.mutate()}
+              className="inline-flex items-center gap-1 rounded-lg border border-amber-400/50 bg-amber-500/15 px-2 py-1 text-[10px] font-medium text-amber-900 dark:text-amber-200"
+            >
+              {backfillMut.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+              Догнать задачи ({missingTasks})
+            </button>
           ) : null}
+          <div className="flex items-center gap-2 text-[10px] text-muted">
+            <span className="tabular-nums">{cases.length} активных</span>
+            {breached > 0 ? (
+              <span className="inline-flex items-center gap-0.5 rounded-full border border-danger/35 bg-danger/10 px-2 py-0.5 text-danger">
+                <AlertTriangle className="h-3 w-3" />
+                {breached} SLA
+              </span>
+            ) : null}
+          </div>
         </div>
       </div>
+      {backfillMut.isSuccess ? (
+        <p className="mt-1 text-[10px] text-emerald-700 dark:text-emerald-300">
+          Догон: создано {backfillMut.data.created} из {backfillMut.data.scanned}
+          {backfillMut.data.failed ? ` · ошибок ${backfillMut.data.failed}` : ""}
+        </p>
+      ) : null}
+      {backfillMut.isError ? (
+        <p className="mt-1 text-[10px] text-danger">
+          {backfillMut.error instanceof Error ? backfillMut.error.message : "Ошибка догона задач"}
+        </p>
+      ) : null}
       <p className="mt-1 text-[11px] leading-relaxed text-muted">
         Дедуп по CVE/БДУ: повторные сигналы попадают в тот же кейс. SLA: P1 4ч · P2 24ч · P3 72ч · P4 7д.
       </p>

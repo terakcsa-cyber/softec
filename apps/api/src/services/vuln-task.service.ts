@@ -585,29 +585,34 @@ export class VulnTaskService {
       bduName: input.bduName,
       tgChannel: input.tgChannel
     };
-    const textEngine = await this.integration.getTextEngineSettings();
-    let brief;
-    try {
-      brief =
-        textEngine.textEngine === "llm"
-          ? await runVocTaskBriefLlm(briefInput, await this.integration.getEffectiveLlmConfig())
-          : buildVocTaskBriefFallback(briefInput);
-    } catch (e) {
-      // Never block task creation on LLM/transport failures.
-      brief = buildVocTaskBriefFallback(briefInput);
-      brief.notesMd =
-        `${brief.notesMd}\n\n> AI brief unavailable: ${e instanceof Error ? e.message : String(e)}`.slice(
-          0,
-          20_000
-        );
+    // Default: sync fallback brief so VOC→task never waits on LLM (timeouts left orphan cases).
+    // Opt-in: VOC_TASK_BRIEF_LLM=true
+    let brief = buildVocTaskBriefFallback(briefInput);
+    if (process.env.VOC_TASK_BRIEF_LLM === "true") {
+      try {
+        const textEngine = await this.integration.getTextEngineSettings();
+        if (textEngine.textEngine === "llm") {
+          brief = await Promise.race([
+            runVocTaskBriefLlm(briefInput, await this.integration.getEffectiveLlmConfig()),
+            new Promise<never>((_, rej) =>
+              setTimeout(() => rej(new Error("VOC task brief LLM timeout")), 8_000)
+            )
+          ]);
+        }
+      } catch {
+        brief = buildVocTaskBriefFallback(briefInput);
+      }
     }
     const taskTitle = brief.taskTitle?.trim() || `VOC: ${input.title}`;
+    const priorityLocal = input.priorityLocal ?? "medium";
+    const scoreFloor =
+      priorityLocal === "critical" ? 80 : priorityLocal === "high" ? 65 : priorityLocal === "medium" ? 40 : 20;
 
     const r = await this.db.query<{ id: string }>(
       `INSERT INTO vuln_task (
          title, status, vendor_key, vendor_display, product_key_norm, product_display,
-         owner, due_date, priority_local, notes_md, evidence
-       ) VALUES ($1,'new',$2,$3,$4,$5,NULL,$6,$7,$8,$9)
+         owner, due_date, priority_local, notes_md, evidence, score_raw, score_final, score_reasons
+       ) VALUES ($1,'new',$2,$3,$4,$5,NULL,$6,$7,$8,$9,$10,$10,$11::jsonb)
        RETURNING id`,
       [
         taskTitle,
@@ -616,9 +621,11 @@ export class VulnTaskService {
         productKeyNorm,
         productDisplay,
         input.dueDate ? new Date(input.dueDate) : null,
-        input.priorityLocal ?? "medium",
+        priorityLocal,
         brief.notesMd,
-        brief.evidence
+        brief.evidence,
+        scoreFloor,
+        JSON.stringify([{ k: "vocPriorityFloor", v: scoreFloor, p: input.vocPriority }])
       ]
     );
     const id = r.rows[0]!.id;
@@ -650,6 +657,15 @@ export class VulnTaskService {
     );
 
     await this.recomputeTask(id);
+    // Keep VOC priority floor visible even when CVE signals are weak/absent.
+    await this.db.query(
+      `UPDATE vuln_task
+          SET score_raw = GREATEST(score_raw, $2),
+              score_final = GREATEST(score_final, $2),
+              updated_at = now()
+        WHERE id = $1`,
+      [id, scoreFloor]
+    );
     return { ok: true, id, aiGenerated: brief.aiGenerated };
   }
 

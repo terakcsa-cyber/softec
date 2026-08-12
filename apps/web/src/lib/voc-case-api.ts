@@ -103,6 +103,24 @@ export async function createVocCaseFromRef(body: {
   return (await res.json()) as { ok: boolean; deduped: boolean; taskId?: string | null; case: VocCaseRow };
 }
 
+export async function backfillVocCaseTasks(limit = 200): Promise<{
+  scanned: number;
+  created: number;
+  failed: number;
+  errors: string[];
+}> {
+  const url = new URL("/api/voc/cases/backfill-tasks", window.location.origin);
+  url.searchParams.set("limit", String(limit));
+  const res = await apiFetch(url.toString(), { method: "POST", cache: "no-store" });
+  if (!res.ok) throw new Error(await readApiError(res, "Не удалось догнать задачи"));
+  return (await res.json()) as {
+    scanned: number;
+    created: number;
+    failed: number;
+    errors: string[];
+  };
+}
+
 export async function patchVocCase(
   caseId: string,
   body: {

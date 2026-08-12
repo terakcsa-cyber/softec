@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "framer-motion";
 import { LiveNumber } from "../ui/live-number";
 import { useLiveQueryOptions } from "@/lib/live-refresh";
@@ -87,6 +87,7 @@ export function VocHomePanel({
 
   const liveOpts = useLiveQueryOptions();
   const tgLiveOpts = useLiveQueryOptions(60_000);
+  const queryClient = useQueryClient();
 
   const queueQuery = useQuery({
     queryKey: ["voc", "queue", sourceTab === "tg" ? "all" : sourceTab, statusTab],
@@ -302,13 +303,14 @@ export function VocHomePanel({
             : undefined
       });
       if (!created.taskId && !created.case?.taskId) {
-        setCaseError("Кейс создан, но задача не появилась — нажмите «Создать задачу» ещё раз");
+        setCaseError("Кейс есть, задача не создалась — нажмите «Создать задачу» или «Догнать задачи»");
       }
       if (item.status === "open") {
         await setStatus(item, "claimed");
       }
       void casesQuery.refetch();
       void queueQuery.refetch();
+      void queryClient.invalidateQueries({ queryKey: ["vuln-tasks"] });
     } catch (e) {
       setCaseError(e instanceof Error ? e.message : "Не удалось создать кейс");
     } finally {
@@ -742,11 +744,14 @@ export function VocHomePanel({
                 {selected.status === "open" ? (
                   <button
                     type="button"
-                    disabled={pendingKey === selected.refKey}
-                    onClick={() => setStatus(selected, "claimed")}
+                    disabled={casePending || pendingKey === selected.refKey}
+                    onClick={() => {
+                      if (!selected.caseId) void handleCreateCase(selected);
+                      else void setStatus(selected, "claimed");
+                    }}
                     className="rounded-xl border border-indigo-400/40 bg-indigo-500/15 px-3 py-2 text-[11px] font-medium"
                   >
-                    Взять в работу
+                    {selected.caseId ? "Взять в работу" : "В работу + кейс/задача"}
                   </button>
                 ) : null}
                 {selected.status === "claimed" &&

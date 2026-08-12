@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleInit } from "@nestjs/common";
 import {
   computeSlaDueAt,
   VOC_OUTCOMES,
@@ -61,7 +61,7 @@ type CaseRefHit = {
 };
 
 @Injectable()
-export class VocCaseService {
+export class VocCaseService implements OnModuleInit {
   private readonly logger = new Logger(VocCaseService.name);
 
   constructor(
@@ -70,6 +70,24 @@ export class VocCaseService {
     private readonly integration: IntegrationSettingsService,
     private readonly vocShift: VocShiftService
   ) {}
+
+  onModuleInit() {
+    if (process.env.VOC_TASK_BACKFILL === "false") return;
+    const delayMs = Math.max(5_000, Number(process.env.VOC_TASK_BACKFILL_ON_START_MS ?? 45_000));
+    setTimeout(() => {
+      void this.backfillMissingTasks({ limit: Number(process.env.VOC_TASK_BACKFILL_LIMIT ?? 200) })
+        .then((r) => {
+          if (r.created > 0 || r.failed > 0) {
+            this.logger.log(
+              `orphan task backfill scanned=${r.scanned} created=${r.created} failed=${r.failed}`
+            );
+          }
+        })
+        .catch((e) =>
+          this.logger.warn(`orphan task backfill failed: ${e instanceof Error ? e.message : String(e)}`)
+        );
+    }, delayMs);
+  }
 
   async listCases(opts?: { status?: string; limit?: number }): Promise<VocCaseRow[]> {
     const limit = Math.max(1, Math.min(200, opts?.limit ?? 80));
@@ -317,27 +335,33 @@ export class VocCaseService {
         [caseId, refKey, source, refId]
       );
       await this.db.query(`UPDATE voc_case SET updated_at = now() WHERE id = $1`, [caseId]);
-      const taskId =
-        input.createTask === false
-          ? null
-          : await this.ensureTaskForCase(caseId, {
-              refKey,
-              source,
-              refId,
-              title,
-              subtitle: input.subtitle,
-              vocPriority,
-              vocReasons: input.vocReasons,
-              linkedCveIds,
-              vendorKey: input.vendorKey,
-              vendorDisplay: input.vendorDisplay,
-              productKeyNorm: input.productKeyNorm,
-              productDisplay: input.productDisplay,
-              tgChannel: input.tgChannel,
-              slaDueAt
-            });
+      let taskId: string | null = null;
+      if (input.createTask !== false) {
+        try {
+          taskId = await this.ensureTaskForCase(caseId, {
+            refKey,
+            source,
+            refId,
+            title,
+            subtitle: input.subtitle,
+            vocPriority,
+            vocReasons: input.vocReasons,
+            linkedCveIds,
+            vendorKey: input.vendorKey,
+            vendorDisplay: input.vendorDisplay,
+            productKeyNorm: input.productKeyNorm,
+            productDisplay: input.productDisplay,
+            tgChannel: input.tgChannel,
+            slaDueAt
+          });
+        } catch (e) {
+          this.logger.error(
+            `ensureTask failed for existing case ${caseId}: ${e instanceof Error ? e.message : String(e)}`
+          );
+        }
+      }
       const row = await this.getCaseById(caseId);
-      return { ok: true, deduped: true, taskId, case: row };
+      return { ok: true, deduped: true, taskId: taskId ?? row.taskId, case: row };
     }
 
     const ins = await this.db.query<{ id: string }>(
@@ -368,22 +392,28 @@ export class VocCaseService {
 
     let taskId: string | null = null;
     if (input.createTask !== false) {
-      taskId = await this.ensureTaskForCase(caseId, {
-        refKey,
-        source,
-        refId,
-        title,
-        subtitle: input.subtitle,
-        vocPriority,
-        vocReasons: input.vocReasons,
-        linkedCveIds,
-        vendorKey: input.vendorKey,
-        vendorDisplay: input.vendorDisplay,
-        productKeyNorm: input.productKeyNorm,
-        productDisplay: input.productDisplay,
-        tgChannel: input.tgChannel,
-        slaDueAt
-      });
+      try {
+        taskId = await this.ensureTaskForCase(caseId, {
+          refKey,
+          source,
+          refId,
+          title,
+          subtitle: input.subtitle,
+          vocPriority,
+          vocReasons: input.vocReasons,
+          linkedCveIds,
+          vendorKey: input.vendorKey,
+          vendorDisplay: input.vendorDisplay,
+          productKeyNorm: input.productKeyNorm,
+          productDisplay: input.productDisplay,
+          tgChannel: input.tgChannel,
+          slaDueAt
+        });
+      } catch (e) {
+        this.logger.error(
+          `ensureTask failed for new case ${caseId}: ${e instanceof Error ? e.message : String(e)}`
+        );
+      }
     }
 
     // Playbook after task — best-effort so LLM/DB slowness cannot leave a case without a task.
@@ -972,6 +1002,100 @@ export class VocCaseService {
       decisionNotes: notes ?? undefined,
       evidence
     });
+  }
+
+  /**
+   * Create vuln_task for active VOC cases that are missing task_id (orphans after timeouts).
+   */
+  async backfillMissingTasks(opts?: { limit?: number }): Promise<{
+    scanned: number;
+    created: number;
+    failed: number;
+    errors: string[];
+  }> {
+    const limit = Math.max(1, Math.min(500, opts?.limit ?? 200));
+    const r = await this.db.query<{
+      id: string;
+      title: string;
+      voc_priority: VocPriority;
+      sla_due_at: Date | null;
+      primary_ref_key: string;
+    }>(
+      `SELECT id, title, voc_priority, sla_due_at, primary_ref_key
+         FROM voc_case
+        WHERE task_id IS NULL
+          AND status IN ('open', 'in_progress')
+        ORDER BY updated_at DESC
+        LIMIT $1`,
+      [limit]
+    );
+
+    let created = 0;
+    let failed = 0;
+    const errors: string[] = [];
+
+    for (const row of r.rows) {
+      try {
+        const refs = await this.loadRefsForCases([row.id]);
+        const refList = refs.get(row.id) ?? [];
+        const primary =
+          refList.find((x) => x.refKey.toUpperCase() === row.primary_ref_key.toUpperCase()) ??
+          refList[0] ??
+          this.parsePrimaryRefKey(row.primary_ref_key);
+        if (!primary) {
+          failed++;
+          errors.push(`${row.id}: no ref`);
+          continue;
+        }
+        const linkedCveIds =
+          primary.source === "cve"
+            ? [primary.refId]
+            : refList.filter((x) => x.source === "cve").map((x) => x.refId);
+        const slaDueAt =
+          row.sla_due_at?.toISOString?.() ?? computeSlaDueAt(row.voc_priority ?? "p4");
+        const taskId = await this.ensureTaskForCase(row.id, {
+          refKey: primary.refKey,
+          source: primary.source,
+          refId: primary.refId,
+          title: row.title,
+          vocPriority: row.voc_priority ?? "p4",
+          linkedCveIds,
+          slaDueAt
+        });
+        if (taskId) created++;
+        else failed++;
+      } catch (e) {
+        failed++;
+        errors.push(`${row.id}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 200));
+      }
+    }
+
+    return { scanned: r.rows.length, created, failed, errors: errors.slice(0, 20) };
+  }
+
+  private parsePrimaryRefKey(
+    primary: string
+  ): { refKey: string; source: VocSource; refId: string } | null {
+    const raw = String(primary ?? "").trim();
+    if (!raw) return null;
+    const upper = raw.toUpperCase();
+    if (upper.startsWith("CVE:")) {
+      const refId = upper.slice(4);
+      return { refKey: `CVE:${refId}`, source: "cve", refId };
+    }
+    if (upper.startsWith("BDU:")) {
+      const refId = raw.slice(4);
+      return { refKey: `BDU:${refId}`, source: "bdu", refId };
+    }
+    if (upper.startsWith("TG:")) {
+      const refId = raw.slice(3);
+      return { refKey: raw, source: "tg", refId };
+    }
+    if (/^CVE-\d{4}-\d+/i.test(raw)) {
+      const refId = raw.toUpperCase();
+      return { refKey: `CVE:${refId}`, source: "cve", refId };
+    }
+    return null;
   }
 
   private async ensureTaskForCase(
