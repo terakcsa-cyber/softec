@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api-fetch";
 import { useAuth } from "@/contexts/auth-context";
@@ -26,14 +26,22 @@ import {
   type DragStartEvent
 } from "@dnd-kit/core";
 import { useDroppable } from "@dnd-kit/core";
-import { SortableContext, useSortable, arrayMove, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
+import { SortableContext, arrayMove, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import {
   AssigneeCell,
+  DueBadge,
+  Field,
   FilterChip,
-  PriorityMark,
+  MetaRow,
+  PriorityBadge,
+  ScoreBadge,
+  SectionCard,
+  SelectField,
   StatusChip,
   TASK_STATUS_COLUMNS,
+  TextareaField,
+  TextField,
+  controlCls,
   normalizeUiTaskStatus,
   priorityMeta,
   scoreTone,
@@ -41,6 +49,7 @@ import {
   taskIssueKey,
   type TaskStatus
 } from "./vuln-task-ui";
+import { TaskCardDraggable, TaskCardGhost, TaskCardStatic } from "./vuln-task-card";
 
 type TaskListRow = {
   id: string;
@@ -70,89 +79,6 @@ type TaskDetail = {
   events: Array<{ id?: string; action?: string; actor?: string; ts?: string; meta?: unknown; [k: string]: unknown }>;
 };
 
-function TaskCardDraggable({
-  task,
-  active,
-  containerId,
-  onClick
-}: {
-  task: TaskListRow;
-  active: boolean;
-  containerId: string;
-  onClick: () => void;
-}) {
-  const id = `task:${task.id}`;
-  const normalizedStatus = normalizeUiTaskStatus(task.status);
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id,
-    data: { taskId: task.id, fromStatus: normalizedStatus, containerId }
-  });
-  const cveCount = task.stats?.cveCount ?? null;
-  const kevCount = task.stats?.kevCount ?? null;
-  const reviewIso = task.review_date ? String(task.review_date) : null;
-  const reviewDate = reviewIso ? new Date(reviewIso) : null;
-  const reviewOverdue = reviewDate && !Number.isNaN(reviewDate.getTime()) ? reviewDate.getTime() < Date.now() : false;
-
-  const style: CSSProperties = {
-    transform: CSS.Translate.toString(transform),
-    transition,
-    opacity: isDragging ? 0.45 : 1
-  };
-
-  return (
-    <button
-      ref={setNodeRef}
-      type="button"
-      onClick={onClick}
-      style={style}
-      className={cn(
-        "group w-full select-none rounded border px-2 py-1.5 text-left transition",
-        active
-          ? "border-accent/45 bg-accent/[0.07] ring-1 ring-accent/25"
-          : "border-border/80 bg-white hover:border-border hover:bg-slate-50/80 dark:bg-black/25 dark:hover:bg-black/40",
-        isDragging ? "cursor-grabbing" : "cursor-grab",
-        reviewOverdue ? "border-l-2 border-l-danger" : ""
-      )}
-      {...attributes}
-      {...listeners}
-    >
-      <div className="flex items-center gap-1.5">
-        <PriorityMark priority={task.priority_local} />
-        <span className="font-mono text-[10px] text-muted">{taskIssueKey(task.id)}</span>
-        <span className={cn("ml-auto text-[10px] font-semibold tabular-nums", scoreTone(task.score_final))}>
-          {task.score_final}
-        </span>
-      </div>
-      <div className="mt-0.5 line-clamp-2 text-[12px] font-medium leading-4 text-fg/90">{task.title}</div>
-      <div className="mt-1 flex items-center gap-1.5 text-[10px] text-muted">
-        <span className="min-w-0 truncate">
-          {task.vendor_display}
-          {task.product_display ? ` / ${task.product_display}` : ""}
-        </span>
-        <span className="ml-auto flex shrink-0 items-center gap-1">
-          {cveCount != null ? <span className="tabular-nums">CVE {cveCount}</span> : null}
-          {kevCount != null && kevCount > 0 ? <span className="font-medium text-danger">KEV</span> : null}
-        </span>
-      </div>
-      <div className="mt-1 flex min-w-0 items-center gap-1 text-[10px] text-muted" title={task.owner ? `В работе у ${task.owner}` : "Без исполнителя"}>
-        <AssigneeCell name={task.owner} emptyLabel="нет" />
-      </div>
-    </button>
-  );
-}
-
-function TaskCardGhost({ task }: { task: TaskListRow }) {
-  return (
-    <div className="w-[240px] rounded border border-accent/30 bg-white p-2 shadow-lg dark:bg-black/85">
-      <div className="flex items-center gap-1.5">
-        <PriorityMark priority={task.priority_local} />
-        <span className="font-mono text-[10px] text-muted">{taskIssueKey(task.id)}</span>
-      </div>
-      <div className="mt-0.5 line-clamp-2 text-[12px] font-medium leading-4">{task.title}</div>
-    </div>
-  );
-}
-
 function BoardColumn({
   colKey,
   title,
@@ -175,28 +101,28 @@ function BoardColumn({
     <div
       ref={setNodeRef}
       className={cn(
-        "flex w-[260px] shrink-0 flex-col overflow-hidden rounded border border-border bg-slate-50/70 dark:bg-white/[0.03]",
-        "max-h-[min(640px,calc(100vh-280px))] border-t-2",
+        "flex w-[300px] shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-slate-50/80 dark:bg-white/[0.03]",
+        "max-h-[min(680px,calc(100vh-260px))] border-t-[3px]",
         tint,
-        isOver ? "ring-2 ring-accent/25" : "",
+        isOver ? "ring-2 ring-accent/30" : "",
         dragging ? "transition-[box-shadow] duration-150" : ""
       )}
     >
-      <div className="flex items-center justify-between gap-2 border-b border-border/70 px-2.5 py-1.5">
-        <div className="flex items-center gap-1.5 text-[11px] font-semibold text-fg/85">
-          <span className={cn("h-1.5 w-1.5 rounded-full", statusMeta(colKey).dot)} />
+      <div className="flex items-center justify-between gap-2 border-b border-border/70 px-3 py-2">
+        <div className="flex items-center gap-2 text-[12px] font-semibold text-fg/90">
+          <span className={cn("h-2 w-2 rounded-full", statusMeta(colKey).dot)} />
           {title}
         </div>
-        <span className="rounded bg-black/[0.04] px-1.5 py-0.5 text-[10px] tabular-nums text-muted dark:bg-white/10">
+        <span className="rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-fg/75 dark:bg-white/10">
           {count}
         </span>
       </div>
-      <div className={cn("flex-1 space-y-1.5 overflow-auto p-1.5", isOver ? "bg-accent/[0.04]" : "")}>
+      <div className={cn("flex-1 space-y-2 overflow-auto p-2", isOver ? "bg-accent/[0.04]" : "")}>
         <SortableContext items={items} strategy={verticalListSortingStrategy}>
           {count === 0 ? (
             <div
               className={cn(
-                "rounded border border-dashed px-2 py-5 text-center text-[11px] text-muted",
+                "rounded-xl border border-dashed px-2 py-8 text-center text-[12px] text-muted",
                 isOver ? "border-accent/40 bg-accent/5" : "border-border/70"
               )}
             >
@@ -909,21 +835,26 @@ export function VulnTaskPanel({
         <DragOverlay dropAnimation={null}>{draggingTask ? <TaskCardGhost task={draggingTask} /> : null}</DragOverlay>
       </DndContext>
     ) : (
-      <div className="flex gap-2 overflow-x-auto pb-1">
+      <div className="flex gap-2.5 overflow-x-auto pb-1">
         {columns.map((col) => (
           <div
             key={col.key}
             className={cn(
-              "flex w-[260px] shrink-0 flex-col overflow-hidden rounded border border-border bg-slate-50/70 dark:bg-white/[0.03]",
-              "max-h-[min(640px,calc(100vh-280px))] border-t-2",
+              "flex w-[300px] shrink-0 flex-col overflow-hidden rounded-xl border border-border bg-slate-50/80 dark:bg-white/[0.03]",
+              "max-h-[min(680px,calc(100vh-260px))] border-t-[3px]",
               statusMeta(col.key).colTint
             )}
           >
-            <div className="flex items-center justify-between gap-2 border-b border-border/70 px-2.5 py-1.5">
-              <div className="text-[11px] font-semibold text-fg/85">{col.title}</div>
-              <span className="text-[10px] tabular-nums text-muted">{col.items.length}</span>
+            <div className="flex items-center justify-between gap-2 border-b border-border/70 px-3 py-2">
+              <div className="flex items-center gap-2 text-[12px] font-semibold text-fg/90">
+                <span className={cn("h-2 w-2 rounded-full", statusMeta(col.key).dot)} />
+                {col.title}
+              </div>
+              <span className="rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-fg/75 dark:bg-white/10">
+                {col.items.length}
+              </span>
             </div>
-            <div className="flex-1 space-y-1.5 overflow-auto p-1.5">
+            <div className="flex-1 space-y-2 overflow-auto p-2">
               {(() => {
                 let lastGroup = "";
                 return col.items.map((t) => {
@@ -933,35 +864,17 @@ export function VulnTaskPanel({
                   return (
                     <div key={t.id}>
                       {showHeader ? (
-                        <div className="mb-1 mt-2 truncate px-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">
+                        <div className="mb-1 mt-1 truncate px-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted">
                           {g}
                         </div>
                       ) : null}
-                      <button
-                        type="button"
-                        onClick={() => openTask(t.id)}
-                        className={cn(
-                          "w-full rounded border px-2 py-1.5 text-left transition",
-                          selected === t.id
-                            ? "border-accent/45 bg-accent/[0.07]"
-                            : "border-border/80 bg-white hover:bg-slate-50 dark:bg-black/25 dark:hover:bg-black/40"
-                        )}
-                      >
-                        <div className="flex items-center gap-1.5">
-                          <PriorityMark priority={t.priority_local} />
-                          <span className="font-mono text-[10px] text-muted">{taskIssueKey(t.id)}</span>
-                          <span className={cn("ml-auto text-[10px] font-semibold tabular-nums", scoreTone(t.score_final))}>
-                            {t.score_final}
-                          </span>
-                        </div>
-                        <div className="mt-0.5 line-clamp-2 text-[12px] font-medium leading-4">{t.title}</div>
-                      </button>
+                      <TaskCardStatic task={t} active={selected === t.id} onClick={() => openTask(t.id)} />
                     </div>
                   );
                 });
               })()}
             </div>
-            <div className="border-t border-border/60 px-2 py-1 text-[10px] text-muted">Swimlanes: DnD выкл.</div>
+            <div className="border-t border-border/60 px-2.5 py-1.5 text-[10px] text-muted">Swimlanes: DnD выкл.</div>
           </div>
         ))}
       </div>
@@ -971,39 +884,46 @@ export function VulnTaskPanel({
     const activeStatus = normalizeUiTaskStatus(active?.status);
     const activeClosureText = `${active?.evidence ?? ""}${active?.decision_notes ?? ""}`.trim();
     const key = selected ? taskIssueKey(selected) : "";
+    const dueIso = active?.due_date ? String(active.due_date) : null;
+    const reviewIso = active?.review_date ? String(active.review_date) : null;
     return (
       <div className="flex min-h-0 flex-col">
-        <div className="sticky top-0 z-10 border-b border-border bg-white/95 px-4 py-3 backdrop-blur dark:bg-black/80">
+        <div className="sticky top-0 z-10 border-b border-border bg-white/95 px-4 py-3.5 backdrop-blur dark:bg-[#0b1220]/95">
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-[12px] font-semibold text-accent">{key}</span>
-                <StatusChip status={activeStatus} compact />
-                <span className={cn("text-[11px] font-semibold tabular-nums", scoreTone(Number(active?.score_final ?? 0)))}>
-                  Score {Number(active?.score_final ?? 0)}
-                </span>
+                <span className="font-mono text-[13px] font-bold text-accent">{key}</span>
+                <StatusChip status={activeStatus} />
+                <ScoreBadge score={Number(active?.score_final ?? 0)} />
+                <PriorityBadge priority={String(active?.priority_local ?? "medium")} />
               </div>
-              <h2 className="mt-1 text-[15px] font-semibold leading-snug tracking-tight text-fg/95">
+              <h2 className="mt-2 text-[17px] font-semibold leading-snug tracking-tight text-fg/95">
                 {active?.title ?? selected}
               </h2>
-              <div className="mt-0.5 text-[11px] text-muted">
-                {active?.vendor_display}
-                {active?.product_display ? ` / ${active?.product_display}` : ""}
-              </div>
+              <MetaRow
+                vendor={active?.vendor_display}
+                product={active?.product_display}
+                className="mt-1 text-[12px]"
+              />
             </div>
             <div className="flex shrink-0 items-center gap-1.5">
               <button
                 type="button"
                 onClick={() => void refresh()}
-                className="rounded border border-border p-1.5 text-muted hover:bg-black/[0.03] hover:text-fg dark:hover:bg-white/5"
+                className="rounded-lg border border-border p-2 text-muted hover:bg-slate-50 hover:text-fg dark:hover:bg-white/5"
                 title="Обновить"
               >
-                <RefreshCw className={cn("h-3.5 w-3.5", listQuery.isFetching || detailQuery.isFetching ? "animate-spin" : "")} />
+                <RefreshCw
+                  className={cn(
+                    "h-3.5 w-3.5",
+                    listQuery.isFetching || detailQuery.isFetching ? "animate-spin" : ""
+                  )}
+                />
               </button>
               <button
                 type="button"
                 onClick={closeTask}
-                className="rounded border border-border p-1.5 text-muted hover:bg-black/[0.03] hover:text-fg dark:hover:bg-white/5"
+                className="rounded-lg border border-border p-2 text-muted hover:bg-slate-50 hover:text-fg dark:hover:bg-white/5"
                 title="Закрыть"
               >
                 <X className="h-3.5 w-3.5" />
@@ -1011,27 +931,30 @@ export function VulnTaskPanel({
             </div>
           </div>
 
-          <div className="mt-2.5 flex flex-wrap items-center gap-1">
-            {TASK_STATUS_COLUMNS.map((s) => (
-              <button
-                key={s.key}
-                type="button"
-                onClick={() => void savePatch(readPatchFieldsForValidation(s.key))}
-                disabled={saveBusy || activeStatus === s.key}
-                className={cn(
-                  "rounded border px-2 py-0.5 text-[11px] font-medium transition",
-                  activeStatus === s.key
-                    ? "border-accent/40 bg-accent/10 text-fg/90"
-                    : "border-border text-muted hover:bg-black/[0.03] hover:text-fg/85 dark:hover:bg-white/5",
-                  saveBusy || activeStatus === s.key ? "cursor-default opacity-70" : ""
-                )}
-              >
-                {s.title}
-              </button>
-            ))}
+          <div className="mt-3 flex flex-wrap gap-1.5 rounded-xl border border-border bg-slate-50/80 p-1 dark:bg-black/30">
+            {TASK_STATUS_COLUMNS.map((s) => {
+              const activeSeg = activeStatus === s.key;
+              return (
+                <button
+                  key={s.key}
+                  type="button"
+                  onClick={() => void savePatch(readPatchFieldsForValidation(s.key))}
+                  disabled={saveBusy || activeSeg}
+                  className={cn(
+                    "min-w-[88px] flex-1 rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition",
+                    activeSeg
+                      ? statusMeta(s.key).segmentActive
+                      : "border-transparent text-muted hover:bg-white hover:text-fg/85 dark:hover:bg-white/5",
+                    saveBusy || activeSeg ? "cursor-default opacity-90" : ""
+                  )}
+                >
+                  {s.title}
+                </button>
+              );
+            })}
           </div>
 
-          <div className="mt-2 flex gap-0 border-b border-border">
+          <div className="mt-3 flex gap-0 border-b border-border">
             {(
               [
                 { key: "fields", label: "Детали" },
@@ -1044,9 +967,9 @@ export function VulnTaskPanel({
                 type="button"
                 onClick={() => setRightTab(t.key)}
                 className={cn(
-                  "-mb-px border-b-2 px-3 py-1.5 text-[12px] font-medium transition",
+                  "-mb-px border-b-2 px-3.5 py-2 text-[13px] font-semibold transition",
                   rightTab === t.key
-                    ? "border-accent text-fg/90"
+                    ? "border-accent text-fg/95"
                     : "border-transparent text-muted hover:text-fg/80"
                 )}
               >
@@ -1056,145 +979,173 @@ export function VulnTaskPanel({
           </div>
         </div>
 
-        <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3">
+        <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3.5">
           {rightTab === "fields" ? (
-            <div>
-              {saveErr ? <div className="mb-2 text-[11px] text-rose-700">{saveErr}</div> : null}
-              {saveBusy ? <div className="mb-2 text-[11px] text-muted">Сохраняем…</div> : null}
+            <div className="space-y-3">
+              {saveErr ? (
+                <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+                  {saveErr}
+                </div>
+              ) : null}
+              {saveBusy ? <div className="text-[12px] text-muted">Сохраняем…</div> : null}
               {activeStatus === "closed" && !activeClosureText ? (
-                <div className="mb-2 rounded border border-warn/25 bg-warn/10 px-2.5 py-1.5 text-[11px] text-warn">
+                <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-[12px] text-warn">
                   Закрыта без evidence/decision notes — добавьте обоснование.
                 </div>
               ) : null}
 
-              <div className="grid grid-cols-2 gap-x-3 gap-y-2.5">
-                <label className="block">
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Статус</span>
-                  <select
-                    defaultValue={normalizeUiTaskStatus(active?.status)}
+              <SectionCard title="Workflow">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <SelectField
+                    label="Статус"
+                    key={`status-${selected}-${activeStatus}`}
+                    defaultValue={activeStatus}
                     onChange={(e) => void savePatch(readPatchFieldsForValidation(e.target.value))}
-                    className="mt-0.5 w-full rounded border border-border bg-transparent px-2 py-1.5 text-[13px]"
                   >
                     <option value="new">Новая</option>
                     <option value="in_progress">В работе</option>
                     <option value="closed">Закрыта</option>
-                  </select>
-                </label>
-                <label className="block">
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Приоритет</span>
-                  <select
+                  </SelectField>
+                  <SelectField
+                    label="Приоритет"
+                    key={`prio-${selected}-${String(active?.priority_local ?? "medium")}`}
                     defaultValue={String(active?.priority_local ?? "medium")}
                     onChange={(e) => void savePatch({ priorityLocal: e.target.value })}
-                    className="mt-0.5 w-full rounded border border-border bg-transparent px-2 py-1.5 text-[13px]"
                   >
                     <option value="low">Низкий</option>
                     <option value="medium">Средний</option>
                     <option value="high">Высокий</option>
                     <option value="critical">Критичный</option>
-                  </select>
-                </label>
-                <label className="col-span-2 block sm:col-span-1">
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Исполнитель</span>
-                  <input
-                    key={`owner-${selected}-${String(active?.owner ?? "")}`}
-                    defaultValue={String(active?.owner ?? "")}
-                    onBlur={(e) => void savePatch({ owner: e.target.value || null })}
-                    className="mt-0.5 w-full rounded border border-border bg-transparent px-2 py-1.5 text-[13px]"
-                    placeholder="ставится при «В работе»"
-                  />
-                </label>
-                <label className="block">
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Due</span>
-                  <input
-                    defaultValue={active?.due_date ? String(active.due_date).slice(0, 10) : ""}
-                    onBlur={(e) => void savePatch({ dueDate: e.target.value ? new Date(e.target.value).toISOString() : null })}
+                  </SelectField>
+                  <Field label="Исполнитель" className="sm:col-span-2">
+                    <div className="flex gap-2">
+                      <input
+                        key={`owner-${selected}-${String(active?.owner ?? "")}`}
+                        defaultValue={String(active?.owner ?? "")}
+                        onBlur={(e) => void savePatch({ owner: e.target.value || null })}
+                        className={controlCls}
+                        placeholder="email или имя"
+                      />
+                      {meEmail ? (
+                        <button
+                          type="button"
+                          onClick={() => void savePatch({ owner: meEmail, status: "in_progress" })}
+                          className="shrink-0 rounded-lg border border-accent/35 bg-accent/10 px-3 text-[12px] font-semibold text-fg/90 hover:bg-accent/15"
+                        >
+                          Мне
+                        </button>
+                      ) : null}
+                    </div>
+                  </Field>
+                </div>
+              </SectionCard>
+
+              <SectionCard
+                title="Сроки"
+                action={
+                  <div className="flex flex-wrap gap-1">
+                    <DueBadge iso={dueIso} label="Due" />
+                    <DueBadge iso={reviewIso} label="Review" />
+                  </div>
+                }
+              >
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <TextField
+                    label="Due date"
+                    key={`due-${selected}-${dueIso ?? ""}`}
                     type="date"
-                    className="mt-0.5 w-full rounded border border-border bg-transparent px-2 py-1.5 text-[13px]"
-                  />
-                </label>
-                <label className="block">
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Review</span>
-                  <input
-                    ref={reviewDateRef}
-                    defaultValue={active?.review_date ? String(active.review_date).slice(0, 10) : ""}
+                    defaultValue={dueIso ? dueIso.slice(0, 10) : ""}
                     onBlur={(e) =>
-                      void savePatch({ reviewDate: e.target.value ? new Date(e.target.value).toISOString() : null })
+                      void savePatch({ dueDate: e.target.value ? new Date(e.target.value).toISOString() : null })
                     }
-                    type="date"
-                    className="mt-0.5 w-full rounded border border-border bg-transparent px-2 py-1.5 text-[13px]"
                   />
-                </label>
-                <label className="block">
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Decision</span>
-                  <input
+                  <TextField
+                    label="Review date"
+                    ref={reviewDateRef}
+                    key={`rev-${selected}-${reviewIso ?? ""}`}
+                    type="date"
+                    defaultValue={reviewIso ? reviewIso.slice(0, 10) : ""}
+                    onBlur={(e) =>
+                      void savePatch({
+                        reviewDate: e.target.value ? new Date(e.target.value).toISOString() : null
+                      })
+                    }
+                    hint="Просроченный review подсвечивается на карточке"
+                  />
+                </div>
+              </SectionCard>
+
+              <SectionCard title="Закрытие / решение">
+                <div className="grid grid-cols-1 gap-3">
+                  <TextField
+                    label="Decision"
                     ref={decisionRef}
+                    key={`dec-${selected}-${String(active?.decision ?? "")}`}
                     defaultValue={String(active?.decision ?? "")}
                     onBlur={(e) => void savePatch({ decision: e.target.value || null })}
-                    className="mt-0.5 w-full rounded border border-border bg-transparent px-2 py-1.5 text-[13px]"
-                    placeholder="patch / mitigation / accept"
+                    placeholder="patch / mitigation / accept / false_positive"
                   />
-                </label>
-                <label className="col-span-2 block">
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Decision notes</span>
-                  <textarea
+                  <TextareaField
+                    label="Decision notes"
                     ref={decisionNotesRef}
+                    key={`decn-${selected}-${String(active?.decision_notes ?? "")}`}
                     defaultValue={String(active?.decision_notes ?? "")}
                     onBlur={(e) => void savePatch({ decisionNotes: e.target.value || null })}
-                    className="mt-0.5 w-full rounded border border-border bg-transparent px-2 py-1.5 text-[13px]"
-                    rows={2}
+                    rows={3}
                     placeholder="Почему так решили…"
                   />
-                </label>
-                <label className="col-span-2 block">
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Evidence</span>
-                  <textarea
+                  <TextareaField
+                    label="Evidence"
                     ref={evidenceRef}
+                    key={`ev-${selected}-${String(active?.evidence ?? "")}`}
                     defaultValue={String(active?.evidence ?? "")}
                     onBlur={(e) => void savePatch({ evidence: e.target.value || null })}
-                    className="mt-0.5 w-full rounded border border-border bg-transparent px-2 py-1.5 text-[13px]"
-                    rows={2}
-                    placeholder="Advisory / версия / тикет / проверка…"
+                    rows={3}
+                    placeholder="Advisory / версия / тикет / проверка на инфре…"
                   />
-                </label>
-                <label className="col-span-2 block">
-                  <span className="text-[10px] font-medium uppercase tracking-wide text-muted">Notes (Markdown)</span>
-                  <textarea
-                    defaultValue={String(active?.notes_md ?? "")}
-                    onBlur={(e) => void savePatch({ notesMd: e.target.value })}
-                    className="mt-0.5 w-full rounded border border-border bg-transparent px-2 py-1.5 font-mono text-[12px]"
-                    rows={6}
-                  />
-                </label>
-              </div>
+                </div>
+              </SectionCard>
+
+              <SectionCard title="Notes">
+                <TextareaField
+                  label="Markdown"
+                  key={`notes-${selected}-${String(active?.notes_md ?? "").slice(0, 24)}`}
+                  defaultValue={String(active?.notes_md ?? "")}
+                  onBlur={(e) => void savePatch({ notesMd: e.target.value })}
+                  className="font-mono text-[12px]"
+                  rows={8}
+                  hint="Бриф VOC / чеклист / контекст проверки"
+                />
+              </SectionCard>
             </div>
           ) : null}
 
           {rightTab === "cves" ? (
-            <div>
+            <div className="space-y-3">
               <div className="flex items-center justify-between gap-2">
-                <div className="text-[11px] text-muted">CVE в задаче</div>
+                <div className="text-[12px] font-medium text-fg/80">Связанные CVE</div>
                 <button
                   type="button"
                   onClick={() => setAddOpen((v) => !v)}
-                  className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] hover:bg-black/[0.03] dark:hover:bg-white/5"
+                  className="inline-flex items-center gap-1 rounded-lg border border-border bg-white px-2.5 py-1.5 text-[12px] font-medium hover:bg-slate-50 dark:bg-black/30 dark:hover:bg-white/5"
                 >
-                  <Search className="h-3 w-3" />
+                  <Search className="h-3.5 w-3.5" />
                   Добавить
                 </button>
               </div>
               {addOpen ? (
-                <div className="mt-2 rounded border border-border bg-slate-50/80 p-2 dark:bg-white/[0.03]">
+                <div className="rounded-xl border border-border bg-slate-50/80 p-3 dark:bg-white/[0.03]">
                   <div className="flex items-center gap-2">
                     <input
                       value={addQ}
                       onChange={(e) => setAddQ(e.target.value)}
                       placeholder="CVE-… или vendor/product (≥3)"
-                      className="w-full rounded border border-border bg-transparent px-2 py-1.5 text-[13px]"
+                      className={controlCls}
                     />
                     <button
                       type="button"
                       onClick={() => void addCves()}
-                      className="shrink-0 rounded border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-[12px]"
+                      className="shrink-0 rounded-lg border border-accent/35 bg-accent/10 px-3 py-2 text-[12px] font-semibold"
                     >
                       Добавить
                     </button>
@@ -1205,11 +1156,11 @@ export function VulnTaskPanel({
                       return (
                         <label
                           key={id}
-                          className="flex cursor-pointer items-start gap-2 rounded border border-transparent px-1.5 py-1 hover:border-border hover:bg-white dark:hover:bg-black/20"
+                          className="flex cursor-pointer items-start gap-2 rounded-lg border border-transparent px-2 py-1.5 hover:border-border hover:bg-white dark:hover:bg-black/20"
                         >
                           <input
                             type="checkbox"
-                            className="mt-0.5"
+                            className="mt-1"
                             checked={Boolean(addPicked[id])}
                             onChange={(e) =>
                               setAddPicked((m) => {
@@ -1236,31 +1187,45 @@ export function VulnTaskPanel({
                   </div>
                 </div>
               ) : null}
-              <div className="mt-2 divide-y divide-border/70 rounded border border-border">
+              <div className="divide-y divide-border/70 overflow-hidden rounded-xl border border-border bg-white dark:bg-black/20">
                 {activeCves.length === 0 ? (
-                  <div className="px-3 py-6 text-center text-[11px] text-muted">Нет связанных CVE.</div>
+                  <div className="px-3 py-8 text-center text-[12px] text-muted">Нет связанных CVE.</div>
                 ) : (
                   activeCves.slice(0, 50).map((c) => (
-                    <div key={c.cve_id} className="flex items-start gap-2 px-2.5 py-1.5">
+                    <div key={c.cve_id} className="flex items-start gap-2 px-3 py-2.5">
                       <button
                         type="button"
                         onClick={() => onOpenCve?.(String(c.cve_id))}
                         className="min-w-0 flex-1 text-left hover:underline"
                       >
-                        <div className="font-mono text-[12px] font-semibold">{String(c.cve_id)}</div>
-                        <div className="text-[10px] text-muted">
-                          {c.exploit_known ? "KEV · " : ""}
-                          EPSS {typeof c.epss === "number" ? `${(Number(c.epss) * 100).toFixed(2)}%` : "—"} · CVSS{" "}
-                          {typeof c.cvss_base === "number" ? Number(c.cvss_base).toFixed(1) : "—"}
+                        <div className="font-mono text-[13px] font-semibold">{String(c.cve_id)}</div>
+                        <div className="mt-1 flex flex-wrap gap-1.5 text-[10px]">
+                          {c.exploit_known ? (
+                            <span className="rounded border border-danger/35 bg-danger/10 px-1.5 py-0.5 font-bold text-danger">
+                              KEV
+                            </span>
+                          ) : null}
+                          <span className="rounded border border-border px-1.5 py-0.5 tabular-nums text-muted">
+                            EPSS{" "}
+                            {typeof c.epss === "number" ? `${(Number(c.epss) * 100).toFixed(2)}%` : "—"}
+                          </span>
+                          <span className="rounded border border-border px-1.5 py-0.5 tabular-nums text-muted">
+                            CVSS {typeof c.cvss_base === "number" ? Number(c.cvss_base).toFixed(1) : "—"}
+                          </span>
+                          <span
+                            className={cn(
+                              "rounded border px-1.5 py-0.5 font-semibold tabular-nums",
+                              scoreTone(Number(c.risk_score ?? 0))
+                            )}
+                          >
+                            risk {typeof c.risk_score === "number" ? c.risk_score : "—"}
+                          </span>
                         </div>
                       </button>
-                      <div className="text-[11px] tabular-nums text-muted">
-                        {typeof c.risk_score === "number" ? c.risk_score : "—"}
-                      </div>
                       <button
                         type="button"
                         onClick={() => void removeCve(String(c.cve_id))}
-                        className="rounded p-1 text-muted hover:bg-danger/10 hover:text-danger"
+                        className="rounded-lg p-1.5 text-muted hover:bg-danger/10 hover:text-danger"
                         title="Убрать"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
@@ -1269,32 +1234,34 @@ export function VulnTaskPanel({
                   ))
                 )}
               </div>
-              {activeCves.length > 50 ? <div className="mt-1 text-[10px] text-muted">Показаны первые 50…</div> : null}
+              {activeCves.length > 50 ? (
+                <div className="text-[11px] text-muted">Показаны первые 50…</div>
+              ) : null}
             </div>
           ) : null}
 
           {rightTab === "events" ? (
             <div>
               {activeEvents.length === 0 ? (
-                <div className="py-6 text-center text-[11px] text-muted">Пока нет событий.</div>
+                <div className="py-8 text-center text-[12px] text-muted">Пока нет событий.</div>
               ) : (
-                <div className="space-y-1.5">
+                <div className="space-y-2">
                   {activeEvents.slice(0, 80).map((ev, idx: number) => (
                     <div
                       key={`${String(ev?.id ?? "")}-${idx}`}
-                      className="rounded border border-border/80 px-2.5 py-1.5 text-[11px]"
+                      className="rounded-xl border border-border bg-white px-3 py-2 text-[12px] dark:bg-black/20"
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0 truncate font-mono text-[10px]">
+                        <div className="min-w-0 truncate font-semibold">
                           {String(ev?.action ?? "event")}
-                          {ev?.actor ? <span className="ml-1.5 text-muted">· {String(ev.actor)}</span> : null}
+                          {ev?.actor ? <span className="ml-1.5 font-normal text-muted">· {String(ev.actor)}</span> : null}
                         </div>
                         <div className="shrink-0 font-mono text-[10px] tabular-nums text-muted">
                           {ev?.ts ? new Date(String(ev.ts)).toLocaleString() : "—"}
                         </div>
                       </div>
                       {ev?.meta ? (
-                        <pre className="mt-1 max-h-28 overflow-auto rounded bg-slate-50 p-1.5 text-[10px] text-fg/75 dark:bg-black/30">
+                        <pre className="mt-1.5 max-h-28 overflow-auto rounded-lg bg-slate-50 p-2 text-[10px] text-fg/75 dark:bg-black/40">
                           {JSON.stringify(ev.meta, null, 2).slice(0, 3000)}
                         </pre>
                       ) : null}
@@ -1309,8 +1276,6 @@ export function VulnTaskPanel({
     );
   };
 
-  const inputCls = "rounded border border-border bg-transparent px-2 py-1.5 text-[13px] placeholder:text-muted/70";
-
   return (
     <div className="flex min-h-0 flex-col gap-2.5">
       {/* Toolbar */}
@@ -1319,12 +1284,12 @@ export function VulnTaskPanel({
           <div className="text-[13px] font-semibold text-fg/90">Задачи</div>
         </div>
 
-        <div className="flex items-center rounded border border-border p-0.5">
+        <div className="flex items-center rounded-lg border border-border bg-white p-0.5 dark:bg-black/30">
           <button
             type="button"
             onClick={() => setViewMode("list")}
             className={cn(
-              "inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium",
+              "inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11px] font-semibold",
               viewMode === "list" ? "bg-accent/15 text-fg/90" : "text-muted hover:text-fg/80"
             )}
             title="Список"
@@ -1334,9 +1299,12 @@ export function VulnTaskPanel({
           </button>
           <button
             type="button"
-            onClick={() => setViewMode("board")}
+            onClick={() => {
+              setStatus("");
+              setViewMode("board");
+            }}
             className={cn(
-              "inline-flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium",
+              "inline-flex items-center gap-1 rounded-md px-2.5 py-1.5 text-[11px] font-semibold",
               viewMode === "board" ? "bg-accent/15 text-fg/90" : "text-muted hover:text-fg/80"
             )}
             title="Доска"
@@ -1346,28 +1314,59 @@ export function VulnTaskPanel({
           </button>
         </div>
 
+        <div className="flex flex-wrap items-center gap-1">
+          {TASK_STATUS_COLUMNS.map((col) => {
+            const active = !showBoard && status === col.key;
+            return (
+              <button
+                key={col.key}
+                type="button"
+                title={showBoard ? col.title : `Фильтр: ${col.title}`}
+                disabled={showBoard}
+                onClick={() => {
+                  if (showBoard) return;
+                  setStatus((s) => (s === col.key ? "" : col.key));
+                }}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-semibold transition",
+                  active
+                    ? statusMeta(col.key).segmentActive
+                    : "border-border bg-white text-muted dark:bg-black/30",
+                  showBoard ? "cursor-default" : "hover:bg-slate-50 hover:text-fg/85 dark:hover:bg-white/5"
+                )}
+              >
+                <span className={cn("h-1.5 w-1.5 rounded-full", statusMeta(col.key).dot)} />
+                {col.title}
+                <span className="tabular-nums text-fg/75">{taskStats[col.key]}</span>
+              </button>
+            );
+          })}
+          <span className="ml-0.5 rounded-md border border-border bg-slate-50 px-2 py-1 text-[11px] font-semibold tabular-nums text-fg/75 dark:bg-white/[0.04]">
+            {taskStats.total} всего
+            <span className="mx-1 text-border">·</span>
+            KEV {taskStats.kev}
+            <span className="mx-1 text-border">·</span>
+            ≥70 {taskStats.high}
+          </span>
+          {listQuery.isFetching ? <span className="text-[10px] text-muted">обновляем…</span> : null}
+        </div>
+
         <div className="relative min-w-[180px] flex-1">
-          <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted" />
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Поиск: название, vendor, product…"
-            className={cn(inputCls, "w-full pl-7")}
+            className={cn(controlCls, "w-full pl-8")}
           />
         </div>
 
         {!showBoard ? (
           <>
-            <select value={status} onChange={(e) => setStatus(e.target.value)} className={inputCls} title="Статус">
-              <option value="">Все статусы</option>
-              <option value="new">Новая</option>
-              <option value="in_progress">В работе</option>
-              <option value="closed">Закрыта</option>
-            </select>
             <select
               value={listSort}
               onChange={(e) => setListSort(e.target.value as typeof listSort)}
-              className={inputCls}
+              className={controlCls}
               title="Сортировка"
             >
               <option value="score">Score</option>
@@ -1378,7 +1377,7 @@ export function VulnTaskPanel({
             <button
               type="button"
               onClick={() => setListSortDir((d) => (d === "desc" ? "asc" : "desc"))}
-              className={cn(inputCls, "px-2.5")}
+              className={cn(controlCls, "px-2.5")}
               title="Направление"
             >
               {listSortDir === "desc" ? "↓" : "↑"}
@@ -1389,7 +1388,7 @@ export function VulnTaskPanel({
         <button
           type="button"
           onClick={() => void refresh()}
-          className="inline-flex items-center gap-1 rounded border border-border px-2 py-1.5 text-[11px] text-fg/80 hover:bg-black/[0.03] dark:hover:bg-white/5"
+          className="inline-flex items-center gap-1 rounded-lg border border-border bg-white px-2.5 py-1.5 text-[11px] font-medium text-fg/80 hover:bg-slate-50 dark:bg-black/30 dark:hover:bg-white/5"
           title="Обновить"
         >
           {listQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
@@ -1397,53 +1396,32 @@ export function VulnTaskPanel({
         <button
           type="button"
           onClick={() => setCreateOpen((v) => !v)}
-          className="inline-flex items-center gap-1 rounded border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-[11px] font-medium text-fg/90 hover:bg-accent/15"
+          className="inline-flex items-center gap-1 rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-[11px] font-semibold text-fg/90 hover:bg-accent/15"
         >
           <Plus className="h-3.5 w-3.5" />
           Создать
         </button>
       </div>
 
-      {/* Compact stats + filters */}
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted">
-          <span>
-            <span className="font-semibold tabular-nums text-fg/85">{taskStats.total}</span> всего
-          </span>
-          <span>
-            <span className="font-semibold tabular-nums text-fg/85">{taskStats.new}</span> новые
-          </span>
-          <span>
-            <span className="font-semibold tabular-nums text-fg/85">{taskStats.in_progress}</span> в работе
-          </span>
-          <span>
-            <span className="font-semibold tabular-nums text-fg/85">{taskStats.closed}</span> закрыты
-          </span>
-          <span>
-            KEV <span className="font-semibold tabular-nums text-fg/85">{taskStats.kev}</span>
-            {" · "}≥70 <span className="font-semibold tabular-nums text-fg/85">{taskStats.high}</span>
-          </span>
-          {listQuery.isFetching ? <span className="text-muted/70">обновляем…</span> : null}
-        </div>
-        {quickFilterBar}
-      </div>
+      {/* Quick filters */}
+      <div className="flex flex-wrap items-center justify-between gap-2">{quickFilterBar}</div>
 
       {createOpen ? (
-        <div className="rounded border border-border bg-slate-50/80 p-2.5 dark:bg-white/[0.03]">
-          <div className="mb-1.5 text-[11px] font-medium text-fg/85">Новая задача</div>
-          <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="rounded-xl border border-border bg-slate-50/80 p-3 dark:bg-white/[0.03]">
+          <div className="mb-2 text-[12px] font-semibold text-fg/85">Новая задача</div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
             <input
               value={newTitle}
               onChange={(e) => setNewTitle(e.target.value)}
               placeholder="Название (опционально)"
-              className={cn(inputCls, "sm:col-span-2")}
+              className={cn(controlCls, "sm:col-span-2")}
             />
             <input
               list="vip-vendors"
               value={newVendor}
               onChange={(e) => setNewVendor(e.target.value)}
               placeholder="Vendor *"
-              className={inputCls}
+              className={controlCls}
             />
             <datalist id="vip-vendors">
               {vendorOptions.map((v) => (
@@ -1455,7 +1433,7 @@ export function VulnTaskPanel({
               value={newProduct}
               onChange={(e) => setNewProduct(e.target.value)}
               placeholder="Product"
-              className={inputCls}
+              className={controlCls}
             />
             <datalist id="vip-products">
               {productOptions.map((p) => (
@@ -1465,7 +1443,7 @@ export function VulnTaskPanel({
             <button
               type="button"
               onClick={() => void createTask()}
-              className="rounded border border-accent/30 bg-accent/10 px-3 py-1.5 text-[12px] font-medium hover:bg-accent/15 sm:col-span-2 lg:col-span-4"
+              className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-[12px] font-semibold hover:bg-accent/15 sm:col-span-2 lg:col-span-4"
             >
               Создать задачу
             </button>
@@ -1601,17 +1579,16 @@ export function VulnTaskPanel({
                       </div>
                     </div>
                     <div className="hidden md:block">
-                      <StatusChip status={t.status} compact />
+                      <StatusChip status={t.status} />
                     </div>
-                    <div className="hidden items-center gap-1 md:flex">
-                      <PriorityMark priority={t.priority_local} />
-                      <span className="text-[10px] text-muted">{priorityMeta(t.priority_local).label.slice(0, 4)}</span>
+                    <div className="hidden md:block">
+                      <PriorityBadge priority={t.priority_local} compact />
                     </div>
                     <div className="hidden min-w-0 md:block" title={t.owner ? `В работе у ${t.owner}` : "Без исполнителя"}>
                       <AssigneeCell name={t.owner} />
                     </div>
-                    <div className={cn("hidden text-right text-[12px] font-semibold tabular-nums md:block", scoreTone(t.score_final))}>
-                      {t.score_final}
+                    <div className="hidden justify-end md:flex">
+                      <ScoreBadge score={t.score_final} />
                     </div>
                     <div className="hidden text-right text-[10px] tabular-nums text-muted md:block">
                       {t.updated_at ? new Date(t.updated_at).toLocaleDateString() : "—"}
