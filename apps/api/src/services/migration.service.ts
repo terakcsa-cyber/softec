@@ -1,16 +1,37 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
+import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DbService } from "./db.service.js";
+import { SchemaService } from "./schema.service.js";
 
 @Injectable()
 export class MigrationService implements OnModuleInit {
   private readonly logger = new Logger(MigrationService.name);
+  private readyPromise: Promise<void> | null = null;
 
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly schema: SchemaService
+  ) {}
+
+  /** Resolves after schema ensure + numbered migrations. */
+  whenReady(): Promise<void> {
+    if (!this.readyPromise) {
+      this.readyPromise = this.boot().catch((err) => {
+        this.readyPromise = null;
+        throw err;
+      });
+    }
+    return this.readyPromise;
+  }
 
   async onModuleInit() {
+    await this.whenReady();
+  }
+
+  private async boot() {
+    await this.schema.ensureSchema();
     await this.runPendingMigrations();
   }
 
@@ -29,17 +50,16 @@ export class MigrationService implements OnModuleInit {
 
     let files: string[];
     try {
+      // Only numbered migrations (001_*.sql). Manual one-offs must not auto-run.
       files = (await readdir(this.migrationsDir()))
-        .filter((f) => f.endsWith(".sql"))
+        .filter((f) => /^\d+_.+\.sql$/.test(f))
         .sort();
     } catch (e) {
       this.logger.warn(`Migrations dir not found, skipping: ${String(e)}`);
       return;
     }
 
-    const applied = await this.db.query<{ version: string }>(
-      `SELECT version FROM schema_migrations`
-    );
+    const applied = await this.db.query<{ version: string }>(`SELECT version FROM schema_migrations`);
     const done = new Set(applied.rows.map((r) => r.version));
 
     for (const file of files) {

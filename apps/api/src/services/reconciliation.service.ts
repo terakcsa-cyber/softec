@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
 import { gauge, isAiScoreEnabled } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
+import { MigrationService } from "./migration.service.js";
 
 const reconcileLagGauge = gauge(
   "reconcile_lag_hours",
@@ -13,13 +14,25 @@ export class ReconciliationService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ReconciliationService.name);
   private timer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private readonly db: DbService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly migrations: MigrationService
+  ) {}
 
-  onModuleInit() {
+  async onModuleInit() {
     if (process.env.RECONCILE_ENABLED?.trim() === "false") return;
+    await this.migrations.whenReady();
     const hours = Math.max(1, Number(process.env.RECONCILE_INTERVAL_HOURS ?? "6"));
-    void this.reconcile();
-    this.timer = setInterval(() => void this.reconcile(), hours * 3_600_000);
+    void this.reconcile().catch((e) =>
+      this.logger.warn(`Reconciliation boot failed: ${e instanceof Error ? e.message : String(e)}`)
+    );
+    this.timer = setInterval(
+      () =>
+        void this.reconcile().catch((e) =>
+          this.logger.warn(`Reconciliation tick failed: ${e instanceof Error ? e.message : String(e)}`)
+        ),
+      hours * 3_600_000
+    );
   }
 
   onModuleDestroy() {
@@ -27,6 +40,22 @@ export class ReconciliationService implements OnModuleInit, OnModuleDestroy {
   }
 
   async reconcile() {
+    try {
+      return await this.reconcileUnsafe();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.warn(`Reconciliation skipped (schema not ready?): ${msg}`);
+      return {
+        ok: false,
+        checkedAt: new Date().toISOString(),
+        staleHours: Number(process.env.RECONCILE_STALE_HOURS ?? "12"),
+        sources: [],
+        issues: [`reconcile_error: ${msg}`]
+      };
+    }
+  }
+
+  private async reconcileUnsafe() {
     const rows = await this.db.query<{
       source: string;
       watermark: Date | null;

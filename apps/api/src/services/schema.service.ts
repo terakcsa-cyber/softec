@@ -5,7 +5,24 @@ import { DbService } from "./db.service.js";
 export class SchemaService implements OnModuleInit {
   constructor(private readonly db: DbService) {}
 
+  private ensurePromise: Promise<void> | null = null;
+
+  /** Idempotent schema ensure; safe to await from other boot services. */
+  ensureSchema(): Promise<void> {
+    if (!this.ensurePromise) {
+      this.ensurePromise = this.applySchema().catch((err) => {
+        this.ensurePromise = null;
+        throw err;
+      });
+    }
+    return this.ensurePromise;
+  }
+
   async onModuleInit() {
+    await this.ensureSchema();
+  }
+
+  private async applySchema() {
     // Keep API compatible with existing DB volumes.
     await this.db.query(
       `ALTER TABLE cve
