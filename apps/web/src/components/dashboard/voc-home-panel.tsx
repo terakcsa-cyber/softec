@@ -281,7 +281,7 @@ export function VocHomePanel({
         typeof item.payload.vp_vendor === "string" ? item.payload.vp_vendor : undefined;
       const productDisplay =
         typeof item.payload.vp_product === "string" ? item.payload.vp_product : undefined;
-      await createVocCaseFromRef({
+      const created = await createVocCaseFromRef({
         refKey: item.refKey,
         source: item.source,
         refId: item.refId,
@@ -291,6 +291,7 @@ export function VocHomePanel({
         vocReasons: item.vocReasons,
         linkedCveIds,
         assigneeEmail: userEmail,
+        createTask: true,
         vendorKey: vendorDisplay?.toLowerCase(),
         vendorDisplay,
         productDisplay,
@@ -300,6 +301,9 @@ export function VocHomePanel({
             ? String((item.payload.channel as { slug?: string }).slug ?? "")
             : undefined
       });
+      if (!created.taskId && !created.case?.taskId) {
+        setCaseError("Кейс создан, но задача не появилась — нажмите «Создать задачу» ещё раз");
+      }
       if (item.status === "open") {
         await setStatus(item, "claimed");
       }
@@ -711,9 +715,20 @@ export function VocHomePanel({
                 ) : (
                   <span className="rounded-xl border border-violet-400/30 bg-violet-500/10 px-3 py-2 text-[11px] text-violet-800 dark:text-violet-200">
                     Кейс #{selected.caseId.slice(0, 8)}
-                    {selected.taskId ? ` · задача ${selected.taskId.slice(0, 8)}` : ""}
+                    {selected.taskId ? ` · задача ${selected.taskId.slice(0, 8)}` : " · без задачи"}
                   </span>
                 )}
+                {selected.caseId && !selected.taskId ? (
+                  <button
+                    type="button"
+                    disabled={casePending}
+                    onClick={() => void handleCreateCase(selected)}
+                    className="inline-flex items-center gap-1 rounded-xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-[11px] font-medium"
+                  >
+                    {casePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Briefcase className="h-3.5 w-3.5" />}
+                    Создать задачу
+                  </button>
+                ) : null}
                 {selected.caseId ? (
                   <VocVerificationPanel
                     caseId={selected.caseId}

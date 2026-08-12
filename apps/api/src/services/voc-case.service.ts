@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
+import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import {
   computeSlaDueAt,
   VOC_OUTCOMES,
@@ -62,6 +62,8 @@ type CaseRefHit = {
 
 @Injectable()
 export class VocCaseService {
+  private readonly logger = new Logger(VocCaseService.name);
+
   constructor(
     private readonly db: DbService,
     private readonly vulnTasks: VulnTaskService,
@@ -364,21 +366,6 @@ export class VocCaseService {
       [caseId, refKey, source, refId]
     );
 
-    const playbookCtx = await this.collectPlaybookContext({
-      refKey,
-      source,
-      refId,
-      title,
-      subtitle: input.subtitle,
-      vocPriority,
-      vocReasons: input.vocReasons,
-      linkedCveIds,
-      vendorDisplay: input.vendorDisplay,
-      productDisplay: input.productDisplay,
-      tgChannel: input.tgChannel
-    });
-    await this.generateAndSavePlaybook(caseId, playbookCtx);
-
     let taskId: string | null = null;
     if (input.createTask !== false) {
       taskId = await this.ensureTaskForCase(caseId, {
@@ -397,6 +384,28 @@ export class VocCaseService {
         tgChannel: input.tgChannel,
         slaDueAt
       });
+    }
+
+    // Playbook after task — best-effort so LLM/DB slowness cannot leave a case without a task.
+    try {
+      const playbookCtx = await this.collectPlaybookContext({
+        refKey,
+        source,
+        refId,
+        title,
+        subtitle: input.subtitle,
+        vocPriority,
+        vocReasons: input.vocReasons,
+        linkedCveIds,
+        vendorDisplay: input.vendorDisplay,
+        productDisplay: input.productDisplay,
+        tgChannel: input.tgChannel
+      });
+      await this.generateAndSavePlaybook(caseId, playbookCtx);
+    } catch (e) {
+      this.logger.warn(
+        `playbook deferred for case ${caseId}: ${e instanceof Error ? e.message : String(e)}`
+      );
     }
 
     const row = await this.getCaseById(caseId);

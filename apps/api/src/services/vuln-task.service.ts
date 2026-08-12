@@ -586,10 +586,21 @@ export class VulnTaskService {
       tgChannel: input.tgChannel
     };
     const textEngine = await this.integration.getTextEngineSettings();
-    const brief =
-      textEngine.textEngine === "llm"
-        ? await runVocTaskBriefLlm(briefInput, await this.integration.getEffectiveLlmConfig())
-        : buildVocTaskBriefFallback(briefInput);
+    let brief;
+    try {
+      brief =
+        textEngine.textEngine === "llm"
+          ? await runVocTaskBriefLlm(briefInput, await this.integration.getEffectiveLlmConfig())
+          : buildVocTaskBriefFallback(briefInput);
+    } catch (e) {
+      // Never block task creation on LLM/transport failures.
+      brief = buildVocTaskBriefFallback(briefInput);
+      brief.notesMd =
+        `${brief.notesMd}\n\n> AI brief unavailable: ${e instanceof Error ? e.message : String(e)}`.slice(
+          0,
+          20_000
+        );
+    }
     const taskTitle = brief.taskTitle?.trim() || `VOC: ${input.title}`;
 
     const r = await this.db.query<{ id: string }>(
