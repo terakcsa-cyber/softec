@@ -54,7 +54,7 @@
   "pnpm": {
     "overrides": {
       "shell-quote": ">=1.8.4",
-      "undici": ">=6.27.0",
+      "undici": "^6.27.0",
       "tmp": ">=0.2.6",
       "multer": ">=2.2.0"
     },
