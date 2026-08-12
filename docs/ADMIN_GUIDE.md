@@ -598,6 +598,7 @@ gunzip -c backup.sql.gz | docker compose --env-file .env.production -f infra/doc
 
 1. **Проверить обновления** — сверка текущего SHA с git remote (`origin` / `PLATFORM_UPDATE_REPO_URL`).
 2. При наличии коммитов ahead — просмотр changelog и **Применить обновление** (если включён safe-apply).
+3. **Диск и бэкапы** — прогресс-бар свободного места + **Очистить старое** (удаляет лишние `backups/*.sql.gz`, оставляя N свежих; опционально dangling Docker images/build cache, без volumes).
 
 Безопасность apply:
 

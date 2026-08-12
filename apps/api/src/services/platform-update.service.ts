@@ -6,7 +6,7 @@ import {
   ServiceUnavailableException
 } from "@nestjs/common";
 import { spawn } from "node:child_process";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, stat, statfs, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { constants as fsConstants } from "node:fs";
@@ -75,6 +75,47 @@ export type PlatformUpdateStatus = {
   };
 };
 
+export type DiskMountInfo = {
+  path: string;
+  label: string;
+  totalBytes: number;
+  usedBytes: number;
+  freeBytes: number;
+  usedRatio: number;
+};
+
+export type BackupFileInfo = {
+  name: string;
+  sizeBytes: number;
+  mtime: string | null;
+};
+
+export type PlatformStorageStatus = {
+  checkedAt: string;
+  mounts: DiskMountInfo[];
+  backups: {
+    dir: string | null;
+    files: BackupFileInfo[];
+    totalBytes: number;
+    keepDefault: number;
+  };
+  docker: {
+    available: boolean;
+    summaryRu: string | null;
+    reclaimableRu: string | null;
+  };
+  notesRu: string[];
+};
+
+export type PlatformCleanupResult = {
+  deleted: Array<{ name: string; sizeBytes: number }>;
+  kept: Array<{ name: string; sizeBytes: number }>;
+  freedBytes: number;
+  dockerPruned: boolean;
+  dockerPruneLog: string | null;
+  storage: PlatformStorageStatus;
+};
+
 type JobFile = {
   phase?: string;
   progressRu?: string;
@@ -98,6 +139,203 @@ export class PlatformUpdateService {
       return { ...this.lastCheck, job };
     }
     return this.check({ soft: true });
+  }
+
+  async getStorage(): Promise<PlatformStorageStatus> {
+    const cfg = this.config();
+    const keepDefault = this.backupKeepDefault();
+    const notesRu: string[] = [
+      "Очистка удаляет только старые *.sql.gz в backups/, оставляя N свежих.",
+      "Volumes Postgres/Redis/RabbitMQ и файлы .env никогда не трогаются.",
+      "Опциональный Docker prune — только dangling images и build cache, без -a и без volumes."
+    ];
+
+    const mounts: DiskMountInfo[] = [];
+    const seen = new Set<string>();
+    const candidates: Array<{ path: string; label: string }> = [
+      { path: cfg.repoDir || process.cwd(), label: "Репозиторий / данные" },
+      { path: cfg.statusFile ? dirname(cfg.statusFile) : join(process.cwd(), "data"), label: "data/" },
+      { path: "/", label: "Корень ФС (контейнер/хост)" }
+    ];
+    for (const c of candidates) {
+      const abs = resolve(c.path);
+      if (seen.has(abs)) continue;
+      seen.add(abs);
+      const m = await this.readMount(abs, c.label);
+      if (m) mounts.push(m);
+    }
+
+    const backupsDir = cfg.repoDir ? join(cfg.repoDir, "backups") : null;
+    const backupFiles = backupsDir ? await this.listBackupFiles(backupsDir) : [];
+    const backupTotal = backupFiles.reduce((n, f) => n + f.sizeBytes, 0);
+
+    const dockerOk = await this.commandOk("docker", ["version"]);
+    let summaryRu: string | null = null;
+    let reclaimableRu: string | null = null;
+    if (dockerOk) {
+      const dfOut = await this.execCapture("docker", ["system", "df"], {
+        allowFail: true,
+        timeoutMs: 20_000
+      });
+      if (dfOut) {
+        summaryRu = dfOut
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .slice(0, 6)
+          .join(" · ");
+        const reclaimLine = dfOut
+          .split("\n")
+          .map((l) => l.trim())
+          .find((l) => /reclaimable/i.test(l) || /можно освободить/i.test(l));
+        if (reclaimLine) reclaimableRu = reclaimLine;
+      }
+    } else {
+      notesRu.push("Docker CLI недоступен в API — для prune подключите update-helper (docker.sock).");
+    }
+
+    return {
+      checkedAt: new Date().toISOString(),
+      mounts,
+      backups: {
+        dir: backupsDir,
+        files: backupFiles,
+        totalBytes: backupTotal,
+        keepDefault
+      },
+      docker: {
+        available: dockerOk,
+        summaryRu,
+        reclaimableRu
+      },
+      notesRu
+    };
+  }
+
+  async cleanupStorage(opts?: {
+    keepBackups?: number;
+    pruneDocker?: boolean;
+  }): Promise<PlatformCleanupResult> {
+    const cfg = this.config();
+    if (!cfg.repoDir) {
+      throw new BadRequestException("Нет PLATFORM_REPO_DIR / git checkout — очистка backups недоступна.");
+    }
+    const backupsDir = join(cfg.repoDir, "backups");
+    const keep = Math.max(1, Math.min(50, Math.floor(opts?.keepBackups ?? this.backupKeepDefault())));
+    const files = await this.listBackupFiles(backupsDir);
+    const keepSet = new Set(files.slice(0, keep).map((f) => f.name));
+    const toDelete = files.filter((f) => !keepSet.has(f.name));
+
+    const deleted: Array<{ name: string; sizeBytes: number }> = [];
+    for (const f of toDelete) {
+      const full = join(backupsDir, f.name);
+      // Safety: only basename *.sql.gz inside backups/
+      if (f.name.includes("/") || f.name.includes("\\") || f.name.includes("..")) continue;
+      if (!/\.sql\.gz$/i.test(f.name)) continue;
+      try {
+        await unlink(full);
+        deleted.push({ name: f.name, sizeBytes: f.sizeBytes });
+      } catch (err) {
+        this.log.warn(`Failed to delete backup ${f.name}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    let dockerPruned = false;
+    let dockerPruneLog: string | null = null;
+    if (opts?.pruneDocker) {
+      const dockerOk = await this.commandOk("docker", ["version"]);
+      if (!dockerOk) {
+        throw new BadRequestException(
+          "Docker CLI недоступен. Подключите infra/docker-compose.update-helper.yml для prune."
+        );
+      }
+      const parts: string[] = [];
+      // No `docker system prune -a`, no volumes — only dangling + builder cache.
+      const img = await this.execCapture("docker", ["image", "prune", "-f"], {
+        allowFail: true,
+        timeoutMs: 120_000
+      });
+      if (img?.trim()) parts.push(img.trim());
+      const builder = await this.execCapture("docker", ["builder", "prune", "-f"], {
+        allowFail: true,
+        timeoutMs: 180_000
+      });
+      if (builder?.trim()) parts.push(builder.trim());
+      dockerPruned = true;
+      dockerPruneLog = parts.join("\n") || "Docker prune выполнен (dangling images + builder cache).";
+    }
+
+    const storage = await this.getStorage();
+    return {
+      deleted,
+      kept: files.filter((f) => keepSet.has(f.name)).map((f) => ({ name: f.name, sizeBytes: f.sizeBytes })),
+      freedBytes: deleted.reduce((n, f) => n + f.sizeBytes, 0),
+      dockerPruned,
+      dockerPruneLog,
+      storage
+    };
+  }
+
+  private backupKeepDefault(): number {
+    const raw = process.env.PLATFORM_UPDATE_BACKUP_KEEP?.trim();
+    const n = raw ? Number(raw) : 3;
+    if (!Number.isFinite(n)) return 3;
+    return Math.max(1, Math.min(50, Math.floor(n)));
+  }
+
+  private async readMount(path: string, label: string): Promise<DiskMountInfo | null> {
+    try {
+      if (!(await this.exists(path))) return null;
+      const s = await statfs(path);
+      const bsize = Number(s.bsize) || 0;
+      const blocks = Number(s.blocks) || 0;
+      const bavail = Number(s.bavail) || 0;
+      const totalBytes = bsize * blocks;
+      const freeBytes = bsize * bavail;
+      if (totalBytes <= 0) return null;
+      const usedBytes = Math.max(0, totalBytes - freeBytes);
+      return {
+        path,
+        label,
+        totalBytes,
+        usedBytes,
+        freeBytes,
+        usedRatio: usedBytes / totalBytes
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private async listBackupFiles(dir: string): Promise<BackupFileInfo[]> {
+    if (!(await this.exists(dir))) return [];
+    try {
+      const names = await readdir(dir);
+      const out: BackupFileInfo[] = [];
+      for (const name of names) {
+        if (!/^(pre_update_|vuln_intel_).+\.sql\.gz$/i.test(name)) continue;
+        if (name.includes("..") || name.includes("/") || name.includes("\\")) continue;
+        try {
+          const st = await stat(join(dir, name));
+          if (!st.isFile()) continue;
+          out.push({
+            name,
+            sizeBytes: st.size,
+            mtime: st.mtime?.toISOString?.() ?? null
+          });
+        } catch {
+          // skip
+        }
+      }
+      out.sort((a, b) => {
+        const ta = a.mtime ? Date.parse(a.mtime) : 0;
+        const tb = b.mtime ? Date.parse(b.mtime) : 0;
+        return tb - ta;
+      });
+      return out;
+    } catch {
+      return [];
+    }
   }
 
   async check(opts?: { soft?: boolean }): Promise<PlatformUpdateStatus> {
