@@ -3,7 +3,7 @@
 import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "@/components/ui/cn";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 type TlsStatus = {
   configured: boolean;
@@ -33,11 +33,14 @@ type TlsStatus = {
   httpsUrl?: string | null;
   publishedTlsPort: string | null;
   defaultDomain: string;
+  defaultTargetIsIp?: boolean;
   warningRu: string;
   issuer?: "letsencrypt" | "selfsigned" | "unknown";
   certbotAvailable?: boolean;
+  certbotSupportsIpCertificates?: boolean;
   acmeWebroot?: string;
   letsEncryptReadyHintRu?: string;
+  ipHttpsHintRu?: string;
 };
 
 type GenerateResult = TlsStatus & {
@@ -74,6 +77,16 @@ function formatDate(iso: string | null): string {
   }
 }
 
+function looksLikeIp(raw: string): boolean {
+  const s = raw.trim().replace(/^\[|\]$/g, "");
+  if (!s) return false;
+  // IPv4
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) return true;
+  // rough IPv6
+  if (s.includes(":")) return true;
+  return false;
+}
+
 export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }) {
   const qc = useQueryClient();
   const [domain, setDomain] = useState("");
@@ -97,6 +110,10 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
       setDomain(statusQ.data.defaultDomain);
     }
   }, [domain, statusQ.data?.defaultDomain]);
+
+  const targetIsIp = useMemo(() => looksLikeIp(domain), [domain]);
+  const leIpSupported = statusQ.data?.certbotSupportsIpCertificates === true;
+  const leAllowedForTarget = !targetIsIp || leIpSupported;
 
   const letsencrypt = useMutation({
     mutationFn: async () => {
@@ -184,8 +201,8 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
         <div className="mb-4">
           <div className="text-sm font-semibold tracking-tight text-fg/95">Веб / TLS</div>
           <p className="mt-1 text-xs text-muted">
-            Let's Encrypt через certbot под капотом (HTTP-01) с авто-применением на веб. Для лаборатории —
-            самоподписанный запасной вариант.
+            HTTPS по домену (Let&apos;s Encrypt) или по голому IP без DNS (самоподписанный с IP в SAN —
+            основной путь; опционально LE shortlived ~6 дней).
           </p>
         </div>
       ) : null}
@@ -222,7 +239,7 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
               </span>
               {st.issuer === "letsencrypt" ? (
                 <span className="inline-flex rounded-md bg-sky-500/15 px-2 py-0.5 text-[11px] font-medium text-sky-800 dark:text-sky-300">
-                  Let's Encrypt
+                  Let&apos;s Encrypt
                 </span>
               ) : st.selfSigned && st.configured ? (
                 <span className="inline-flex rounded-md bg-amber-500/15 px-2 py-0.5 text-[11px] font-medium text-amber-800 dark:text-amber-300">
@@ -250,7 +267,7 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
                 </dd>
               </div>
               <div>
-                <dt className="text-muted">Домен (CN)</dt>
+                <dt className="text-muted">CN / цель</dt>
                 <dd className="mt-0.5 font-medium text-fg/90">{st.commonName ?? "—"}</dd>
               </div>
               <div>
@@ -260,6 +277,14 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
                   {st.daysRemaining != null ? ` (${st.daysRemaining} дн.)` : ""}
                 </dd>
               </div>
+              {st.subjectAltNames?.length ? (
+                <div className="sm:col-span-2">
+                  <dt className="text-muted">SAN</dt>
+                  <dd className="mt-0.5 break-all font-mono text-[11px] text-fg/75">
+                    {st.subjectAltNames.join(", ")}
+                  </dd>
+                </div>
+              ) : null}
               <div className="sm:col-span-2">
                 <dt className="text-muted">ACME webroot</dt>
                 <dd className="mt-0.5 break-all font-mono text-[11px] text-fg/75">{st.acmeWebroot ?? "—"}</dd>
@@ -267,68 +292,138 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
             </dl>
 
             <p className="mt-3 text-[11px] leading-relaxed text-muted">
-              {st.letsEncryptReadyHintRu ?? st.proxy.message}
+              {targetIsIp ? (st.ipHttpsHintRu ?? st.letsEncryptReadyHintRu) : (st.letsEncryptReadyHintRu ?? st.proxy.message)}
             </p>
             <p className="mt-1 text-[11px] leading-relaxed text-muted">{st.proxy.message}</p>
           </div>
 
           <div className="space-y-3">
             <label className="block">
-              <span className="text-xs font-medium text-fg/85">Домен</span>
+              <span className="text-xs font-medium text-fg/85">Домен или IP</span>
               <input
                 value={domain}
                 onChange={(e) => setDomain(e.target.value)}
-                placeholder={st.defaultDomain}
+                placeholder={st.defaultDomain || "203.0.113.10"}
                 className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none ring-accent/30 focus:ring-2 dark:border-border dark:bg-black/30"
                 autoComplete="off"
                 spellCheck={false}
               />
-            </label>
-            <label className="block">
-              <span className="text-xs font-medium text-fg/85">Email для Let's Encrypt</span>
-              <input
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@example.com"
-                type="email"
-                className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none ring-accent/30 focus:ring-2 dark:border-border dark:bg-black/30"
-                autoComplete="email"
-              />
-            </label>
-            <label className="flex items-center gap-2 text-xs text-fg/80">
-              <input type="checkbox" checked={staging} onChange={(e) => setStaging(e.target.checked)} />
-              Staging CA (тест, браузеры не доверяют)
+              <span className="mt-1 block text-[11px] text-muted">
+                Пример IP: <span className="font-mono">203.0.113.10</span> — DNS A-запись не нужна.
+              </span>
             </label>
 
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                disabled={busy || !domain.trim() || !email.trim()}
-                onClick={() => letsencrypt.mutate()}
-                className={cn(
-                  "inline-flex items-center justify-center rounded-xl px-4 py-2.5 text-sm font-medium transition",
-                  "bg-accent text-white hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+            {targetIsIp ? (
+              <>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={busy || !domain.trim()}
+                    onClick={() => selfSigned.mutate()}
+                    className={cn(
+                      "inline-flex items-center justify-center rounded-xl px-4 py-2.5 text-sm font-medium transition",
+                      "bg-accent text-white hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                    )}
+                  >
+                    {selfSigned.isPending ? "Генерация…" : "HTTPS для IP (самоподписанный)"}
+                  </button>
+                  {leIpSupported ? (
+                    <button
+                      type="button"
+                      disabled={busy || !domain.trim() || !email.trim()}
+                      onClick={() => letsencrypt.mutate()}
+                      className="inline-flex items-center justify-center rounded-xl border border-border bg-white/70 px-4 py-2.5 text-sm font-medium text-fg/90 disabled:opacity-50 dark:bg-black/30"
+                    >
+                      {letsencrypt.isPending ? "Certbot…" : "LE для IP (~6 дн.)"}
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    disabled={busy || st.issuer !== "letsencrypt"}
+                    onClick={() => renew.mutate()}
+                    className="inline-flex items-center justify-center rounded-xl border border-border bg-white/70 px-4 py-2.5 text-sm font-medium text-fg/90 disabled:opacity-50 dark:bg-black/30"
+                  >
+                    {renew.isPending ? "Renew…" : "Обновить LE"}
+                  </button>
+                </div>
+                {leIpSupported ? (
+                  <>
+                    <label className="block">
+                      <span className="text-xs font-medium text-fg/85">Email для Let&apos;s Encrypt (опционально для IP)</span>
+                      <input
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        placeholder="admin@example.com"
+                        type="email"
+                        className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none ring-accent/30 focus:ring-2 dark:border-border dark:bg-black/30"
+                        autoComplete="email"
+                      />
+                    </label>
+                    <label className="flex items-center gap-2 text-xs text-fg/80">
+                      <input type="checkbox" checked={staging} onChange={(e) => setStaging(e.target.checked)} />
+                      Staging CA (тест, браузеры не доверяют)
+                    </label>
+                    <p className="text-[11px] leading-relaxed text-muted">
+                      LE для IP: публичный адрес + порт 80, shortlived ~6 дней, DNS не нужен. Основной путь без
+                      предупреждений УЦ — только с доверенным CA; самоподписанный всегда работает локально/в lab.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-[11px] leading-relaxed text-amber-800 dark:text-amber-300">
+                    Let&apos;s Encrypt для голого IP недоступен в этом окружении (нужен certbot ≥ 5.4). Используйте
+                    самоподписанный сертификат с IP в SAN — DNS не требуется.
+                  </p>
                 )}
-              >
-                {letsencrypt.isPending ? "Certbot…" : "Получить Let's Encrypt"}
-              </button>
-              <button
-                type="button"
-                disabled={busy || st.issuer !== "letsencrypt"}
-                onClick={() => renew.mutate()}
-                className="inline-flex items-center justify-center rounded-xl border border-border bg-white/70 px-4 py-2.5 text-sm font-medium text-fg/90 disabled:opacity-50 dark:bg-black/30"
-              >
-                {renew.isPending ? "Renew…" : "Обновить LE"}
-              </button>
-              <button
-                type="button"
-                disabled={busy || !domain.trim()}
-                onClick={() => selfSigned.mutate()}
-                className="inline-flex items-center justify-center rounded-xl border border-border bg-white/70 px-4 py-2.5 text-sm font-medium text-fg/90 disabled:opacity-50 dark:bg-black/30"
-              >
-                {selfSigned.isPending ? "Генерация…" : "Самоподписанный (lab)"}
-              </button>
-            </div>
+              </>
+            ) : (
+              <>
+                <label className="block">
+                  <span className="text-xs font-medium text-fg/85">Email для Let&apos;s Encrypt</span>
+                  <input
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="admin@example.com"
+                    type="email"
+                    className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none ring-accent/30 focus:ring-2 dark:border-border dark:bg-black/30"
+                    autoComplete="email"
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-xs text-fg/80">
+                  <input type="checkbox" checked={staging} onChange={(e) => setStaging(e.target.checked)} />
+                  Staging CA (тест, браузеры не доверяют)
+                </label>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={busy || !domain.trim() || !email.trim() || !leAllowedForTarget}
+                    onClick={() => letsencrypt.mutate()}
+                    className={cn(
+                      "inline-flex items-center justify-center rounded-xl px-4 py-2.5 text-sm font-medium transition",
+                      "bg-accent text-white hover:opacity-95 disabled:cursor-not-allowed disabled:opacity-50"
+                    )}
+                  >
+                    {letsencrypt.isPending ? "Certbot…" : "Получить Let's Encrypt"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || st.issuer !== "letsencrypt"}
+                    onClick={() => renew.mutate()}
+                    className="inline-flex items-center justify-center rounded-xl border border-border bg-white/70 px-4 py-2.5 text-sm font-medium text-fg/90 disabled:opacity-50 dark:bg-black/30"
+                  >
+                    {renew.isPending ? "Renew…" : "Обновить LE"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy || !domain.trim()}
+                    onClick={() => selfSigned.mutate()}
+                    className="inline-flex items-center justify-center rounded-xl border border-border bg-white/70 px-4 py-2.5 text-sm font-medium text-fg/90 disabled:opacity-50 dark:bg-black/30"
+                  >
+                    {selfSigned.isPending ? "Генерация…" : "Самоподписанный (lab)"}
+                  </button>
+                </div>
+              </>
+            )}
 
             <p className="text-[11px] leading-relaxed text-muted">{st.warningRu}</p>
           </div>

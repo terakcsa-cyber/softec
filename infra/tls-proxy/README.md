@@ -11,7 +11,7 @@ Also serves Let's Encrypt HTTP-01 challenges from the shared ACME webroot on por
 | `/certs/key.pem` | Private key (PEM, mode 600) |
 | `/var/www/certbot/.well-known/acme-challenge/` | ACME HTTP-01 tokens (written by API/certbot) |
 
-Certificates are issued or generated from **Settings → Веб / TLS** (admin-only): Let's Encrypt via certbot, or self-signed for labs. The entrypoint bootstraps a short-lived placeholder if files are missing, then polls for changes and runs `caddy reload`.
+Certificates are issued or generated from **Settings → Веб / TLS** (admin-only): Let's Encrypt via certbot (domain or optional IP shortlived), or self-signed with IP SAN for bare-IP access without DNS. Caddy listens on `:443` with the cert files, so `https://x.x.x.x` works when the certificate includes `IP:x.x.x.x`. The entrypoint bootstraps a short-lived placeholder if files are missing, then polls for changes and runs `caddy reload`.
 
 ## Ports
 

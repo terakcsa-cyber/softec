@@ -167,17 +167,19 @@ Internet → TLS :443 (tls-proxy) → web:3000
 
 **One-click из UI (admin):** Настройки → **Веб / TLS**
 
-1. **Получить Let's Encrypt** — certbot HTTP-01 (webroot) в контейнере `api`, затем копирование `fullchain`/`privkey` в volume `tls_certs` и reload `tls-proxy`. Нужны: публичный DNS на этот хост, порт **80** снаружи (`WEB_TLS_HTTP_PORT`), email для ACME-аккаунта. Checkbox «Staging CA» — тестовый УЦ (браузеры не доверяют; безопаснее для dry-run).
-2. **Обновить LE** — `certbot renew` + повторная установка в `tls_certs` (если issuer = Let's Encrypt).
-3. **Самоподписанный (lab)** — запасной вариант для внутренней сети / localhost.
+1. **Домен:** **Получить Let's Encrypt** — certbot HTTP-01 (webroot) в контейнере `api`, затем копирование `fullchain`/`privkey` в volume `tls_certs` и reload `tls-proxy`. Нужны: публичный DNS на этот хост, порт **80** снаружи (`WEB_TLS_HTTP_PORT`), email для ACME-аккаунта. Checkbox «Staging CA» — тестовый УЦ (браузеры не доверяют; безопаснее для dry-run).
+2. **Голый IP (без DNS):** в поле «Домен или IP» укажите адрес (например `203.0.113.10`) → **HTTPS для IP (самоподписанный)**. Сертификат с SAN `IP:…` (+ localhost/127.0.0.1) пишется в `tls_certs`, tls-proxy/local proxy перечитывает файлы. Браузер покажет предупреждение о недоверенном УЦ — это ожидаемо. DNS A-запись **не нужна**.
+3. **Опционально LE для IP** (certbot ≥ 5.4 в образе API): кнопка «LE для IP (~6 дн.)» — `--ip-address` + shortlived-профиль Let's Encrypt (~160 часов). Нужен публичный IP и порт **80**; DNS не нужен. Авто-renew при сроке &lt; `LETSENCRYPT_IP_RENEW_DAYS` (default 2).
+4. **Обновить LE** — `certbot renew` + повторная установка в `tls_certs` (если issuer = Let's Encrypt).
+5. **Самоподписанный (lab)** — для домена во внутренней сети / localhost.
 
-Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acme_webroot` / `acme_staging_webroot`), certbot state (`letsencrypt_data` / `letsencrypt_staging_data`). В образе API установлен пакет `certbot`.
+Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acme_webroot` / `acme_staging_webroot`), certbot state (`letsencrypt_data` / `letsencrypt_staging_data`). В образе API: `certbot≥5.4` (pip).
 
-Порты: `WEB_TLS_PUBLISHED_PORT` (prod default 443), `WEB_TLS_HTTP_PORT` (80). Прямой HTTP к web (`WEB_PUBLISHED_PORT`) остаётся доступен для отладки. После выпуска LE выставьте `PUBLIC_WEB_ORIGIN` / `API_CORS_ORIGIN` на `https://…`.
+Порты: `WEB_TLS_PUBLISHED_PORT` (prod default 443), `WEB_TLS_HTTP_PORT` (80). Прямой HTTP к web (`WEB_PUBLISHED_PORT`) остаётся доступен для отладки. После выпуска LE выставьте `PUBLIC_WEB_ORIGIN` / `API_CORS_ORIGIN` на `https://…` (для IP: `https://203.0.113.10`).
 
-**Авто-renew:** при issuer=Let's Encrypt API раз в сутки проверяет срок и вызывает `certbot renew`, если осталось &lt; `LETSENCRYPT_RENEW_DAYS` (default 30). Отключить: `LETSENCRYPT_AUTO_RENEW=false`. Ручная кнопка «Обновить LE» всегда доступна.
+**Авто-renew:** при issuer=Let's Encrypt API раз в сутки проверяет срок и вызывает `certbot renew`, если осталось &lt; `LETSENCRYPT_RENEW_DAYS` (default 30) для домена или &lt; `LETSENCRYPT_IP_RENEW_DAYS` (default 2) для shortlived/IP. Отключить: `LETSENCRYPT_AUTO_RENEW=false`. Ручная кнопка «Обновить LE» всегда доступна.
 
-**Ограничения:** localhost / `.local` / голый IP — Let's Encrypt не выдаст; без публичного :80 HTTP-01 не пройдёт; staging с портом 8080 по умолчанию не подходит для LE без проброса 80.
+**Ограничения:** localhost / `.local` — LE не выдаст (используйте self-signed); без публичного :80 HTTP-01 не пройдёт; staging с портом 8080 по умолчанию не подходит для LE без проброса 80; IP HTTPS без DNS = self-signed (или LE shortlived при доступном :80).
 
 ---
 

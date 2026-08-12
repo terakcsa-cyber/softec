@@ -1,12 +1,14 @@
 import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { spawn } from "node:child_process";
 import { access, chmod, copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 
 export type CertbotIssueResult = {
   domain: string;
   email: string;
   staging: boolean;
+  shortlived: boolean;
   liveDir: string;
   fullchainPath: string;
   privkeyPath: string;
@@ -14,11 +16,13 @@ export type CertbotIssueResult = {
 
 /**
  * Runs certbot HTTP-01 (webroot) and materializes fullchain/privkey paths.
- * Requires public DNS + port 80 serving `/.well-known/acme-challenge/` from TLS_ACME_WEBROOT.
+ * Domain: public DNS + port 80 serving `/.well-known/acme-challenge/` from TLS_ACME_WEBROOT.
+ * IP (certbot ≥ 5.4): `--ip-address` + `--preferred-profile shortlived` (~6 days); no DNS required.
  */
 @Injectable()
 export class LetsEncryptCertbotService {
   private readonly log = new Logger(LetsEncryptCertbotService.name);
+  private certbotVersionCache: { version: string | null; supportsIp: boolean } | null = null;
 
   webrootDir(): string {
     const raw = process.env.TLS_ACME_WEBROOT?.trim();
@@ -53,6 +57,50 @@ export class LetsEncryptCertbotService {
     }
   }
 
+  /** Certbot 5.3+ adds --ip-address; webroot+IP needs ≥ 5.4 (LE shortlived profile). */
+  async supportsIpCertificates(): Promise<boolean> {
+    const info = await this.readCertbotVersion();
+    return info.supportsIp;
+  }
+
+  async assertIpIssuanceSupported(): Promise<void> {
+    const available = await this.isCertbotAvailable();
+    if (!available) {
+      throw new BadRequestException(
+        "certbot не установлен. Для IP HTTPS без DNS используйте «HTTPS для IP (самоподписанный)»."
+      );
+    }
+    const info = await this.readCertbotVersion();
+    if (!info.supportsIp) {
+      throw new BadRequestException(
+        `Let's Encrypt для голого IP требует certbot ≥ 5.4 (сейчас: ${info.version ?? "неизвестно"}). Используйте самоподписанный сертификат с IP в SAN — DNS не нужен.`
+      );
+    }
+  }
+
+  isIpv4Literal(value: string): boolean {
+    return isIP(value.trim()) === 4;
+  }
+
+  isIpv6Literal(value: string): boolean {
+    return isIP(value.trim()) === 6;
+  }
+
+  isIpLiteral(value: string): boolean {
+    return isIP(value.trim()) !== 0;
+  }
+
+  isValidIpv4(value: string): boolean {
+    return isIP(value.trim()) === 4;
+  }
+
+  normalizeIpv6(value: string): string | null {
+    const v = value.trim();
+    if (isIP(v) !== 6) return null;
+    // Node accepts the literal; keep lowercase compressed form as given after trim.
+    return v.toLowerCase();
+  }
+
   normalizeEmail(raw: string): string {
     const email = raw.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -65,11 +113,13 @@ export class LetsEncryptCertbotService {
     const d = domain.trim().toLowerCase();
     if (!d || d === "localhost" || d.endsWith(".local") || d.endsWith(".internal")) {
       throw new BadRequestException(
-        "Let's Encrypt не выдаёт сертификаты на localhost. Нужен публичный домен (A/AAAA → этот сервер)."
+        "Let's Encrypt не выдаёт сертификаты на localhost. Нужен публичный домен (A/AAAA → этот сервер) или публичный IP."
       );
     }
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(d)) {
-      throw new BadRequestException("Let's Encrypt HTTP-01 не поддерживает голый IP — нужен доменное имя.");
+    if (this.isIpLiteral(d)) {
+      throw new BadRequestException(
+        "Для IP используйте выпуск с флагом ipAddress (короткоживущий LE) или самоподписанный сертификат."
+      );
     }
   }
 
@@ -77,10 +127,20 @@ export class LetsEncryptCertbotService {
     domain: string;
     email: string;
     staging?: boolean;
+    ipAddress?: boolean;
   }): Promise<CertbotIssueResult> {
     const domain = input.domain.trim().toLowerCase();
     const email = this.normalizeEmail(input.email);
-    this.assertPublicDomain(domain);
+    const ipAddress = input.ipAddress === true || this.isIpLiteral(domain);
+
+    if (ipAddress) {
+      if (!this.isIpLiteral(domain)) {
+        throw new BadRequestException("Для Let's Encrypt IP укажите корректный IPv4 или IPv6.");
+      }
+      await this.assertIpIssuanceSupported();
+    } else {
+      this.assertPublicDomain(domain);
+    }
 
     const staging =
       input.staging === true ||
@@ -99,7 +159,7 @@ export class LetsEncryptCertbotService {
     const available = await this.isCertbotAvailable();
     if (!available) {
       throw new BadRequestException(
-        "certbot не установлен в окружении API. В Docker-образе API он должен быть (apk add certbot); локально: brew install certbot."
+        "certbot не установлен в окружении API. В Docker-образе API он должен быть (certbot≥5.4); локально: brew install certbot / pip install 'certbot>=5.4'."
       );
     }
 
@@ -108,8 +168,6 @@ export class LetsEncryptCertbotService {
       "--webroot",
       "-w",
       webroot,
-      "-d",
-      domain,
       "--email",
       email,
       "--agree-tos",
@@ -124,23 +182,41 @@ export class LetsEncryptCertbotService {
       "--preferred-challenges",
       "http"
     ];
+
+    if (ipAddress) {
+      // LE requires shortlived profile for IP identifiers (~160h / 6 days).
+      args.push("--ip-address", domain, "--preferred-profile", "shortlived");
+    } else {
+      args.push("-d", domain);
+    }
     if (staging) args.push("--staging");
 
-    this.log.log(`Starting certbot for ${domain} (staging=${staging}); email/key material not logged beyond account email domain`);
+    this.log.log(
+      `Starting certbot for ${domain} (ip=${ipAddress}, staging=${staging}, shortlived=${ipAddress}); email/key material not logged beyond account email domain`
+    );
     try {
       await this.run(args, { timeoutMs: 180_000 });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      throw new BadRequestException(this.friendlyCertbotError(msg, domain));
+      throw new BadRequestException(this.friendlyCertbotError(msg, domain, ipAddress));
     }
 
-    const liveDir = join(configDir, "live", domain);
-    const fullchainPath = join(liveDir, "fullchain.pem");
-    const privkeyPath = join(liveDir, "privkey.pem");
-    await access(fullchainPath);
-    await access(privkeyPath);
+    const live = await this.resolveLiveMaterial([domain]);
+    if (!live) {
+      throw new BadRequestException(
+        `certbot завершился, но live/${domain}/fullchain.pem не найден в ${configDir}.`
+      );
+    }
 
-    return { domain, email, staging, liveDir, fullchainPath, privkeyPath };
+    return {
+      domain: live.domain,
+      email,
+      staging,
+      shortlived: ipAddress,
+      liveDir: join(configDir, "live", live.domain),
+      fullchainPath: live.fullchainPath,
+      privkeyPath: live.privkeyPath
+    };
   }
 
   async renew(): Promise<{ renewed: boolean; output: string }> {
@@ -179,6 +255,7 @@ export class LetsEncryptCertbotService {
     domain?: string;
     email?: string;
     staging?: boolean;
+    shortlived?: boolean;
   }): Promise<{ certPath: string; keyPath: string }> {
     const dir = opts.certsDir;
     await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -196,6 +273,7 @@ export class LetsEncryptCertbotService {
     await rename(stagingKey, keyPath);
 
     const domainFromPath = this.domainFromLivePath(opts.fullchainPath);
+    const domain = opts.domain?.trim().toLowerCase() || domainFromPath || undefined;
     // Marker for UI / renew logic
     await writeFile(
       join(dir, "issuer.json"),
@@ -203,9 +281,10 @@ export class LetsEncryptCertbotService {
         {
           issuer: "letsencrypt",
           installedAt: new Date().toISOString(),
-          domain: opts.domain?.trim().toLowerCase() || domainFromPath || undefined,
+          domain,
           email: opts.email?.trim().toLowerCase() || undefined,
           staging: opts.staging === true,
+          shortlived: opts.shortlived === true || (domain ? this.isIpLiteral(domain) : false),
           fullchainSource: opts.fullchainPath
         },
         null,
@@ -227,6 +306,7 @@ export class LetsEncryptCertbotService {
     domain: string | null;
     email: string | null;
     staging: boolean;
+    shortlived: boolean;
     fullchainSource: string | null;
   }> {
     try {
@@ -236,19 +316,29 @@ export class LetsEncryptCertbotService {
         domain?: string;
         email?: string;
         staging?: boolean;
+        shortlived?: boolean;
         fullchainSource?: string;
       };
       const issuer =
         j.issuer === "letsencrypt" ? "letsencrypt" : j.issuer === "selfsigned" ? "selfsigned" : "unknown";
+      const domain = typeof j.domain === "string" && j.domain.trim() ? j.domain.trim().toLowerCase() : null;
       return {
         issuer,
-        domain: typeof j.domain === "string" && j.domain.trim() ? j.domain.trim().toLowerCase() : null,
+        domain,
         email: typeof j.email === "string" && j.email.trim() ? j.email.trim().toLowerCase() : null,
         staging: j.staging === true,
+        shortlived: j.shortlived === true || (domain ? this.isIpLiteral(domain) : false),
         fullchainSource: typeof j.fullchainSource === "string" ? j.fullchainSource : null
       };
     } catch {
-      return { issuer: "unknown", domain: null, email: null, staging: false, fullchainSource: null };
+      return {
+        issuer: "unknown",
+        domain: null,
+        email: null,
+        staging: false,
+        shortlived: false,
+        fullchainSource: null
+      };
     }
   }
 
@@ -302,13 +392,37 @@ export class LetsEncryptCertbotService {
     return null;
   }
 
-  private friendlyCertbotError(raw: string, domain: string): string {
+  private async readCertbotVersion(): Promise<{ version: string | null; supportsIp: boolean }> {
+    if (this.certbotVersionCache) return this.certbotVersionCache;
+    try {
+      const out = await this.run(["--version"], { timeoutMs: 8_000 });
+      const m = /certbot\s+(\d+)\.(\d+)(?:\.(\d+))?/i.exec(out);
+      if (!m) {
+        this.certbotVersionCache = { version: out.trim().slice(0, 40) || null, supportsIp: false };
+        return this.certbotVersionCache;
+      }
+      const major = Number(m[1]);
+      const minor = Number(m[2]);
+      const version = `${major}.${minor}${m[3] != null ? `.${m[3]}` : ""}`;
+      // 5.4+ recommended for webroot + --ip-address (5.3 added flag for standalone/manual).
+      const supportsIp = major > 5 || (major === 5 && minor >= 4);
+      this.certbotVersionCache = { version, supportsIp };
+      return this.certbotVersionCache;
+    } catch {
+      this.certbotVersionCache = { version: null, supportsIp: false };
+      return this.certbotVersionCache;
+    }
+  }
+
+  private friendlyCertbotError(raw: string, domain: string, ipAddress: boolean): string {
     const t = raw.toLowerCase();
     if (t.includes("too many certificates") || t.includes("rate limit")) {
       return `Let's Encrypt rate limit для «${domain}». Подождите или используйте LETSENCRYPT_STAGING=true для теста.`;
     }
     if (t.includes("nxdomain") || t.includes("no valid a records") || t.includes("dns problem")) {
-      return `DNS: домен «${domain}» не резолвится на этот сервер. Проверьте A/AAAA запись.`;
+      return ipAddress
+        ? `HTTP-01 для IP «${domain}»: LE должен достучаться до http://${domain}/.well-known/acme-challenge/ (порт 80). DNS не нужен.`
+        : `DNS: домен «${domain}» не резолвится на этот сервер. Проверьте A/AAAA запись.`;
     }
     if (
       t.includes("connection refused") ||
@@ -317,7 +431,11 @@ export class LetsEncryptCertbotService {
       t.includes("invalid response") ||
       t.includes("404")
     ) {
-      return `HTTP-01 не прошёл для «${domain}»: Let's Encrypt должен достучаться до http://${domain}/.well-known/acme-challenge/ (порт 80, tls-proxy webroot).`;
+      const hostHint = this.isIpv6Literal(domain) ? `[${domain}]` : domain;
+      return `HTTP-01 не прошёл для «${domain}»: Let's Encrypt должен достучаться до http://${hostHint}/.well-known/acme-challenge/ (порт 80, tls-proxy webroot).`;
+    }
+    if (t.includes("unrecognized arguments") && t.includes("ip-address")) {
+      return "certbot слишком старый для --ip-address (нужен ≥ 5.4). Используйте самоподписанный сертификат с IP в SAN.";
     }
     if (t.includes("certbot: command not found") || t.includes("enoent")) {
       return "certbot не найден в PATH контейнера/хоста API.";

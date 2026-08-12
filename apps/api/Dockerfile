@@ -25,7 +25,8 @@ ENV PATH=$PNPM_HOME:$PATH
 ENV PLATFORM_GIT_SHA=$PLATFORM_GIT_SHA
 ENV PLATFORM_GIT_BRANCH=$PLATFORM_GIT_BRANCH
 ENV PLATFORM_GIT_TAG=$PLATFORM_GIT_TAG
-RUN apk add --no-cache openssl certbot git docker-cli \
+RUN apk add --no-cache openssl git docker-cli py3-pip \
+  && pip3 install --no-cache-dir --break-system-packages 'certbot>=5.4' \
   && corepack enable && corepack prepare pnpm@10.0.0 --activate
 WORKDIR /repo
 COPY --from=build /repo/package.json /repo/pnpm-lock.yaml /repo/pnpm-workspace.yaml ./

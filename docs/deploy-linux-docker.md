@@ -50,7 +50,7 @@ docker compose version
 
 Скрипт также поддерживает standalone `docker-compose`, но только версии v2.
 
-Важно: контейнер `web` внутри Docker слушает HTTP. HTTPS обеспечивает сервис `tls-proxy` (Caddy) на `WEB_TLS_PUBLISHED_PORT` (prod 443) + HTTP `:80` для ACME. Сертификат: **Настройки → Веб / TLS** → Let's Encrypt (публичный DNS + порт 80) или самоподписанный. `deploy.sh` проставляет `PLATFORM_GIT_SHA`, EPSS boot/poll и TLS-порты в env. Указывайте `https://` в `PUBLIC_WEB_ORIGIN` после выпуска сертификата.
+Важно: контейнер `web` внутри Docker слушает HTTP. HTTPS обеспечивает сервис `tls-proxy` (Caddy) на `WEB_TLS_PUBLISHED_PORT` (prod 443) + HTTP `:80` для ACME. Сертификат: **Настройки → Веб / TLS** → Let's Encrypt (публичный DNS + порт 80), **HTTPS для IP** (самоподписанный с SAN IP, DNS не нужен; предупреждение браузера), или опционально LE IP shortlived. `deploy.sh` проставляет `PLATFORM_GIT_SHA`, EPSS boot/poll и TLS-порты в env. Указывайте `https://` в `PUBLIC_WEB_ORIGIN` после выпуска сертификата (для IP: `https://x.x.x.x`).
 
 ## Подготовка
 
@@ -136,7 +136,7 @@ docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d
 - **`ADMIN_EMAILS`** — legacy allowlist для admin-only API по email; пустое значение не делает всех пользователей admin.
 - **`DLQ_BOOT_RETRY=false`** в production (ручной retry через API после диагностики).
 - Наружу: `web` (`WEB_PUBLISHED_PORT`) и `tls-proxy` (`WEB_TLS_PUBLISHED_PORT` / `:80` для ACME). `api`, `postgres`, `redis`, `rabbitmq` — только Docker network.
-- HTTPS: встроенный **tls-proxy** + **Настройки → Веб / TLS** (Let's Encrypt или self-signed). Внешний reverse proxy опционален.
+- HTTPS: встроенный **tls-proxy** + **Настройки → Веб / TLS** (Let's Encrypt для домена; для голого IP — self-signed с IP SAN, DNS не нужен). Внешний reverse proxy опционален.
 
 Подробнее: [ADMIN_GUIDE.md](./ADMIN_GUIDE.md), [MATURITY.md](./MATURITY.md).
 

@@ -43,11 +43,14 @@ export type WebTlsStatus = {
   httpsUrl: string | null;
   publishedTlsPort: string | null;
   defaultDomain: string;
+  defaultTargetIsIp: boolean;
   warningRu: string;
   issuer: "letsencrypt" | "selfsigned" | "unknown";
   certbotAvailable: boolean;
+  certbotSupportsIpCertificates: boolean;
   acmeWebroot: string;
   letsEncryptReadyHintRu: string;
+  ipHttpsHintRu: string;
 };
 
 export type WebTlsGenerateResult = WebTlsStatus & {
@@ -80,23 +83,36 @@ export class WebTlsService implements OnModuleInit {
     this.scheduleLetsEncryptAutoRenew();
   }
 
-  /** Daily check: renew Let's Encrypt when days remaining < 30 (disable with LETSENCRYPT_AUTO_RENEW=false). */
+  /**
+   * Periodic check: renew Let's Encrypt when days remaining is below threshold.
+   * Domain certs default &lt; 30 days; IP/shortlived (~6d) default &lt; 2 days.
+   * Disable with LETSENCRYPT_AUTO_RENEW=false.
+   */
   private scheduleLetsEncryptAutoRenew(): void {
     if (process.env.LETSENCRYPT_AUTO_RENEW === "false") return;
     const intervalMs = Math.max(
       60 * 60_000,
       Number(process.env.LETSENCRYPT_AUTO_RENEW_INTERVAL_MS ?? 24 * 60 * 60_000)
     );
-    const thresholdDays = Math.max(1, Number(process.env.LETSENCRYPT_RENEW_DAYS ?? 30));
     const initialDelayMs = Math.max(30_000, Number(process.env.LETSENCRYPT_AUTO_RENEW_INITIAL_MS ?? 120_000));
 
     const tick = async () => {
       try {
         const status = await this.getStatus();
         if (status.issuer !== "letsencrypt") return;
+        const meta = await this.certbot.readIssuerMeta(this.certsDir());
+        const shortlived = meta.shortlived || this.certbot.isIpLiteral(meta.domain ?? "");
+        const thresholdDays = Math.max(
+          1,
+          Number(
+            shortlived
+              ? (process.env.LETSENCRYPT_IP_RENEW_DAYS ?? 2)
+              : (process.env.LETSENCRYPT_RENEW_DAYS ?? 30)
+          )
+        );
         if (status.daysRemaining == null || status.daysRemaining >= thresholdDays) return;
         this.log.log(
-          `LE auto-renew: daysRemaining=${status.daysRemaining} < ${thresholdDays}, running certbot renew`
+          `LE auto-renew: daysRemaining=${status.daysRemaining} < ${thresholdDays} (shortlived=${shortlived}), running certbot renew`
         );
         await this.renewLetsEncrypt();
       } catch (err) {
@@ -174,8 +190,10 @@ export class WebTlsService implements OnModuleInit {
     const localInfo = this.localProxy.info();
     const publishedTlsPort = process.env.WEB_TLS_PUBLISHED_PORT?.trim() || null;
     const applied = Boolean(proxy.reachable || proxy.reloadedAtGenerate || localInfo.running);
+    const hostForUrl =
+      this.pickHttpsHost(subjectAltNames, commonName) || this.defaultDomain();
     const httpsUrl = this.buildHttpsUrl({
-      domain: commonName || this.defaultDomain(),
+      domain: hostForUrl,
       dockerReachable: proxy.reachable || Boolean(proxy.reloadedAtGenerate),
       publishedTlsPort,
       local: localInfo
@@ -188,9 +206,12 @@ export class WebTlsService implements OnModuleInit {
         ? "letsencrypt"
         : marker;
     const certbotAvailable = await this.certbot.isCertbotAvailable();
+    const certbotSupportsIpCertificates = await this.certbot.supportsIpCertificates();
+    const defaultDomain = this.defaultDomain();
+    const defaultTargetIsIp = this.certbot.isIpLiteral(defaultDomain);
     const warningRu =
       issuer === "letsencrypt"
-        ? "Сертификат Let's Encrypt (доверенный УЦ). Обновление: кнопка «Обновить LE» или авто-renew при сроке < 30 дней."
+        ? "Сертификат Let's Encrypt (доверенный УЦ). Обновление: кнопка «Обновить LE» или авто-renew по сроку."
         : SELF_SIGNED_WARNING_RU;
 
     return {
@@ -215,13 +236,18 @@ export class WebTlsService implements OnModuleInit {
       applied,
       httpsUrl,
       publishedTlsPort,
-      defaultDomain: this.defaultDomain(),
+      defaultDomain,
+      defaultTargetIsIp,
       warningRu,
       issuer,
       certbotAvailable,
+      certbotSupportsIpCertificates,
       acmeWebroot: this.certbot.webrootDir(),
-      letsEncryptReadyHintRu:
-        "Let's Encrypt через certbot (HTTP-01): публичный DNS на этот хост + порт 80 (tls-proxy отдаёт /.well-known/acme-challenge/). Email обязателен."
+      letsEncryptReadyHintRu: certbotSupportsIpCertificates
+        ? "Let's Encrypt (certbot HTTP-01): публичный домен (DNS) или публичный IP + порт 80 (tls-proxy отдаёт /.well-known/acme-challenge/). Для IP нужен shortlived-профиль (~6 дней). Email обязателен."
+        : "Let's Encrypt через certbot (HTTP-01): публичный DNS на этот хост + порт 80. Для голого IP в этом образе certbot слишком старый — используйте самоподписанный с IP в SAN.",
+      ipHttpsHintRu:
+        "Доступ по IP без DNS: укажите IPv4/IPv6 и нажмите «HTTPS для IP (самоподписанный)». Браузер покажет предупреждение — это ожидаемо. Опционально: LE IP (shortlived ~6 дн.), если certbot ≥ 5.4 и порт 80 доступен с интернета."
     };
   }
 
@@ -230,13 +256,13 @@ export class WebTlsService implements OnModuleInit {
     days?: number;
     extraSans?: string[];
   }): Promise<WebTlsGenerateResult> {
-    const domain = this.normalizeDomain(input.domain?.trim() || this.defaultDomain());
+    const domain = this.normalizeHost(input.domain?.trim() || this.defaultDomain());
     const days = this.clampDays(input.days);
     const extra = (input.extraSans ?? [])
-      .map((s) => this.normalizeDomain(String(s)))
+      .map((s) => this.normalizeHost(String(s)))
       .filter(Boolean);
 
-    const sans = this.uniqueSans([domain, "localhost", "127.0.0.1", ...extra]);
+    const sans = this.uniqueSans([domain, "localhost", "127.0.0.1", "::1", ...extra]);
     const dir = this.certsDir();
     await mkdir(dir, { recursive: true, mode: 0o700 });
 
@@ -249,9 +275,10 @@ export class WebTlsService implements OnModuleInit {
     const tmpKey = join(tmpDir, "key.pem");
     const tmpCert = join(tmpDir, "cert.pem");
     const tmpCfg = join(tmpDir, "openssl.cnf");
+    const cn = this.opensslCn(domain);
 
     try {
-      await writeFile(tmpCfg, this.opensslConfig(domain, sans), { mode: 0o600 });
+      await writeFile(tmpCfg, this.opensslConfig(cn, sans), { mode: 0o600 });
       await this.runOpenssl([
         "req",
         "-x509",
@@ -281,11 +308,20 @@ export class WebTlsService implements OnModuleInit {
       await rename(stagingCert, certFile);
       await writeFile(
         join(dir, "issuer.json"),
-        JSON.stringify({ issuer: "selfsigned", installedAt: new Date().toISOString(), domain }, null, 2),
+        JSON.stringify(
+          {
+            issuer: "selfsigned",
+            installedAt: new Date().toISOString(),
+            domain,
+            targetIsIp: this.certbot.isIpLiteral(domain)
+          },
+          null,
+          2
+        ),
         { mode: 0o644 }
       );
 
-      this.log.log(`Generated TLS certificate for CN=${domain} (days=${days}); private key not logged`);
+      this.log.log(`Generated TLS certificate for target=${domain} (days=${days}); private key not logged`);
     } finally {
       await this.safeUnlink(tmpKey);
       await this.safeUnlink(tmpCert);
@@ -295,10 +331,21 @@ export class WebTlsService implements OnModuleInit {
 
     const apply = await this.applyToRuntime({ preferDocker: true });
     const status = await this.getStatus({ reloadedAtGenerate: apply.dockerReloaded });
+    const url =
+      status.httpsUrl ??
+      this.buildHttpsUrl({
+        domain,
+        dockerReachable: true,
+        publishedTlsPort: process.env.WEB_TLS_PUBLISHED_PORT?.trim() || null,
+        local: this.localProxy.info()
+      }) ??
+      `https://${this.formatUrlHost(domain)}`;
 
     let messageRu: string;
-    if (status.applied && status.httpsUrl) {
-      messageRu = `Сертификат для «${domain}» создан и повешен на веб: откройте ${status.httpsUrl}`;
+    if (status.applied && url) {
+      messageRu = this.certbot.isIpLiteral(domain)
+        ? `Самоподписанный сертификат с SAN IP:${domain} создан и применён: откройте ${url}`
+        : `Сертификат для «${domain}» создан и повешен на веб: откройте ${url}`;
     } else if (apply.local?.running && apply.local.publicUrl) {
       messageRu = `Сертификат для «${domain}» создан; локальный HTTPS-прокси: ${apply.local.publicUrl}`;
     } else {
@@ -310,6 +357,7 @@ export class WebTlsService implements OnModuleInit {
       generated: true,
       domain,
       days,
+      httpsUrl: status.httpsUrl ?? url,
       messageRu: `${messageRu} ${SELF_SIGNED_WARNING_RU}`
     };
   }
@@ -320,14 +368,20 @@ export class WebTlsService implements OnModuleInit {
     email: string;
     staging?: boolean;
   }): Promise<WebTlsGenerateResult & { provider: "letsencrypt" }> {
-    const domain = this.normalizeDomain(input.domain?.trim() || this.defaultDomain());
+    const domain = this.normalizeHost(input.domain?.trim() || this.defaultDomain());
     const email = this.certbot.normalizeEmail(input.email);
-    this.certbot.assertPublicDomain(domain);
+    const isIp = this.certbot.isIpLiteral(domain);
+    if (isIp) {
+      await this.certbot.assertIpIssuanceSupported();
+    } else {
+      this.certbot.assertPublicDomain(domain);
+    }
 
     const issued = await this.certbot.issue({
       domain,
       email,
-      staging: input.staging
+      staging: input.staging,
+      ipAddress: isIp
     });
     await this.certbot.installIntoCertsDir({
       fullchainPath: issued.fullchainPath,
@@ -335,23 +389,29 @@ export class WebTlsService implements OnModuleInit {
       certsDir: this.certsDir(),
       domain: issued.domain,
       email: issued.email,
-      staging: issued.staging
+      staging: issued.staging,
+      shortlived: issued.shortlived
     });
 
     const apply = await this.applyToRuntime({ preferDocker: true });
     const status = await this.getStatus({ reloadedAtGenerate: apply.dockerReloaded });
-    const url = status.httpsUrl ?? `https://${domain}`;
+    const url =
+      status.httpsUrl ?? `https://${this.formatUrlHost(domain)}${this.portSuffix(process.env.WEB_TLS_PUBLISHED_PORT)}`;
     const stagingNote = issued.staging ? " (staging CA — браузеры не будут доверять)." : "";
+    const shortNote = issued.shortlived
+      ? " Shortlived (~6 дней): авто-renew при сроке < LETSENCRYPT_IP_RENEW_DAYS (по умолчанию 2)."
+      : "";
     const messageRu = status.applied
-      ? `Let's Encrypt для «${domain}» выпущен через certbot и применён на веб: ${url}${stagingNote}`
-      : `Let's Encrypt для «${domain}» выпущен и записан в ${this.certsDir()}, но прокси не поднялся (${apply.error ?? "нет слушателя"}).${stagingNote}`;
+      ? `Let's Encrypt для «${domain}» выпущен через certbot и применён на веб: ${url}${stagingNote}${shortNote}`
+      : `Let's Encrypt для «${domain}» выпущен и записан в ${this.certsDir()}, но прокси не поднялся (${apply.error ?? "нет слушателя"}).${stagingNote}${shortNote}`;
 
     return {
       ...status,
       generated: true,
       domain,
-      days: status.daysRemaining ?? 90,
+      days: status.daysRemaining ?? (issued.shortlived ? 6 : 90),
       provider: "letsencrypt",
+      httpsUrl: status.httpsUrl ?? url,
       messageRu
     };
   }
@@ -394,7 +454,8 @@ export class WebTlsService implements OnModuleInit {
       certsDir: this.certsDir(),
       domain: live.domain,
       email: meta.email ?? undefined,
-      staging: meta.staging
+      staging: meta.staging,
+      shortlived: meta.shortlived || this.certbot.isIpLiteral(live.domain)
     });
 
     const apply = await this.applyToRuntime({ preferDocker: true });
@@ -447,30 +508,92 @@ export class WebTlsService implements OnModuleInit {
     publishedTlsPort: string | null;
     local: ReturnType<LocalHttpsProxyService["info"]>;
   }): string | null {
+    const host = this.formatUrlHost(opts.domain || "localhost");
     if (opts.local.running && opts.local.listenPort) {
-      const host = opts.domain === "localhost" ? "127.0.0.1" : opts.domain;
       return `https://${host}:${opts.local.listenPort}`;
     }
     if (opts.dockerReachable) {
       const port = opts.publishedTlsPort || "443";
-      const host = opts.domain || "localhost";
       return port === "443" ? `https://${host}` : `https://${host}:${port}`;
     }
     return null;
   }
 
-  private normalizeDomain(raw: string): string {
-    let s = raw.trim().toLowerCase();
+  private portSuffix(published: string | undefined): string {
+    const port = published?.trim() || "443";
+    return port === "443" ? "" : `:${port}`;
+  }
+
+  private formatUrlHost(host: string): string {
+    const h = host.trim();
+    if (!h) return "localhost";
+    if (this.certbot.isIpv6Literal(h)) return `[${h}]`;
+    return h;
+  }
+
+  /** Prefer an IP SAN when present so https://x.x.x.x matches the cert. */
+  private pickHttpsHost(sans: string[], cn: string | null): string | null {
+    const ipv4 = sans.find((s) => this.certbot.isIpv4Literal(s) && s !== "127.0.0.1");
+    if (ipv4) return ipv4;
+    const ipv6 = sans.find((s) => this.certbot.isIpv6Literal(s) && s !== "::1");
+    if (ipv6) return ipv6;
+    if (cn && this.certbot.isIpLiteral(cn)) return cn;
+    const dns = sans.find((s) => s && s !== "localhost" && !this.certbot.isIpLiteral(s));
+    if (dns) return dns;
+    return cn;
+  }
+
+  private normalizeHost(raw: string): string {
+    let s = raw.trim();
     s = s.replace(/^https?:\/\//i, "");
     s = s.split("/")[0] ?? s;
-    s = s.split(":")[0] ?? s;
-    if (!s || s.length > 253) {
-      throw new BadRequestException("Некорректное доменное имя");
+    // Strip brackets for IPv6 URL form [::1]:443
+    if (s.startsWith("[")) {
+      const end = s.indexOf("]");
+      if (end > 1) s = s.slice(1, end);
+      else s = s.replace(/^\[|\]$/g, "");
+    } else if (!this.looksLikeBareIpv6(s)) {
+      // hostname:port or ipv4:port — drop port
+      const colon = s.lastIndexOf(":");
+      if (colon > -1 && /^\d+$/.test(s.slice(colon + 1))) {
+        s = s.slice(0, colon);
+      }
     }
-    if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$|^localhost$|^\d{1,3}(\.\d{1,3}){3}$/i.test(s)) {
-      throw new BadRequestException("Домен может содержать только буквы, цифры, точки и дефисы");
+    s = s.trim().toLowerCase();
+    if (!s || s.length > 253) {
+      throw new BadRequestException("Некорректный домен или IP-адрес");
+    }
+    if (this.certbot.isIpv4Literal(s)) {
+      if (!this.certbot.isValidIpv4(s)) {
+        throw new BadRequestException("Некорректный IPv4-адрес");
+      }
+      return s;
+    }
+    if (this.certbot.isIpv6Literal(s) || this.looksLikeBareIpv6(s)) {
+      const normalized = this.certbot.normalizeIpv6(s);
+      if (!normalized) {
+        throw new BadRequestException("Некорректный IPv6-адрес");
+      }
+      return normalized;
+    }
+    if (!/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$|^localhost$/i.test(s)) {
+      throw new BadRequestException("Домен может содержать только буквы, цифры, точки и дефисы (или укажите IP)");
     }
     return s;
+  }
+
+  private looksLikeBareIpv6(s: string): boolean {
+    if (!s.includes(":")) return false;
+    // hostname:port or ipv4:port — not IPv6
+    if (/^[a-z0-9.-]+:\d+$/i.test(s)) return false;
+    if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(s)) return false;
+    return true;
+  }
+
+  /** OpenSSL DN CN: avoid raw IPv6 colons breaking DN parsing. */
+  private opensslCn(host: string): string {
+    if (this.certbot.isIpv6Literal(host)) return "ip-address";
+    return host;
   }
 
   private clampDays(raw: number | undefined): number {
@@ -493,10 +616,18 @@ export class WebTlsService implements OnModuleInit {
   }
 
   private opensslConfig(cn: string, sans: string[]): string {
-    const altLines = sans.map((name, i) => {
-      if (/^\d{1,3}(\.\d{1,3}){3}$/.test(name)) return `IP.${i + 1} = ${name}`;
-      return `DNS.${i + 1} = ${name}`;
-    });
+    let dnsIdx = 0;
+    let ipIdx = 0;
+    const altLines: string[] = [];
+    for (const name of sans) {
+      if (this.certbot.isIpLiteral(name)) {
+        ipIdx += 1;
+        altLines.push(`IP.${ipIdx} = ${name}`);
+      } else {
+        dnsIdx += 1;
+        altLines.push(`DNS.${dnsIdx} = ${name}`);
+      }
+    }
     return [
       "[req]",
       "default_bits = 2048",
