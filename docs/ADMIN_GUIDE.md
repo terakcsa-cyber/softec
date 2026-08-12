@@ -215,7 +215,7 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 | Переменная | Default | Описание |
 |------------|---------|----------|
 | `NVD_API_KEY` | — | Ключ NVD 2.0 (рекомендуется) |
-| `NVD_FANOUT_ENRICH` | false | Auto enrich из NVD ingest выключен; enrich только вручную и при digest prepare |
+| `NVD_FANOUT_ENRICH` | false | Per-CVE enrich при upsert NVD. `false` отключает fanout для всех движков (рекомендуется: зрелость через hot24) |
 | `NVD_FANOUT_SCORE_HOT_ONLY` | true | Score только hot CVE |
 | `NVD_PUB_HOT_SYNC` | true | Отдельный проход по published |
 | `INTEGRATIONS_BOOT` | true | Boot job при старте ingest |
@@ -225,10 +225,10 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 
 | Переменная | Default | Описание |
 |------------|---------|----------|
-| `HOT24_AI_SWEEP` | false | Auto enrich sweep выключен; digest prepare ставит нужные CVE отдельно |
+| `HOT24_AI_SWEEP` | false | Только для `TEXT_ENGINE=llm`: включить mass hot24. Для baseline/translate hot24 идёт через `TEXT_ENGINE_BG_ENRICH` |
 | `HOT24_AI_SWEEP_LIMIT` | 200 | Лимит за проход |
-| `HOT24_AI_SWEEP_ON_START_MS` | 0 | AI sweep при старте выключен |
-| `HOT24_AI_SWEEP_INTERVAL_MS` | 0 | Периодический sweep (0=выкл) |
+| `HOT24_AI_SWEEP_ON_START_MS` | 0 | AI sweep при старте (text-engine подставит дефолт, если BG enrich on) |
+| `HOT24_AI_SWEEP_INTERVAL_MS` | 0 | Периодический sweep (0 → text-engine дефолт ~90с при BG enrich) |
 | `HOT24_SCORE_SWEEP` | true* | Догон risk_score (*только если `ai.score` включён) |
 | `HOT24_SCORE_STALE_HOURS` | 6 | Пересчёт если score старше |
 | `HOT24_SCORE_BOOT` | true* | Score sweep при boot (*если score не выключен) |
@@ -251,6 +251,9 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 | `LLM_TIMEOUT_MS` | 300000 | Таймаут HTTP |
 | `LLM_MAX_PARALLEL` | 3 | Параллельность к Ollama |
 | `AI_ENRICH_PREFETCH` | 10 | RabbitMQ prefetch |
+| `AI_ENRICH_MAX_DEPTH` | 2000 | Soft cap: ingest skips enrich publish when queue depth ≥ value (`0` = unlimited) |
+| `AI_ENRICH_INFLIGHT_TTL_HOURS` | 6 | Publish-time coalesce TTL (`enrich:inflight:{cve}:{engine}`) |
+| `AI_ENRICH_QUEUE_PUBLISHED_MAX_AGE_HOURS` | 24 | Worker skips old published CVE jobs |
 | `AI_ENRICH_QUEUE_PUBLISHED_MAX_AGE_HOURS` | 24 | Фильтр очереди |
 
 ### EPSS
@@ -450,15 +453,24 @@ Worker пропускает CVE с успешным `enrichment_ai`. Исклю�
 `AI_SCORE_SKIP_FRESH_HOURS=2` — пропуск для NVD fanout дублей.  
 Force recompute: `score:epss:*`, `score:hot24h:*`, `:dlq:`.
 
-### Auto enrich
+### Auto enrich / queue guards
 
 ```env
 NVD_FANOUT_ENRICH=false
-HOT24_AI_SWEEP=false
+TEXT_ENGINE_BG_ENRICH=true
 BACKLOG_AI_SWEEP=false
+AI_ENRICH_MAX_DEPTH=2000
 ```
 
-Auto enrich выключен: `ai.enrich` пополняется только ручными кнопками в карточках, digest prepare, DLQ replay и retry внутри worker. В режимах `baseline`/`translate` manual enrich и digest prepare могут завершаться сразу в API без LLM-очереди. Очередь можно purge в RabbitMQ UI после остановки старого авто-хвоста.
+Рекомендуемый prod-профиль: **без per-CVE fanout**, зрелость hot-окна через **hot24** под `TEXT_ENGINE_BG_ENRICH`.  
+`HOT24_AI_SWEEP=false` **не** останавливает hot24 для `baseline`/`translate` — только для `llm`. Полный стоп BG: `TEXT_ENGINE_BG_ENRICH=false`.
+
+Защиты от хвоста 10k+:
+- **inflight coalesce** — один outstanding job на CVE+engine (`enrich:inflight:…`);
+- **`AI_ENRICH_MAX_DEPTH`** — ingest не публикует, пока глубина ≥ порога;
+- backlog с `NOT EXISTS` по дневному ключу + inflight.
+
+Manual enrich / digest в `baseline`/`translate` часто идут in-process в API без очереди. Старый хвост можно purge в RabbitMQ.
 
 ---
 
@@ -670,12 +682,14 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 ### INC-01: Очередь ai.enrich > 500
 
 **Симптомы:** UI health, растущий `enrich` в stats/queue.  
-**Диагностика:** `llm.ok`, логи `apps/ai`, sample DLQ.  
+**Диагностика:** `llm.ok`, логи `apps/ai` / `[ingest:nvd] … backpressure` / `skippedInflight`, sample DLQ.  
+**Защиты (с main):** publish-time **inflight coalesce** (1 CVE в полёте), **`AI_ENRICH_MAX_DEPTH`** (default 2000), `NVD_FANOUT_ENRICH=false` реально отключает per-CVE fanout.  
 **Решение:**
-1. Починить connectivity внешнего движка (`llm`/`translate`) или переключиться на `TEXT_ENGINE=baseline`.
+1. Починить connectivity внешнего движка (`llm`/`translate`) или временно `TEXT_ENGINE=baseline`.
 2. `dlq/retry` если есть DLQ.
-3. Убедиться, что `NVD_FANOUT_ENRICH=false`, `HOT24_AI_SWEEP=false`, `BACKLOG_AI_SWEEP=false`.
-4. Purge `ai.enrich`, если это старый авто-хвост; digest можно подготовить заново.
+3. Убедиться: `NVD_FANOUT_ENRICH=false`, `BACKLOG_AI_SWEEP=false`; для полной остановки BG — `TEXT_ENGINE_BG_ENRICH=false` (не путать с `HOT24_AI_SWEEP`, он только для `TEXT_ENGINE=llm`).
+4. Purge `ai.enrich`, если это старый авто-хвост до апдейта; digest/hot24 догонят недозревшие.
+5. При необходимости ужесточить: `AI_ENRICH_MAX_DEPTH=500`.
 
 ### INC-02: Risk scores «не обновляются»
 

@@ -37,6 +37,7 @@ export * from "./voc/playbook-context.js";
 export * from "./voc/shift.js";
 export * from "./queue/events.js";
 export * from "./queue/score-request.js";
+export * from "./queue/enrich-request.js";
 export * from "./queue/hot24-score-sweep.js";
 export * from "./queue/dlq-replay.js";
 export * from "./risk/scoring.js";

@@ -40,7 +40,41 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     const url = process.env.RABBITMQ_URL ?? "amqp://vuln:vuln@localhost:5672/";
     this.conn = await connectAmqpWithRetry(url);
     this.channel = await this.conn.createChannel();
-    await this.channel.assertExchange("vuln.events", "topic", { durable: true });
+    await this.ensureTopology();
+  }
+
+  /**
+   * Assert enrich/score queues so checkQueue / publish backpressure work even if ai starts later.
+   */
+  async ensureTopology() {
+    if (!this.channel) throw new Error("Queue channel not initialized");
+    const ch = this.channel;
+    await ch.assertExchange("vuln.events", "topic", { durable: true });
+    await ch.assertExchange("vuln.dlx", "topic", { durable: true });
+
+    await ch.assertQueue("ai.enrich", {
+      durable: true,
+      arguments: {
+        "x-max-priority": 10,
+        "x-dead-letter-exchange": "vuln.dlx",
+        "x-dead-letter-routing-key": "dlq.ai.enrich"
+      }
+    });
+    await ch.bindQueue("ai.enrich", "vuln.events", "vuln.enrich.requested.*");
+
+    await ch.assertQueue("ai.score", {
+      durable: true,
+      arguments: {
+        "x-dead-letter-exchange": "vuln.dlx",
+        "x-dead-letter-routing-key": "dlq.ai.score"
+      }
+    });
+    await ch.bindQueue("ai.score", "vuln.events", "vuln.score.requested.*");
+
+    await ch.assertQueue("dlq.ai.enrich", { durable: true });
+    await ch.assertQueue("dlq.ai.score", { durable: true });
+    await ch.bindQueue("dlq.ai.enrich", "vuln.dlx", "dlq.ai.enrich");
+    await ch.bindQueue("dlq.ai.score", "vuln.dlx", "dlq.ai.score");
   }
 
   publish(exchange: string, routingKey: string, payload: unknown, options?: Options.Publish) {
@@ -53,6 +87,12 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  async getQueueDepth(queueName: string): Promise<{ queue: string; messages: number; consumers: number }> {
+    if (!this.channel) throw new Error("Queue channel not initialized");
+    const r = await this.channel.checkQueue(queueName);
+    return { queue: queueName, messages: r.messageCount, consumers: r.consumerCount };
+  }
+
   async onModuleDestroy() {
     try {
       await this.channel?.close();
@@ -61,4 +101,3 @@ export class QueueService implements OnModuleInit, OnModuleDestroy {
     }
   }
 }
-

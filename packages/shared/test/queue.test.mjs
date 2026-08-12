@@ -4,7 +4,12 @@ import {
   EnrichCveRequestedEventSchema,
   publishScoreEvents,
   buildScoreEventsForCveIds,
-  isAiScoreEnabled
+  isAiScoreEnabled,
+  getAiEnrichMaxDepth,
+  shouldSkipEnrichPublishForDepth,
+  enrichInflightIdempotencyKey,
+  buildEnrichRequestedEvent,
+  publishEnrichRequested
 } from "../dist/index.js";
 
 describe("queue schemas", () => {
@@ -72,5 +77,39 @@ describe("publishScoreEvents", () => {
       if (prevFlag === undefined) delete process.env.AI_SCORE_ENABLED;
       else process.env.AI_SCORE_ENABLED = prevFlag;
     }
+  });
+});
+
+describe("ai.enrich backpressure helpers", () => {
+  it("defaults max depth to 2000 and treats 0 as unlimited", () => {
+    assert.equal(getAiEnrichMaxDepth({}), 2000);
+    assert.equal(getAiEnrichMaxDepth({ AI_ENRICH_MAX_DEPTH: "500" }), 500);
+    assert.equal(getAiEnrichMaxDepth({ AI_ENRICH_MAX_DEPTH: "0" }), 0);
+    assert.equal(shouldSkipEnrichPublishForDepth(2000, 2000), true);
+    assert.equal(shouldSkipEnrichPublishForDepth(1999, 2000), false);
+    assert.equal(shouldSkipEnrichPublishForDepth(99999, 0), false);
+  });
+
+  it("builds stable inflight keys and enrich envelopes", () => {
+    assert.equal(
+      enrichInflightIdempotencyKey("CVE-2026-1", "translate"),
+      "enrich:inflight:CVE-2026-1:translate"
+    );
+    const ev = buildEnrichRequestedEvent({
+      cveId: "CVE-2026-1",
+      producer: { service: "test", version: "0" },
+      idempotencyKey: "enrich:hot24h:CVE-2026-1:x:translate",
+      raw: { a: 1 }
+    });
+    assert.equal(ev.type, "vuln.enrich.requested.v1");
+    assert.equal(ev.payload.cveId, "CVE-2026-1");
+    const calls = [];
+    publishEnrichRequested((ex, rk, body, opts) => calls.push({ ex, rk, body, opts }), ev, {
+      priority: 9
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].ex, "vuln.events");
+    assert.equal(calls[0].rk, "vuln.enrich.requested.v1");
+    assert.equal(calls[0].opts.priority, 9);
   });
 });

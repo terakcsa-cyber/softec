@@ -2,16 +2,20 @@ import { createHash } from "node:crypto";
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
 import {
+  AI_ENRICH_QUEUE,
   QueueEventType,
   SQL_EFFECTIVE_PUBLISHED_AT,
+  buildEnrichRequestedEvent,
   buildScoreEventsForCveIds,
   catalogBackfillActive,
   catalogReverseFloorReached,
   catalogScanHeadIso,
+  claimEnrichInflight,
   defaultNvdCatalogDoc,
   extractNvdPublishedIso,
   extractVendorProductPairsFromCveRaw,
   fingerprintNvdApiKey,
+  getAiEnrichMaxDepth,
   hot24ScoreHourBucket,
   hot24ScoreIdempotencyKey,
   initialReverseCatalogCursor,
@@ -19,7 +23,9 @@ import {
   listHot24CvesNeedingScore,
   normalizeTextEngineMode,
   isAiScoreEnabled,
+  publishEnrichRequested,
   publishScoreEvents,
+  shouldSkipEnrichPublishForDepth,
   NVD_CATALOG_FLOOR_ISO,
   NVD_CATALOG_SCAN_MODE,
   NVD_CATALOG_SETTINGS_KEY,
@@ -49,6 +55,9 @@ export class NvdIngestJob implements OnModuleInit {
   /** После HTTP 404 с apiKey — не слать ключ снова, пока ключ не сменился (БД / .env). */
   private nvdApiKeyRejected = false;
   private nvdApiKeyFingerprint: string | null = null;
+  /** Cached ai.enrich depth for fanout backpressure (avoid checkQueue per CVE). */
+  private enrichDepthCache: { atMs: number; messages: number } | null = null;
+  private enrichDepthSkipLoggedAt = 0;
 
   constructor(
     @Inject(DbService) private readonly db: DbService,
@@ -704,25 +713,26 @@ export class NvdIngestJob implements OnModuleInit {
     );
 
     // Background text maturity (baseline/translate) for hot-window CVEs.
-    // LLM mass fanout stays opt-in (NVD_FANOUT_ENRICH=true) to avoid Ollama overload.
+    // Prefer hot24 sweep when NVD_FANOUT_ENRICH=false (avoids first-sync flood).
+    // LLM mass fanout stays opt-in (NVD_FANOUT_ENRICH=true).
     if ((await this.isBackgroundTextEnrichEnabled("fanout")) && isPublishedWithinHours(publishedAtIso)) {
-      this.queue.publish(
-        "vuln.events",
-        "vuln.enrich.requested.v1",
-        {
-          id: uuidv4(),
-          type: QueueEventType.EnrichCveRequested,
-          ts: new Date().toISOString(),
-          producer: { service: "ingest", version: "0.0.1" },
-          idempotencyKey: `enrich:${idempotencyKey}`,
-          payload: {
+      const mode = await this.resolveTextEngineMode();
+      if (await this.canPublishEnrich("fanout")) {
+        const claimed = await claimEnrichInflight(this.db, input.cveId, mode, {
+          metadata: { via: "fanout" }
+        });
+        if (claimed) {
+          this.publishEnrichJob({
             cveId: input.cveId,
-            source: input.source,
-            raw: input.raw
-          }
-        },
-        { priority: 9 }
-      );
+            idempotencyKey: `enrich:${idempotencyKey}`,
+            raw: input.raw && typeof input.raw === "object" && !Array.isArray(input.raw)
+              ? (input.raw as Record<string, unknown>)
+              : {},
+            source: input.source === "nvd" || input.source === "mitre" ? input.source : "other",
+            priority: 9
+          });
+        }
+      }
     }
 
     // Score: off unless TEXT_ENGINE=llm (or AI_SCORE_ENABLED=true). Hot-only by default.
@@ -1031,8 +1041,11 @@ export class NvdIngestJob implements OnModuleInit {
 
   /**
    * baseline: background card maturity on by default (disable with TEXT_ENGINE_BG_ENRICH=false).
-   * translate: hot24/fanout on by default; backlog opt-in (MyMemory rate limits) via BACKLOG_AI_SWEEP=true.
+   * translate: hot24 on by default under TEXT_ENGINE_BG_ENRICH; backlog opt-in via BACKLOG_AI_SWEEP=true.
    * llm: mass fanout/sweep stays opt-in to avoid Ollama overload.
+   *
+   * Enterprise: `NVD_FANOUT_ENRICH=false` disables per-CVE fanout for ALL engines (prefer hot24 only).
+   * Prefer hot24 + inflight coalesce over fanout to avoid 10k+ duplicate storms on first NVD sync.
    */
   private async isBackgroundTextEnrichEnabled(kind: "fanout" | "hot24" | "backlog"): Promise<boolean> {
     const mode = await this.resolveTextEngineMode();
@@ -1042,12 +1055,75 @@ export class NvdIngestJob implements OnModuleInit {
       return process.env.NVD_FANOUT_ENRICH === "true";
     }
     if (process.env.TEXT_ENGINE_BG_ENRICH === "false") return false;
+    // Explicit false disables fanout even when BG enrich is on (recommended with hot24).
+    if (kind === "fanout") return process.env.NVD_FANOUT_ENRICH !== "false";
     if (kind === "backlog") {
       // baseline is free/local — always catch up after hot window. translate/llm stay opt-in (rate limits / GPU).
-      if (mode === "baseline") return true;
+      if (mode === "baseline") return process.env.BACKLOG_AI_SWEEP !== "false";
       return process.env.BACKLOG_AI_SWEEP === "true";
     }
     return true;
+  }
+
+  private async getEnrichQueueDepthCached(): Promise<number> {
+    const now = Date.now();
+    if (this.enrichDepthCache && now - this.enrichDepthCache.atMs < 5_000) {
+      return this.enrichDepthCache.messages;
+    }
+    try {
+      const d = await this.queue.getQueueDepth(AI_ENRICH_QUEUE);
+      this.enrichDepthCache = { atMs: now, messages: d.messages };
+      return d.messages;
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[ingest:nvd] ai.enrich depth check failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return 0;
+    }
+  }
+
+  private bumpEnrichDepthCache(delta = 1) {
+    if (!this.enrichDepthCache) return;
+    this.enrichDepthCache.messages += delta;
+  }
+
+  private async canPublishEnrich(reason: string): Promise<boolean> {
+    const maxDepth = getAiEnrichMaxDepth();
+    if (maxDepth <= 0) return true;
+    const depth = await this.getEnrichQueueDepthCached();
+    if (!shouldSkipEnrichPublishForDepth(depth, maxDepth)) return true;
+    const now = Date.now();
+    if (now - this.enrichDepthSkipLoggedAt > 60_000) {
+      this.enrichDepthSkipLoggedAt = now;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[ingest:nvd] ai.enrich backpressure: depth=${depth} >= AI_ENRICH_MAX_DEPTH=${maxDepth}; skip ${reason}`
+      );
+    }
+    return false;
+  }
+
+  private publishEnrichJob(opts: {
+    cveId: string;
+    idempotencyKey: string;
+    raw: Record<string, unknown>;
+    source?: "nvd" | "mitre" | "other";
+    priority: number;
+  }) {
+    const event = buildEnrichRequestedEvent({
+      cveId: opts.cveId,
+      producer: { service: "ingest", version: "0.0.1" },
+      idempotencyKey: opts.idempotencyKey,
+      source: opts.source ?? "other",
+      raw: opts.raw
+    });
+    publishEnrichRequested(
+      (ex, rk, payload, pubOpts) => this.queue.publish(ex, rk, payload, pubOpts),
+      event,
+      { priority: opts.priority }
+    );
+    this.bumpEnrichDepthCache(1);
   }
 
   /**
@@ -1084,6 +1160,7 @@ export class NvdIngestJob implements OnModuleInit {
    */
   private async sweepHotWindowEnrich() {
     if (!(await this.isBackgroundTextEnrichEnabled("hot24"))) return;
+    if (!(await this.canPublishEnrich("hot24-sweep"))) return;
 
     const mode = await this.resolveTextEngineMode();
     const defaultLimit = mode === "baseline" ? 800 : mode === "translate" ? 120 : 200;
@@ -1110,6 +1187,13 @@ export class NvdIngestJob implements OnModuleInit {
              WHERE k.scope = 'ai.enrich'
                AND k.key = ('enrich:hot24h:' || c.cve_id || ':' || $2::text || ':' || $3::text)
           )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM idempotency_key k
+             WHERE k.scope = 'ai.enrich'
+               AND k.key = ('enrich:inflight:' || c.cve_id || ':' || $3::text)
+               AND (k.expires_at IS NULL OR k.expires_at > now())
+          )
           AND (
             latest.output_text IS NULL
             OR latest.output_text = 'LLM not configured.'
@@ -1130,35 +1214,36 @@ export class NvdIngestJob implements OnModuleInit {
     );
 
     let n = 0;
+    let skippedInflight = 0;
     for (const row of r.rows) {
+      if (!(await this.canPublishEnrich("hot24-sweep"))) break;
       const publishedIso = extractNvdPublishedIso(row.raw);
       if (!isPublishedWithinHours(publishedIso)) continue;
+
+      const claimed = await claimEnrichInflight(this.db, row.cve_id, mode, {
+        metadata: { via: "hot24", bucket }
+      });
+      if (!claimed) {
+        skippedInflight++;
+        continue;
+      }
 
       const raw = row.raw;
       const rawObj =
         raw != null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-      this.queue.publish(
-        "vuln.events",
-        "vuln.enrich.requested.v1",
-        {
-          id: uuidv4(),
-          type: QueueEventType.EnrichCveRequested,
-          ts: new Date().toISOString(),
-          producer: { service: "ingest", version: "0.0.1" },
-          idempotencyKey: `enrich:hot24h:${row.cve_id}:${bucket}:${mode}`,
-          payload: {
-            cveId: row.cve_id,
-            source: "other",
-            raw: rawObj
-          }
-        },
-        { priority: 9 }
-      );
+      this.publishEnrichJob({
+        cveId: row.cve_id,
+        idempotencyKey: `enrich:hot24h:${row.cve_id}:${bucket}:${mode}`,
+        raw: rawObj,
+        priority: 9
+      });
       n++;
     }
-    if (n > 0) {
+    if (n > 0 || skippedInflight > 0) {
       // eslint-disable-next-line no-console
-      console.log(`[ingest:nvd] hot24h text-enrich sweep enqueued=${n} (limit=${limit}, bucket=${bucket}, engine=${mode})`);
+      console.log(
+        `[ingest:nvd] hot24h text-enrich sweep enqueued=${n} skippedInflight=${skippedInflight} (limit=${limit}, bucket=${bucket}, engine=${mode})`
+      );
     }
   }
 
@@ -1169,6 +1254,7 @@ export class NvdIngestJob implements OnModuleInit {
    */
   private async sweepBacklogEnrich() {
     if (!(await this.isBackgroundTextEnrichEnabled("backlog"))) return;
+    if (!(await this.canPublishEnrich("backlog-sweep"))) return;
 
     const mode = await this.resolveTextEngineMode();
     const defaultLimit = mode === "baseline" ? 1000 : 400;
@@ -1187,13 +1273,26 @@ export class NvdIngestJob implements OnModuleInit {
            LIMIT 1
          ) latest ON true
         WHERE (c.published_at IS NULL OR c.published_at < now() - interval '24 hours')
+          AND NOT EXISTS (
+            SELECT 1
+              FROM idempotency_key k
+             WHERE k.scope = 'ai.enrich'
+               AND k.key = ('enrich:backlog:' || c.cve_id || ':' || $2::text || ':' || $3::text)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM idempotency_key k
+             WHERE k.scope = 'ai.enrich'
+               AND k.key = ('enrich:inflight:' || c.cve_id || ':' || $3::text)
+               AND (k.expires_at IS NULL OR k.expires_at > now())
+          )
           AND (
             latest.output_text IS NULL
             OR latest.output_text = 'LLM not configured.'
             OR COALESCE(latest.output_json->>'summary', '') LIKE 'LLM not configured%'
             OR (latest.output_json @> '{"_enrich_error": true}'::jsonb)
             OR (
-              $2::text = 'translate'
+              $3::text = 'translate'
               AND NOT (
                 latest.model = 'translate'
                 OR latest.prompt_version = 'translate-v1'
@@ -1203,36 +1302,36 @@ export class NvdIngestJob implements OnModuleInit {
           )
      ORDER BY c.published_at DESC NULLS LAST
         LIMIT $1`,
-      [limit, mode]
+      [limit, dayBucket, mode]
     );
 
     let n = 0;
+    let skippedInflight = 0;
     for (const row of r.rows) {
+      if (!(await this.canPublishEnrich("backlog-sweep"))) break;
+      const claimed = await claimEnrichInflight(this.db, row.cve_id, mode, {
+        metadata: { via: "backlog", dayBucket }
+      });
+      if (!claimed) {
+        skippedInflight++;
+        continue;
+      }
       const raw = row.raw;
       const rawObj =
         raw != null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
-      this.queue.publish(
-        "vuln.events",
-        "vuln.enrich.requested.v1",
-        {
-          id: uuidv4(),
-          type: QueueEventType.EnrichCveRequested,
-          ts: new Date().toISOString(),
-          producer: { service: "ingest", version: "0.0.1" },
-          idempotencyKey: `enrich:backlog:${row.cve_id}:${dayBucket}:${mode}`,
-          payload: {
-            cveId: row.cve_id,
-            source: "other",
-            raw: rawObj
-          }
-        },
-        { priority: 6 }
-      );
+      this.publishEnrichJob({
+        cveId: row.cve_id,
+        idempotencyKey: `enrich:backlog:${row.cve_id}:${dayBucket}:${mode}`,
+        raw: rawObj,
+        priority: 6
+      });
       n++;
     }
-    if (n > 0) {
+    if (n > 0 || skippedInflight > 0) {
       // eslint-disable-next-line no-console
-      console.log(`[ingest:nvd] backlog text-enrich sweep enqueued=${n} (limit=${limit}, day=${dayBucket}, engine=${mode})`);
+      console.log(
+        `[ingest:nvd] backlog text-enrich sweep enqueued=${n} skippedInflight=${skippedInflight} (limit=${limit}, day=${dayBucket}, engine=${mode})`
+      );
     }
   }
 

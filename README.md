@@ -220,13 +220,17 @@ rm -f .dev.lock
 
 `deploy.sh` автоматически создаёт `.env.production`, генерирует сильные секреты, проверяет compose config, собирает и поднимает stack. При интерактивном запуске спросит режим: **«Чистая установка»** (удалит Docker volumes Postgres/Redis/RabbitMQ) или **«Обновление платформы»** (данные сохраняются). Флаги: `--fresh` / `--update` (или `--keep-data`). Наружу публикуется только web (`WEB_PUBLISHED_PORT`, по умолчанию **3000**); API и зависимости остаются внутри Docker network. Подробная инструкция: `docs/deploy-linux-docker.md`.
 
-### Enrich: ручной режим и дайджесты
+### Enrich: queue guards (enterprise)
 
-Автоматический enrich из ingest выключен. Ручные кнопки в карточках CVE/BDU и подготовка digest используют текущий `TEXT_ENGINE`; в режиме `llm` задачи могут идти через очередь `ai.enrich`, а DLQ/retry остаётся для повторов:
+Per-CVE NVD fanout is off by default (`NVD_FANOUT_ENRICH=false`). For `baseline`/`translate`, hot-window maturity still runs via `TEXT_ENGINE_BG_ENRICH` (hot24), with:
 
-- `NVD_FANOUT_ENRICH=false` — не публиковать enrich‑задачи из NVD ingest
-- `HOT24_AI_SWEEP=false` — не делать автодогон enrich для окна 24ч
-- `BACKLOG_AI_SWEEP=false` — не делать автодогон backlog
+- **inflight coalesce** — at most one outstanding `ai.enrich` job per CVE+engine;
+- **`AI_ENRICH_MAX_DEPTH`** (default `2000`) — ingest stops publishing when the queue is deep;
+- **`BACKLOG_AI_SWEEP=false`** — no older-than-24h flood unless explicitly enabled.
+
+`HOT24_AI_SWEEP` only gates **`TEXT_ENGINE=llm`**. To stop all BG text enrich: `TEXT_ENGINE_BG_ENRICH=false`.
+
+Manual CVE/BDU buttons and digest prepare use the current `TEXT_ENGINE`; non-llm paths often complete in-process without the queue.
 
 ---
 

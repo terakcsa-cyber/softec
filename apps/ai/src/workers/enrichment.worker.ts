@@ -8,7 +8,8 @@ import {
   isMatureEnrichmentForTextEngine,
   llmEndpointRequiresApiKey,
   QueueEventEnvelopeSchema,
-  QueueEventType
+  QueueEventType,
+  releaseEnrichInflight
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
@@ -194,6 +195,9 @@ export class EnrichmentWorker implements OnModuleInit {
       if (!msg) return;
       let env: QueueEventEnvelope | undefined;
       let idempotencyInserted = false;
+      let inflightCveId: string | null = null;
+      let inflightTextEngine: string | null = null;
+      let keepInflightForRetry = false;
       try {
         env = QueueEventEnvelopeSchema.parse(JSON.parse(msg.content.toString("utf8")));
         if (env.type !== QueueEventType.EnrichCveRequested) {
@@ -204,6 +208,9 @@ export class EnrichmentWorker implements OnModuleInit {
         // Defense in depth: dev sometimes runs stale @vuln-intel/shared/dist; legacy source must not block LLM.
         const payload = EnrichCveRequestedEventSchema.parse(coerceEnrichPayloadSource(env.payload));
         const scope = "ai.enrich";
+        inflightCveId = payload.cveId;
+        const textEngineEarly = await this.llm.getTextEngineSettings();
+        inflightTextEngine = textEngineEarly.textEngine;
 
         const maxAgeRaw = process.env.AI_ENRICH_QUEUE_PUBLISHED_MAX_AGE_HOURS;
         const maxAgeHours =
@@ -245,7 +252,6 @@ export class EnrichmentWorker implements OnModuleInit {
         }
 
         // If we already have a mature enrichment for the active text engine, skip.
-        const textEngineEarly = await this.llm.getTextEngineSettings();
         const existing = await this.db.query<{
           output_text: string | null;
           output_json: unknown;
@@ -279,6 +285,8 @@ export class EnrichmentWorker implements OnModuleInit {
           [env.idempotencyKey, scope, JSON.stringify({ cveId: payload.cveId })]
         );
         if (inserted.rowCount === 0) {
+          // Another copy owns this work key / already finished — do not drop inflight.
+          keepInflightForRetry = true;
           if (process.env.AI_LOG_DEDUPE === "true") {
             // eslint-disable-next-line no-console
             console.log(`[ai:enrich] dedupe skip key=${env.idempotencyKey} cve=${payload.cveId}`);
@@ -384,6 +392,7 @@ export class EnrichmentWorker implements OnModuleInit {
               producer: { service: "ai", version: "0.0.1" },
               idempotencyKey: `${env.idempotencyKey}:retry:${retry + 1}`
             };
+            keepInflightForRetry = true;
             this.queue.publish("vuln.events", "vuln.enrich.requested.v1", nextEnv);
             this.queue.ack(msg);
             return;
@@ -391,6 +400,10 @@ export class EnrichmentWorker implements OnModuleInit {
         }
         // Non-transient errors: reject to DLQ (no requeue) to avoid hot-looping.
         this.queue.nack(msg, false);
+      } finally {
+        if (inflightCveId && inflightTextEngine && !keepInflightForRetry) {
+          await releaseEnrichInflight(this.db, inflightCveId, inflightTextEngine).catch(() => {});
+        }
       }
     });
 
