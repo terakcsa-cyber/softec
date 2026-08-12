@@ -140,6 +140,29 @@ docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d
 
 Подробнее: [ADMIN_GUIDE.md](./ADMIN_GUIDE.md), [MATURITY.md](./MATURITY.md).
 
+## Полное удаление
+
+```bash
+./uninstall.sh --yes
+```
+
+Сносит containers, volumes, project images и `.env.production`. Docker Engine не трогает.
+
+Потом чистая установка:
+
+```bash
+cd /opt
+rm -rf vuln-intel-platform
+git clone https://github.com/terakcsa-cyber/softec.git vuln-intel-platform
+cd vuln-intel-platform
+./deploy.sh --yes --fresh \
+  --origin=https://vulnintel.example.com \
+  --admin-email=admin@local.dev \
+  --admin-password='YourLongPassword1'
+```
+
+Важно: публичный HTTPS — `WEB_TLS_PUBLISHED_PORT=443` (tls-proxy). Прямой web — `WEB_PUBLISHED_PORT=3000`. Не ставь оба в `443`.
+
 ## Backup и restore
 
 Postgres backup:

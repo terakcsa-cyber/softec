@@ -47,6 +47,9 @@ Typical first deploy (server «тачка»):
 
 Update without wiping data:
   git pull && ./deploy.sh --yes --update
+
+Full wipe before clean reinstall:
+  ./uninstall.sh --yes
 EOF
 }
 
@@ -566,6 +569,31 @@ normalize_env_file() {
       write_env_value WEB_TLS_HTTP_PORT "80" "$ENV_FILE"
     fi
   fi
+
+  # Public 443/80 belong to tls-proxy. Direct Next.js publish stays on 3000 (or staging default).
+  # Avoid the classic misconfig: WEB_PUBLISHED_PORT=443 AND WEB_TLS_PUBLISHED_PORT=443.
+  local web_pub
+  web_pub="$(read_env_value WEB_PUBLISHED_PORT "$ENV_FILE" || true)"
+  tls_https="$(read_env_value WEB_TLS_PUBLISHED_PORT "$ENV_FILE" || true)"
+  if [[ -n "$WEB_PORT" && ( "$WEB_PORT" == "443" || "$WEB_PORT" == "80" ) ]]; then
+    write_env_value WEB_TLS_PUBLISHED_PORT "$WEB_PORT" "$ENV_FILE"
+    if [[ -z "$web_pub" || "$web_pub" == "443" || "$web_pub" == "80" || "$web_pub" == "$WEB_PORT" ]]; then
+      local fallback_web="3000"
+      [[ "$STAGING" == "1" ]] && fallback_web="3080"
+      log "Public port $WEB_PORT → tls-proxy; setting WEB_PUBLISHED_PORT=$fallback_web for direct web."
+      write_env_value WEB_PUBLISHED_PORT "$fallback_web" "$ENV_FILE"
+      web_pub="$fallback_web"
+    fi
+  fi
+  tls_https="$(read_env_value WEB_TLS_PUBLISHED_PORT "$ENV_FILE" || true)"
+  web_pub="$(read_env_value WEB_PUBLISHED_PORT "$ENV_FILE" || true)"
+  if [[ -n "$web_pub" && -n "$tls_https" && "$web_pub" == "$tls_https" ]]; then
+    local fallback_web="3000"
+    [[ "$STAGING" == "1" ]] && fallback_web="3080"
+    log "WEB_PUBLISHED_PORT and WEB_TLS_PUBLISHED_PORT both $web_pub; moving web publish to $fallback_web."
+    write_env_value WEB_PUBLISHED_PORT "$fallback_web" "$ENV_FILE"
+  fi
+
   local le_auto
   le_auto="$(read_env_value LETSENCRYPT_AUTO_RENEW "$ENV_FILE" || true)"
   if [[ -z "$le_auto" ]]; then
