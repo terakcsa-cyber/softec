@@ -41,6 +41,7 @@ export * from "./queue/enrich-request.js";
 export * from "./queue/hot24-score-sweep.js";
 export * from "./queue/dlq-replay.js";
 export * from "./risk/scoring.js";
+export * from "./risk/upsert-risk-score.js";
 export * from "./auth/roles.js";
 export * from "./metrics/prometheus.js";
 export * from "./threat/digest-format.js";

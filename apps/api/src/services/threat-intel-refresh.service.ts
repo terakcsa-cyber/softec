@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import {
+  applyRiskScoresForCveIds,
   buildScoreEventsForCveIds,
   ensureExploitIntelSchema,
   ensureVulncheckKevSchema,
@@ -138,11 +139,16 @@ export class ThreatIntelRefreshService {
   }
 
   private async enqueueScoring(cveIds: string[]): Promise<number> {
-    const events = await buildScoreEventsForCveIds(cveIds, {
-      producer: { service: "api", version: "0.0.1" },
-      tag: "vulncheck-kev",
-      tsBucket: "day"
+    return applyRiskScoresForCveIds(this.db, cveIds, {
+      concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
+      buildQueueEvents: () =>
+        buildScoreEventsForCveIds(cveIds, {
+          producer: { service: "api", version: "0.0.1" },
+          tag: "vulncheck-kev",
+          tsBucket: "day"
+        }),
+      publishViaQueue: (events) =>
+        publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
     });
-    return publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
   }
 }

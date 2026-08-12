@@ -1,5 +1,6 @@
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
 import {
+  applyRiskScoresForCveIds,
   buildScoreEventsForCveIds,
   ensureVulncheckKevSchema,
   ingestVulncheckKev,
@@ -64,11 +65,16 @@ export class VulncheckKevIngestJob implements OnModuleInit {
   }
 
   private async enqueueScoring(cveIds: string[]) {
-    const events = await buildScoreEventsForCveIds(cveIds, {
-      producer: { service: "ingest", version: "0.0.1" },
-      tag: "vulncheck-kev",
-      tsBucket: "day"
+    await applyRiskScoresForCveIds(this.db, cveIds, {
+      concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
+      buildQueueEvents: () =>
+        buildScoreEventsForCveIds(cveIds, {
+          producer: { service: "ingest", version: "0.0.1" },
+          tag: "vulncheck-kev",
+          tsBucket: "day"
+        }),
+      publishViaQueue: (events) =>
+        publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
     });
-    publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
   }
 }

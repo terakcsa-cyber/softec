@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from "@nestjs/common";
 import { XMLParser } from "fast-xml-parser";
 import {
+  applyRiskScoresForCveIds,
   bduFstecUrl,
   buildScoreEventsForCveIds,
   extractNvdPublishedIso,
@@ -13,6 +14,7 @@ import {
   parseNvdTimestampIso,
   publishScoreEvents,
   isAiScoreEnabled,
+  shouldScoreViaQueue,
   type BduVulxmlRecord
 } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
@@ -69,19 +71,24 @@ export class OpsRepairService {
         force: true
       });
       const rescored = result.changedCveIds.slice(0, Number(process.env.EPSS_RESCORE_LIMIT ?? 5_000));
-      const events = await buildScoreEventsForCveIds(rescored, {
-        producer: PRODUCER,
-        tag: "epss-manual",
-        tsBucket: "day"
+      const n = await applyRiskScoresForCveIds(this.db, rescored, {
+        concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
+        buildQueueEvents: () =>
+          buildScoreEventsForCveIds(rescored, {
+            producer: PRODUCER,
+            tag: "epss-manual",
+            tsBucket: "day"
+          }),
+        publishViaQueue: (events) =>
+          publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
       });
-      publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
       return {
-        message: `EPSS: rows=${result.rows} upserted=${result.upserted} rescored=${events.length} source=${result.sourceUrl}${result.skippedFresh ? " (fresh)" : ""}`,
+        message: `EPSS: rows=${result.rows} upserted=${result.upserted} rescored=${n} source=${result.sourceUrl}${result.skippedFresh ? " (fresh)" : ""}`,
         detail: {
           sourceUrl: result.sourceUrl,
           rows: result.rows,
           upserted: result.upserted,
-          rescored: events.length,
+          rescored: n,
           scoreDate: result.scoreDate ?? null,
           exploitIntelRefreshed: result.exploitIntelRefreshed ?? 0
         }
@@ -94,31 +101,35 @@ export class OpsRepairService {
       if (!isAiScoreEnabled()) {
         return {
           message:
-            "Hot24 score skipped: ai.score disabled (set AI_SCORE_ENABLED=true)",
-          detail: { enqueued: 0, skipped: true, reason: "ai_score_disabled" }
+            "Hot24 score skipped: scoring disabled (set AI_SCORE_ENABLED=true)",
+          detail: { upserted: 0, skipped: true, reason: "ai_score_disabled" }
         };
       }
       const limit = Math.max(1, Math.min(2000, Number(process.env.HOT24_SCORE_SWEEP_LIMIT ?? 500)));
       const staleHours = Math.max(0, Math.min(168, Number(process.env.HOT24_SCORE_STALE_HOURS ?? 6)));
       const bucket = hot24ScoreHourBucket();
       const rows = await listHot24CvesNeedingScore(this.db, { limit, staleHours, bucket });
-      const events = await buildScoreEventsForCveIds(
-        rows.map((r) => r.cve_id),
-        {
-          producer: PRODUCER,
-          tag: "hot24-manual",
-          idempotencyKeyFor: (cveId) => hot24ScoreIdempotencyKey(cveId, bucket)
-        }
-      );
-      const n = publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
+      const cveIds = rows.map((r) => r.cve_id);
+      const n = await applyRiskScoresForCveIds(this.db, cveIds, {
+        concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
+        buildQueueEvents: () =>
+          buildScoreEventsForCveIds(cveIds, {
+            producer: PRODUCER,
+            tag: "hot24-manual",
+            idempotencyKeyFor: (cveId) => hot24ScoreIdempotencyKey(cveId, bucket)
+          }),
+        publishViaQueue: (events) =>
+          publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
+      });
+      const mode = shouldScoreViaQueue() ? "enqueued" : "upserted";
       await this.db.query(
         `INSERT INTO audit_log(actor_type, actor_id, action, metadata)
          VALUES ('user', $1, 'ops.hot24_score', $2)`,
-        [actorEmail ?? null, JSON.stringify({ enqueued: n, limit, staleHours, bucket })]
+        [actorEmail ?? null, JSON.stringify({ [mode]: n, limit, staleHours, bucket })]
       );
       return {
-        message: `Hot24 score: enqueued=${n}`,
-        detail: { enqueued: n, limit, staleHours, bucket }
+        message: `Hot24 score: ${mode}=${n}`,
+        detail: { [mode]: n, upserted: shouldScoreViaQueue() ? 0 : n, enqueued: shouldScoreViaQueue() ? n : 0, limit, staleHours, bucket }
       };
     });
   }

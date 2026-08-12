@@ -5,6 +5,7 @@ import {
   AI_ENRICH_QUEUE,
   QueueEventType,
   SQL_EFFECTIVE_PUBLISHED_AT,
+  applyRiskScoresForCveIds,
   buildEnrichRequestedEvent,
   buildScoreEventsForCveIds,
   catalogBackfillActive,
@@ -25,7 +26,9 @@ import {
   isAiScoreEnabled,
   publishEnrichRequested,
   publishScoreEvents,
+  shouldScoreViaQueue,
   shouldSkipEnrichPublishForDepth,
+  upsertRiskScoreForCve,
   NVD_CATALOG_FLOOR_ISO,
   NVD_CATALOG_SCAN_MODE,
   NVD_CATALOG_SETTINGS_KEY,
@@ -735,22 +738,34 @@ export class NvdIngestJob implements OnModuleInit {
       }
     }
 
-    // Score: off unless TEXT_ENGINE=llm (or AI_SCORE_ENABLED=true). Hot-only by default.
+    // Risk score: inline upsert by default (no Rabbit). Queue only if AI_SCORE_VIA_QUEUE=true.
     const scoreHotOnly = this.scoreFanoutHotOnly();
     if (isAiScoreEnabled() && (!scoreHotOnly || isPublishedWithinHours(publishedAtIso))) {
-      this.queue.publish("vuln.events", "vuln.score.requested.v1", {
-        id: uuidv4(),
-        type: QueueEventType.ScoreCveRequested,
-        ts: new Date().toISOString(),
-        producer: { service: "ingest", version: "0.0.1" },
-        idempotencyKey: `score:${idempotencyKey}`,
-        payload: {
-          cveId: input.cveId,
-          cvss,
-          publishedAt: publishedAtIso,
-          modifiedAt: modifiedAtIso
-        }
-      });
+      if (shouldScoreViaQueue()) {
+        this.queue.publish("vuln.events", "vuln.score.requested.v1", {
+          id: uuidv4(),
+          type: QueueEventType.ScoreCveRequested,
+          ts: new Date().toISOString(),
+          producer: { service: "ingest", version: "0.0.1" },
+          idempotencyKey: `score:${idempotencyKey}`,
+          payload: {
+            cveId: input.cveId,
+            cvss,
+            publishedAt: publishedAtIso,
+            modifiedAt: modifiedAtIso
+          }
+        });
+      } else {
+        await upsertRiskScoreForCve(this.db, input.cveId, {
+          cvss: cvss ?? undefined,
+          publishedAt: publishedAtIso ?? undefined
+        }).catch((err) => {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[ingest:nvd] inline score failed cve=${input.cveId}: ${err instanceof Error ? err.message : String(err)}`
+          );
+        });
+      }
     }
   }
 
@@ -1140,18 +1155,29 @@ export class NvdIngestJob implements OnModuleInit {
     const rows = await listHot24CvesNeedingScore(this.db, { limit, staleHours, bucket });
     if (!rows.length) return;
 
-    const events = await buildScoreEventsForCveIds(
-      rows.map((r) => r.cve_id),
-      {
-        producer: { service: "ingest", version: "0.0.1" },
-        tag: "hot24-sweep",
-        idempotencyKeyFor: (cveId) => hot24ScoreIdempotencyKey(cveId, bucket)
-      }
-    );
-    const n = publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
+    const cveIds = rows.map((r) => r.cve_id);
+    const n = await applyRiskScoresForCveIds(this.db, cveIds, {
+      concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
+      onError: (cveId, err) => {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ingest:nvd] hot24 score failed cve=${cveId}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      },
+      buildQueueEvents: () =>
+        buildScoreEventsForCveIds(cveIds, {
+          producer: { service: "ingest", version: "0.0.1" },
+          tag: "hot24-sweep",
+          idempotencyKeyFor: (cveId) => hot24ScoreIdempotencyKey(cveId, bucket)
+        }),
+      publishViaQueue: (events) =>
+        publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
+    });
     if (n > 0) {
       // eslint-disable-next-line no-console
-      console.log(`[ingest:nvd] hot24h score sweep enqueued=${n} (limit=${limit}, bucket=${bucket})`);
+      console.log(
+        `[ingest:nvd] hot24h score sweep ${shouldScoreViaQueue() ? "enqueued" : "upserted"}=${n} (limit=${limit}, bucket=${bucket})`
+      );
     }
   }
 

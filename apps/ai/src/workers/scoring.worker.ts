@@ -6,7 +6,8 @@ import {
   QueueEventType,
   ScoreCveRequestedEventSchema,
   computeUnifiedRiskScoreV2,
-  isAiScoreEnabled
+  isAiScoreEnabled,
+  shouldScoreViaQueue
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
@@ -31,6 +32,13 @@ export class ScoringWorker implements OnModuleInit {
       // eslint-disable-next-line no-console
       console.log(
         "[ai:score] disabled (AI_SCORE_ENABLED=false). Unified risk_score will not update."
+      );
+      return;
+    }
+    if (!shouldScoreViaQueue()) {
+      // eslint-disable-next-line no-console
+      console.log(
+        "[ai:score] idle — risk scores are written inline (set AI_SCORE_VIA_QUEUE=true to consume ai.score)"
       );
       return;
     }

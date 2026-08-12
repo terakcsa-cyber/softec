@@ -14,6 +14,12 @@ export function isAiScoreEnabled(env: NodeJS.ProcessEnv = process.env): boolean 
   return true;
 }
 
+/** Legacy Rabbit path. Default is inline upsert; enable only with AI_SCORE_VIA_QUEUE=true. */
+export function shouldScoreViaQueue(env: NodeJS.ProcessEnv = process.env): boolean {
+  const flag = (env.AI_SCORE_VIA_QUEUE ?? "").trim().toLowerCase();
+  return flag === "true" || flag === "1" || flag === "yes";
+}
+
 export type ScoreEventProducer = { service: string; version: string };
 
 export type ScoreRequestedEnvelope = {
@@ -90,7 +96,7 @@ export type ScorePublisher = (
 ) => void;
 
 export function publishScoreEvents(publish: ScorePublisher, events: ScoreRequestedEnvelope[]): number {
-  if (!isAiScoreEnabled() || events.length === 0) return 0;
+  if (!isAiScoreEnabled() || !shouldScoreViaQueue() || events.length === 0) return 0;
   for (const event of events) {
     publish("vuln.events", "vuln.score.requested.v1", event);
   }

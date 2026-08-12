@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { gauge, isAiScoreEnabled } from "@vuln-intel/shared";
+import { gauge, isAiScoreEnabled, shouldScoreViaQueue } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
 import { MigrationService } from "./migration.service.js";
 
@@ -167,11 +167,10 @@ export class ReconciliationService implements OnModuleInit, OnModuleDestroy {
     const recon = await this.reconcile();
     const stale = recon.sources.filter((s) => !s.ok);
     const syncing = Boolean(opts?.jobsRunning);
-    // AI queues are optional — readiness is about NVD/EPSS/BDU/KEV ingest only.
-    // When ai.score is disabled (baseline|translate), ignore stale dlq.ai.score depth.
+    // When scoring is disabled or inline (default), ignore stale dlq.ai.score depth.
     const dlq =
       (opts?.queueDepths?.dlqEnrich ?? 0) +
-      (isAiScoreEnabled() ? (opts?.queueDepths?.dlqScore ?? 0) : 0);
+      (isAiScoreEnabled() && shouldScoreViaQueue() ? (opts?.queueDepths?.dlqScore ?? 0) : 0);
 
     let status: "ready" | "syncing" | "stale" | "degraded" = "ready";
     const warnings: string[] = [];

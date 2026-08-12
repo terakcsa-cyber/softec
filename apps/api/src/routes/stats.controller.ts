@@ -5,6 +5,7 @@ import {
   UserRole,
   isAdminUser,
   isAiScoreEnabled,
+  shouldScoreViaQueue,
   llmEndpointRequiresApiKey,
   parseBduVendorProductPairs,
   parseUserRole,
@@ -1071,10 +1072,11 @@ export class StatsController {
     if (queue !== "dlq.ai.enrich" && queue !== "dlq.ai.score") {
       return { ok: false, error: "Invalid queue (expected dlq.ai.enrich or dlq.ai.score)" };
     }
-    if (queue === "dlq.ai.score" && !isAiScoreEnabled()) {
+    if (queue === "dlq.ai.score" && (!isAiScoreEnabled() || !shouldScoreViaQueue())) {
       return {
         ok: false,
-        error: "ai.score disabled (set AI_SCORE_ENABLED=true before retrying dlq.ai.score)"
+        error:
+          "score DLQ retry needs AI_SCORE_ENABLED=true and AI_SCORE_VIA_QUEUE=true (default scoring is inline — purge dlq.ai.score instead)"
       };
     }
     const limit = Math.max(1, Math.min(50_000, Number(limitRaw ?? 1000)));

@@ -1,5 +1,6 @@
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
 import {
+  applyRiskScoresForCveIds,
   buildScoreEventsForCveIds,
   ensureEpssSchema,
   hot24ScoreHourBucket,
@@ -8,7 +9,8 @@ import {
   isAiScoreEnabled,
   listHot24CvesNeedingScore,
   publishScoreEvents,
-  replayDlqMessages
+  replayDlqMessages,
+  shouldScoreViaQueue
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
@@ -71,20 +73,25 @@ export class IntegrationsBootJob implements OnModuleInit {
     const rows = await listHot24CvesNeedingScore(this.db, { limit, staleHours, bucket });
     if (!rows.length) {
       // eslint-disable-next-line no-console
-      console.log("[ingest:integrations-boot] hot24 score skip (nothing to enqueue)");
+      console.log("[ingest:integrations-boot] hot24 score skip (nothing to score)");
       return;
     }
-    const events = await buildScoreEventsForCveIds(
-      rows.map((r) => r.cve_id),
-      {
-        producer: INGEST_PRODUCER,
-        tag: "hot24-boot",
-        idempotencyKeyFor: (cveId) => hot24ScoreIdempotencyKey(cveId, bucket)
-      }
-    );
-    const n = publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
+    const cveIds = rows.map((r) => r.cve_id);
+    const n = await applyRiskScoresForCveIds(this.db, cveIds, {
+      concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
+      buildQueueEvents: () =>
+        buildScoreEventsForCveIds(cveIds, {
+          producer: INGEST_PRODUCER,
+          tag: "hot24-boot",
+          idempotencyKeyFor: (cveId) => hot24ScoreIdempotencyKey(cveId, bucket)
+        }),
+      publishViaQueue: (events) =>
+        publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
+    });
     // eslint-disable-next-line no-console
-    console.log(`[ingest:integrations-boot] hot24 score enqueued=${n} (limit=${limit}, bucket=${bucket})`);
+    console.log(
+      `[ingest:integrations-boot] hot24 score ${shouldScoreViaQueue() ? "enqueued" : "upserted"}=${n} (limit=${limit}, bucket=${bucket})`
+    );
   }
 
   private async bootEpssIfNeeded() {
@@ -109,15 +116,20 @@ export class IntegrationsBootJob implements OnModuleInit {
     console.log(`[ingest:integrations-boot] epss import start (rows=${count}, force=${force})`);
     const result = await ingestEpssFeed(this.db, { auditMeta: { reason: "boot", via: "ingest" } });
     const rescored = result.changedCveIds.slice(0, Number(process.env.EPSS_BOOT_RESCORE_LIMIT ?? 5000));
-    const events = await buildScoreEventsForCveIds(rescored, {
-      producer: INGEST_PRODUCER,
-      tag: "epss-boot",
-      tsBucket: "day"
+    const n = await applyRiskScoresForCveIds(this.db, rescored, {
+      concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
+      buildQueueEvents: () =>
+        buildScoreEventsForCveIds(rescored, {
+          producer: INGEST_PRODUCER,
+          tag: "epss-boot",
+          tsBucket: "day"
+        }),
+      publishViaQueue: (events) =>
+        publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
     });
-    publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
     // eslint-disable-next-line no-console
     console.log(
-      `[ingest:integrations-boot] epss ok rows=${result.rows} upserted=${result.upserted} rescored=${events.length}`
+      `[ingest:integrations-boot] epss ok rows=${result.rows} upserted=${result.upserted} rescored=${n}`
     );
   }
 }

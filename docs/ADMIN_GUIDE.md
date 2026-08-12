@@ -233,11 +233,13 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 | `HOT24_SCORE_STALE_HOURS` | 6 | Пересчёт если score старше |
 | `HOT24_SCORE_BOOT` | true* | Score sweep при boot (*если score не выключен) |
 | `AI_SCORE_ENABLED` | `true` | Unified risk_score; `false` только чтобы поставить scoring на паузу |
-| `AI_SCORE_SKIP_FRESH_HOURS` | 2 | Пропуск дублей NVD score |
+| `AI_SCORE_VIA_QUEUE` | false | Legacy Rabbit `ai.score`. По умолчанию score пишется **inline** в ingest/API |
+| `AI_SCORE_INLINE_CONCURRENCY` | 32 | Параллель inline upsert |
+| `AI_SCORE_SKIP_FRESH_HOURS` | 2 | Пропуск дублей NVD score (только queue path) |
 | `DLQ_BOOT_RETRY` | false | Авто-replay DLQ при старте (prod: false) |
 | `DLQ_BOOT_RETRY_LIMIT` | 200 | Лимит на очередь |
 
-> **`ai.score`:** по умолчанию **включён** (risk score — детерминированный расчёт, не LLM). Отключается только `AI_SCORE_ENABLED=false`. Пока score выключен, readiness **не** считает глубину `dlq.ai.score`.
+> **`risk_score`:** по умолчанию **inline** (без Rabbit). Очередь `ai.score` — только `AI_SCORE_VIA_QUEUE=true`. Отключение расчёта: `AI_SCORE_ENABLED=false`. Readiness **не** считает `dlq.ai.score`, пока scoring inline/выключен.
 
 ### Text engine / LLM
 
@@ -258,7 +260,7 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 
 ### EPSS
 
-Ежедневный CSV.gz (мульти-mirror / FIRST failover + integrity checks), boot при пустой/stale таблице; poll по умолчанию ~6ч (`EPSS_POLL_INTERVAL_MS`). Rescore через `ai.score` (по умолчанию включён; выкл. `AI_SCORE_ENABLED=false`). Ручной sync: System Health → Управление или `pnpm epss:sync` / `POST /api/stats/ops/epss/sync`.
+Ежедневный CSV.gz (мульти-mirror / FIRST failover + integrity checks), boot при пустой/stale таблице; poll по умолчанию ~6ч (`EPSS_POLL_INTERVAL_MS`). После ingest score **сразу** пишется в `risk_score` (inline). Ручной sync: System Health → Управление или `pnpm epss:sync` / `POST /api/stats/ops/epss/sync`.
 
 **UI:** Overview показывает **EPSS · база** (корпус). Низкий EPSS среди CVE за 24ч ожидаем: дневной feed отстаёт от NVD ~сутки — не трактовать как сбой sync.
 
@@ -448,10 +450,13 @@ LLM_OLLAMA_UNDICI=true
 
 Worker пропускает CVE с успешным `enrichment_ai`. Исключения: `enrich:digest:`, `:dlq:`, `enrich:manual:`.
 
-### Score dedupe
+### Score dedupe / inline
 
-`AI_SCORE_SKIP_FRESH_HOURS=2` — пропуск для NVD fanout дублей.  
-Force recompute: `score:epss:*`, `score:hot24h:*`, `:dlq:`.
+По умолчанию `risk_score` пишется **inline** (`upsertRiskScoreForCve`) — очередей и DLQ нет.  
+`AI_SCORE_SKIP_FRESH_HOURS` относится только к legacy `AI_SCORE_VIA_QUEUE=true`.  
+После миграции с очереди: `rabbitmqctl purge_queue ai.score` и `dlq.ai.score`.
+
+Force recompute: Hot24 rescore в System Health / `pnpm rescore:hot24` (теперь upsert, не enqueue).
 
 ### Auto enrich / queue guards
 
@@ -695,7 +700,7 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 
 **Симптомы:** Пользователь видит большое число в summary.  
 **Пояснение:** Это COUNT всех scores, не очередь.  
-**Проверка:** `ai.score` depth ≈ 0 (если не `AI_SCORE_ENABLED=false`), `HOT24_SCORE_SWEEP=true`, `pnpm rescore:hot24`.
+**Проверка:** `AI_SCORE_ENABLED=true`, hot24/inline upsert (не очередь), System Health → Hot24 rescore или `pnpm rescore:hot24`. Старый `dlq.ai.score` при inline можно purge.
 
 ### INC-03: 401 для всех пользователей UI
 

@@ -1,5 +1,6 @@
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
 import {
+  applyRiskScoresForCveIds,
   buildScoreEventsForCveIds,
   ingestEpssFeed,
   publishScoreEvents
@@ -59,18 +60,24 @@ export class EpssIngestJob implements OnModuleInit {
       (await this.isStale(36));
     const result = await ingestEpssFeed(this.db, { auditMeta: { via: "epss-job" }, force });
     const rescored = result.changedCveIds.slice(0, Number(process.env.EPSS_RESCORE_LIMIT ?? 20_000));
+    let scored = 0;
     if (rescored.length) {
-      const events = await buildScoreEventsForCveIds(rescored, {
-        producer: { service: "ingest", version: "0.0.1" },
-        tag: "epss",
-        tsBucket: "iso"
+      scored = await applyRiskScoresForCveIds(this.db, rescored, {
+        concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
+        buildQueueEvents: () =>
+          buildScoreEventsForCveIds(rescored, {
+            producer: { service: "ingest", version: "0.0.1" },
+            tag: "epss",
+            tsBucket: "iso"
+          }),
+        publishViaQueue: (events) =>
+          publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
       });
-      publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
     }
 
     // eslint-disable-next-line no-console
     console.log(
-      `[ingest:epss] ok rows=${result.rows} upserted=${result.upserted} rescored=${rescored.length}` +
+      `[ingest:epss] ok rows=${result.rows} upserted=${result.upserted} rescored=${scored}` +
         ` skippedFresh=${Boolean(result.skippedFresh)} scoreDate=${result.scoreDate ?? "?"} ` +
         `exploitIntel=${result.exploitIntelRefreshed ?? 0} source=${result.sourceUrl}`
     );
