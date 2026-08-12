@@ -4,6 +4,8 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Docker default /dev/shm is 64MB — Postgres parallel/hash ops hit ENOSPC (code 53100).
+    shm_size: "256mb"
     command:
       [
         "postgres",

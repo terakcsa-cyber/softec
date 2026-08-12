@@ -3,6 +3,7 @@ name: vuln-intel
 services:
   postgres:
     image: postgres:16-alpine
+    shm_size: "256mb"
     command:
       [
         "postgres",
