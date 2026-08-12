@@ -31,6 +31,71 @@ type HealthCheck = {
   error?: string;
 };
 
+type ProbeOk = { ok?: boolean; error?: string | null; ms?: number; status?: number | null };
+
+type LlmProbe = ProbeOk & {
+  configured?: boolean;
+  endpoint?: string | null;
+  model?: string | null;
+  authReady?: boolean;
+  authHint?: string | null;
+};
+
+type NvdProbe = ProbeOk & {
+  apiProbeOk?: boolean;
+  endpoint?: string | null;
+  hasApiKey?: boolean;
+  ingestStale?: boolean;
+  ingestStaleHint?: string | null;
+  lastProcessed?: number;
+  lastAttemptProcessed?: number;
+  watermarkPartial?: boolean;
+  watermarkEnd?: string | null;
+  watermarkTs?: string | null;
+};
+
+type BduProbe = ProbeOk & {
+  sourceProbeOk?: boolean;
+  endpoint?: string | null;
+  recordCount?: number;
+  cveLinkCount?: number;
+  tlsInsecure?: boolean;
+  maxBduId?: string | null;
+  lastIngestRecords?: number;
+  lastIngestAt?: string | null;
+  maxPublicationAt?: string | null;
+  lastIngestUsedFallback?: boolean;
+  ingestStale?: boolean;
+  ingestStaleHint?: string | null;
+};
+
+type CoverageHealth = {
+  textEngine?: string;
+  scoreEnabled?: boolean;
+  scoreViaQueue?: boolean;
+  enrichViaQueue?: boolean;
+  scoreBacklogOn?: boolean;
+  enrichBacklogOn?: boolean;
+  totalCves?: number;
+  scoredCount?: number;
+  scoredMissing?: number;
+  scoredPct?: number;
+  enrichedCount?: number;
+  enrichedMissing?: number;
+  enrichedPct?: number;
+  hot24?: {
+    total?: number;
+    scored?: number;
+    scoredMissing?: number;
+    scoredPct?: number;
+    enriched?: number;
+    enrichedMissing?: number;
+    enrichedPct?: number;
+  };
+  lastScoreAt?: string | null;
+  lastEnrichAt?: string | null;
+};
+
 type QueueHealth = {
   ok?: boolean;
   error?: string;
@@ -40,6 +105,10 @@ type QueueHealth = {
     dlqEnrich?: { messages: number };
     dlqScore?: { messages: number };
   };
+  llm?: LlmProbe;
+  nvd?: NvdProbe;
+  bdu?: BduProbe;
+  coverage?: CoverageHealth;
 };
 
 type Reconciliation = {
@@ -389,28 +458,198 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
       )}
 
       {tab === "queues" && (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          {(
-            [
-              ["ai.enrich", qh?.queues?.enrich?.messages, qh?.queues?.enrich?.consumers],
-              ["ai.score", qh?.queues?.score?.messages, qh?.queues?.score?.consumers],
-              ["dlq.ai.enrich", qh?.queues?.dlqEnrich?.messages, null],
-              ["dlq.ai.score", qh?.queues?.dlqScore?.messages, null]
-            ] as const
-          ).map(([name, depth, consumers]) => (
-            <div
-              key={name}
-              className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15"
-            >
-              <div className="font-mono text-[11px] text-muted">{name}</div>
-              <div className="mt-1 text-2xl font-semibold tabular-nums">
-                {typeof depth === "number" ? depth.toLocaleString() : "—"}
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {(
+              [
+                ["ai.enrich", qh?.queues?.enrich?.messages, qh?.queues?.enrich?.consumers],
+                ["ai.score", qh?.queues?.score?.messages, qh?.queues?.score?.consumers],
+                ["dlq.ai.enrich", qh?.queues?.dlqEnrich?.messages, null],
+                ["dlq.ai.score", qh?.queues?.dlqScore?.messages, null]
+              ] as const
+            ).map(([name, depth, consumers]) => (
+              <div
+                key={name}
+                className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15"
+              >
+                <div className="font-mono text-[11px] text-muted">{name}</div>
+                <div className="mt-1 text-2xl font-semibold tabular-nums">
+                  {typeof depth === "number" ? depth.toLocaleString() : "—"}
+                </div>
+                {consumers != null ? (
+                  <div className="mt-1 text-[10px] text-muted">consumers: {consumers}</div>
+                ) : null}
               </div>
-              {consumers != null ? (
-                <div className="mt-1 text-[10px] text-muted">consumers: {consumers}</div>
+            ))}
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <CoverageStatusCard
+              title="Risk score"
+              ok={Boolean(qh?.coverage?.scoreEnabled) && (qh?.coverage?.scoredMissing ?? 0) === 0}
+              warn={
+                qh?.coverage?.scoreEnabled === false ||
+                (Boolean(qh?.coverage?.scoreEnabled) &&
+                  (qh?.coverage?.scoredMissing ?? 0) > 0 &&
+                  (qh?.coverage?.scoreBacklogOn ?? false))
+              }
+              pct={qh?.coverage?.scoredPct}
+              filled={qh?.coverage?.scoredCount}
+              total={qh?.coverage?.totalCves}
+              missing={qh?.coverage?.scoredMissing}
+              hotPct={qh?.coverage?.hot24?.scoredPct}
+              hotFilled={qh?.coverage?.hot24?.scored}
+              hotTotal={qh?.coverage?.hot24?.total}
+              lastAt={qh?.coverage?.lastScoreAt}
+              meta={[
+                qh?.coverage?.scoreEnabled === false
+                  ? "выключен (AI_SCORE_ENABLED=false)"
+                  : qh?.coverage?.scoreViaQueue
+                    ? "режим: очередь ai.score"
+                    : "режим: inline",
+                qh?.coverage?.scoreBacklogOn ? "backlog: on" : "backlog: off"
+              ]}
+            />
+            <CoverageStatusCard
+              title="Карточки (текст)"
+              ok={(qh?.coverage?.enrichedMissing ?? 0) === 0 && (qh?.coverage?.totalCves ?? 0) > 0}
+              warn={
+                (qh?.coverage?.enrichedMissing ?? 0) > 0 && (qh?.coverage?.enrichBacklogOn ?? false)
+              }
+              pct={qh?.coverage?.enrichedPct}
+              filled={qh?.coverage?.enrichedCount}
+              total={qh?.coverage?.totalCves}
+              missing={qh?.coverage?.enrichedMissing}
+              hotPct={qh?.coverage?.hot24?.enrichedPct}
+              hotFilled={qh?.coverage?.hot24?.enriched}
+              hotTotal={qh?.coverage?.hot24?.total}
+              lastAt={qh?.coverage?.lastEnrichAt}
+              meta={[
+                `TEXT_ENGINE=${qh?.coverage?.textEngine ?? "—"}`,
+                qh?.coverage?.enrichViaQueue ? "режим: очередь ai.enrich" : "режим: inline",
+                qh?.coverage?.enrichBacklogOn ? "backlog: on" : "backlog: off"
+              ]}
+            />
+          </div>
+
+          {qh?.llm ? (
+            <div className="rounded-xl border border-slate-200 bg-white p-4 text-[11px] dark:border-border dark:bg-black/15">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold uppercase tracking-wide">LLM</span>
+                  <StatusPill
+                    ok={qh.llm.configured !== false && Boolean(qh.llm.ok)}
+                    warn={qh.llm.status === 429}
+                  />
+                </div>
+                <span className="font-mono tabular-nums text-muted">
+                  {typeof qh.llm.ms === "number" ? fmtMs(qh.llm.ms) : "—"}
+                </span>
+              </div>
+              {qh.llm.endpoint ? (
+                <div className="truncate font-mono text-[10px] text-fg/80">{qh.llm.endpoint}</div>
+              ) : null}
+              <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted">
+                {qh.llm.model ? <span>model: {qh.llm.model}</span> : null}
+                {typeof qh.llm.status === "number" ? <span>HTTP {qh.llm.status}</span> : null}
+                {qh.llm.error ? <span className="text-danger">{qh.llm.error}</span> : null}
+              </div>
+              {qh.llm.authReady === false && qh.llm.authHint ? (
+                <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn">
+                  {qh.llm.authHint}
+                </div>
               ) : null}
             </div>
-          ))}
+          ) : null}
+
+          {qh?.nvd ? (
+            <div className="rounded-xl border border-slate-200 bg-white p-4 text-[11px] dark:border-border dark:bg-black/15">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold uppercase tracking-wide">NVD</span>
+                  <StatusPill ok={Boolean(qh.nvd.ok)} warn={qh.nvd.ingestStale || qh.nvd.apiProbeOk === false} />
+                </div>
+                <span className="font-mono tabular-nums text-muted">
+                  {typeof qh.nvd.ms === "number" ? fmtMs(qh.nvd.ms) : "—"}
+                </span>
+              </div>
+              {qh.nvd.endpoint ? (
+                <div className="truncate font-mono text-[10px] text-fg/80">{qh.nvd.endpoint}</div>
+              ) : null}
+              <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted">
+                <span>{qh.nvd.hasApiKey ? "API key: да" : "API key: нет"}</span>
+                {typeof qh.nvd.status === "number" ? <span>HTTP {qh.nvd.status}</span> : null}
+                {typeof qh.nvd.lastProcessed === "number" ? (
+                  <span>
+                    посл. цикл: {qh.nvd.lastProcessed.toLocaleString()} CVE
+                    {qh.nvd.watermarkPartial ? " (частично)" : ""}
+                  </span>
+                ) : typeof qh.nvd.lastAttemptProcessed === "number" ? (
+                  <span>посл. попытка: {qh.nvd.lastAttemptProcessed.toLocaleString()} CVE</span>
+                ) : null}
+                {qh.nvd.watermarkEnd ? <span>окно до: {fmtTs(qh.nvd.watermarkEnd)}</span> : null}
+                {qh.nvd.watermarkTs ? <span>запись: {fmtTs(qh.nvd.watermarkTs)}</span> : null}
+              </div>
+              {qh.nvd.error ? (
+                <div className={cn("mt-1 text-[10px]", qh.nvd.ok ? "text-warn" : "text-danger")}>
+                  {qh.nvd.error}
+                </div>
+              ) : null}
+              {qh.nvd.ingestStale && qh.nvd.ingestStaleHint ? (
+                <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn">
+                  {qh.nvd.ingestStaleHint}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {qh?.bdu ? (
+            <div className="rounded-xl border border-teal-200/80 bg-teal-50/50 p-4 text-[11px] dark:border-teal-900/40 dark:bg-teal-950/20">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold uppercase tracking-wide">БДУ ФСТЭК</span>
+                  <StatusPill ok={Boolean(qh.bdu.ok)} warn={qh.bdu.ingestStale || qh.bdu.sourceProbeOk === false} />
+                </div>
+                <span className="font-mono tabular-nums text-muted">
+                  {typeof qh.bdu.ms === "number" ? fmtMs(qh.bdu.ms) : "—"}
+                </span>
+              </div>
+              {qh.bdu.endpoint ? (
+                <div className="truncate font-mono text-[10px] text-fg/80">{qh.bdu.endpoint}</div>
+              ) : null}
+              <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted">
+                {typeof qh.bdu.recordCount === "number" ? (
+                  <span>записей: {qh.bdu.recordCount.toLocaleString()}</span>
+                ) : null}
+                {typeof qh.bdu.cveLinkCount === "number" ? (
+                  <span>связей CVE: {qh.bdu.cveLinkCount.toLocaleString()}</span>
+                ) : null}
+                {typeof qh.bdu.status === "number" ? <span>HTTP {qh.bdu.status}</span> : null}
+                {qh.bdu.tlsInsecure ? <span className="text-warn">TLS insecure</span> : null}
+                {qh.bdu.maxBduId ? <span>max id: {qh.bdu.maxBduId}</span> : null}
+                {typeof qh.bdu.lastIngestRecords === "number" ? (
+                  <span>посл. цикл: {qh.bdu.lastIngestRecords.toLocaleString()}</span>
+                ) : null}
+                {qh.bdu.lastIngestAt ? <span>ingest: {fmtTs(qh.bdu.lastIngestAt)}</span> : null}
+                {qh.bdu.maxPublicationAt ? <span>публ.: {fmtTs(qh.bdu.maxPublicationAt)}</span> : null}
+                {qh.bdu.lastIngestUsedFallback ? <span className="text-warn">зеркало</span> : null}
+              </div>
+              {qh.bdu.error ? (
+                <div className={cn("mt-1 text-[10px]", qh.bdu.ok ? "text-warn" : "text-danger")}>
+                  {qh.bdu.error}
+                </div>
+              ) : null}
+              {qh.bdu.ingestStale && qh.bdu.ingestStaleHint ? (
+                <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn">
+                  {qh.bdu.ingestStaleHint}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {!qh?.ok && (
+            <div className="text-sm text-danger">{qh?.error ? String(qh.error) : "Очереди недоступны"}</div>
+          )}
         </div>
       )}
 
@@ -561,6 +800,87 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function CoverageStatusCard({
+  title,
+  ok,
+  warn,
+  pct,
+  filled,
+  total,
+  missing,
+  hotPct,
+  hotFilled,
+  hotTotal,
+  lastAt,
+  meta
+}: {
+  title: string;
+  ok: boolean;
+  warn?: boolean;
+  pct?: number;
+  filled?: number;
+  total?: number;
+  missing?: number;
+  hotPct?: number;
+  hotFilled?: number;
+  hotTotal?: number;
+  lastAt?: string | null;
+  meta?: string[];
+}) {
+  const bar = typeof pct === "number" && Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-sm font-semibold">{title}</div>
+        <StatusPill ok={ok} warn={warn} />
+      </div>
+      <div className="mt-2 flex items-end justify-between gap-2">
+        <div className="text-2xl font-semibold tabular-nums">
+          {typeof pct === "number" ? `${pct}%` : "—"}
+        </div>
+        <div className="text-[10px] text-muted tabular-nums">
+          {typeof filled === "number" && typeof total === "number"
+            ? `${filled.toLocaleString()} / ${total.toLocaleString()}`
+            : "—"}
+        </div>
+      </div>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-white/10">
+        <div
+          className={cn("h-full rounded-full transition-[width]", ok ? "bg-ok" : warn ? "bg-warn" : "bg-danger")}
+          style={{ width: `${Math.max(ok ? 100 : 4, bar)}%` }}
+        />
+      </div>
+      <dl className="mt-2 space-y-1 text-[11px]">
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted">Без покрытия</dt>
+          <dd className="font-mono tabular-nums">{typeof missing === "number" ? missing.toLocaleString() : "—"}</dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted">Hot 24ч</dt>
+          <dd className="font-mono tabular-nums">
+            {typeof hotPct === "number" && typeof hotFilled === "number" && typeof hotTotal === "number"
+              ? `${hotPct}% · ${hotFilled.toLocaleString()}/${hotTotal.toLocaleString()}`
+              : "—"}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-2">
+          <dt className="text-muted">Последняя активность</dt>
+          <dd className="font-mono text-[10px]">{fmtTs(lastAt)}</dd>
+        </div>
+      </dl>
+      {meta?.length ? (
+        <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-muted">
+          {meta.map((m) => (
+            <span key={m} className="rounded-md border border-border/70 px-1.5 py-0.5 font-mono">
+              {m}
+            </span>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

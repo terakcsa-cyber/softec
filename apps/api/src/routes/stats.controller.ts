@@ -3,8 +3,10 @@ import { Controller, ForbiddenException, Get, Logger, Post, Query } from "@nestj
 import { Throttle } from "@nestjs/throttler";
 import {
   UserRole,
+  getTextEngineSettingsFromEnv,
   isAdminUser,
   isAiScoreEnabled,
+  shouldEnrichViaQueue,
   shouldScoreViaQueue,
   llmEndpointRequiresApiKey,
   parseBduVendorProductPairs,
@@ -896,7 +898,15 @@ export class StatsController {
         this.queue.getQueueDepth("dlq.ai.score")
       ]);
 
-      const [llm, nvd, bdu] = await Promise.all([
+      const textEngine = getTextEngineSettingsFromEnv().textEngine;
+      const scoreEnabled = isAiScoreEnabled();
+      const scoreViaQueue = shouldScoreViaQueue();
+      const enrichViaQueue = shouldEnrichViaQueue(textEngine);
+      const scoreBacklogOn = scoreEnabled && process.env.BACKLOG_SCORE_SWEEP !== "false";
+      const enrichBacklogOn =
+        process.env.TEXT_ENGINE_BG_ENRICH !== "false" && process.env.BACKLOG_AI_SWEEP !== "false";
+
+      const [llm, nvd, bdu, coverageRow] = await Promise.all([
         (async (): Promise<LlmHealth> => {
         const cfg = await this.integration.getEffectiveLlmConfig();
         const requiresApiKey = llmEndpointRequiresApiKey(cfg.endpoint);
@@ -1009,8 +1019,78 @@ export class StatsController {
         }
       })(),
         this.integration.probeNvdHealth(),
-        this.integration.probeBduHealth()
+        this.integration.probeBduHealth(),
+        this.db.query<{
+          total: string;
+          scored: string;
+          enriched: string;
+          hot_total: string;
+          hot_scored: string;
+          hot_enriched: string;
+          last_score: string | null;
+          last_enrich: string | null;
+        }>(
+          `SELECT
+             (SELECT COUNT(*)::text FROM cve) AS total,
+             (SELECT COUNT(*)::text FROM risk_score) AS scored,
+             (SELECT COUNT(DISTINCT cve_id)::text
+                FROM enrichment_ai e
+               WHERE e.output_text IS DISTINCT FROM 'LLM not configured.'
+                 AND COALESCE(e.output_json->>'summary', '') NOT LIKE 'LLM not configured%'
+                 AND NOT (e.output_json @> '{"_enrich_error": true}'::jsonb)
+                 AND (
+                   $1::text <> 'translate'
+                   OR COALESCE(e.output_json->>'_display_source', '') IN ('translated', 'baseline_ru')
+                   OR e.model = 'translate'
+                   OR e.prompt_version = 'translate-v1'
+                 )
+             ) AS enriched,
+             (SELECT COUNT(*)::text
+                FROM cve c
+               WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} IS NOT NULL
+                 AND ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '24 hours'
+             ) AS hot_total,
+             (SELECT COUNT(*)::text
+                FROM cve c
+               WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} IS NOT NULL
+                 AND ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '24 hours'
+                 AND EXISTS (SELECT 1 FROM risk_score rs WHERE rs.cve_id = c.cve_id)
+             ) AS hot_scored,
+             (SELECT COUNT(*)::text
+                FROM cve c
+               WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} IS NOT NULL
+                 AND ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '24 hours'
+                 AND EXISTS (
+                   SELECT 1
+                     FROM enrichment_ai e
+                    WHERE e.cve_id = c.cve_id
+                      AND e.output_text IS DISTINCT FROM 'LLM not configured.'
+                      AND COALESCE(e.output_json->>'summary', '') NOT LIKE 'LLM not configured%'
+                      AND NOT (e.output_json @> '{"_enrich_error": true}'::jsonb)
+                      AND (
+                        $1::text <> 'translate'
+                        OR COALESCE(e.output_json->>'_display_source', '') IN ('translated', 'baseline_ru')
+                        OR e.model = 'translate'
+                        OR e.prompt_version = 'translate-v1'
+                      )
+                 )
+             ) AS hot_enriched,
+             (SELECT to_char(MAX(computed_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                FROM risk_score) AS last_score,
+             (SELECT to_char(MAX(created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                FROM enrichment_ai) AS last_enrich`,
+          [textEngine]
+        )
       ]);
+
+      const cov = coverageRow.rows[0];
+      const totalCves = Number(cov?.total ?? 0);
+      const scoredCount = Number(cov?.scored ?? 0);
+      const enrichedCount = Number(cov?.enriched ?? 0);
+      const hotTotal = Number(cov?.hot_total ?? 0);
+      const hotScored = Number(cov?.hot_scored ?? 0);
+      const hotEnriched = Number(cov?.hot_enriched ?? 0);
+      const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 1000) / 10 : 0);
 
       return {
         ok: true,
@@ -1018,7 +1098,33 @@ export class StatsController {
         queues: { enrich, score, dlqEnrich, dlqScore },
         llm,
         nvd,
-        bdu
+        bdu,
+        coverage: {
+          textEngine,
+          scoreEnabled,
+          scoreViaQueue,
+          enrichViaQueue,
+          scoreBacklogOn,
+          enrichBacklogOn,
+          totalCves,
+          scoredCount,
+          scoredMissing: Math.max(0, totalCves - scoredCount),
+          scoredPct: pct(scoredCount, totalCves),
+          enrichedCount,
+          enrichedMissing: Math.max(0, totalCves - enrichedCount),
+          enrichedPct: pct(enrichedCount, totalCves),
+          hot24: {
+            total: hotTotal,
+            scored: hotScored,
+            scoredMissing: Math.max(0, hotTotal - hotScored),
+            scoredPct: pct(hotScored, hotTotal),
+            enriched: hotEnriched,
+            enrichedMissing: Math.max(0, hotTotal - hotEnriched),
+            enrichedPct: pct(hotEnriched, hotTotal)
+          },
+          lastScoreAt: cov?.last_score ?? null,
+          lastEnrichAt: cov?.last_enrich ?? null
+        }
       };
     } catch (e) {
       return {
