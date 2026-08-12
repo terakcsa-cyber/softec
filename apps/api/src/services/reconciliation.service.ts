@@ -12,7 +12,8 @@ const reconcileLagGauge = gauge(
 @Injectable()
 export class ReconciliationService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ReconciliationService.name);
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private bootTimer: ReturnType<typeof setTimeout> | null = null;
+  private intervalTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly db: DbService,
@@ -21,22 +22,32 @@ export class ReconciliationService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     if (process.env.RECONCILE_ENABLED?.trim() === "false") return;
-    await this.migrations.whenReady();
+    try {
+      await this.migrations.whenReady();
+    } catch (e) {
+      this.logger.warn(
+        `Reconciliation deferred: schema/migrations not ready (${e instanceof Error ? e.message : String(e)})`
+      );
+    }
     const hours = Math.max(1, Number(process.env.RECONCILE_INTERVAL_HOURS ?? "6"));
-    void this.reconcile().catch((e) =>
-      this.logger.warn(`Reconciliation boot failed: ${e instanceof Error ? e.message : String(e)}`)
-    );
-    this.timer = setInterval(
-      () =>
-        void this.reconcile().catch((e) =>
-          this.logger.warn(`Reconciliation tick failed: ${e instanceof Error ? e.message : String(e)}`)
-        ),
-      hours * 3_600_000
-    );
+    // Delay first run so listen/health can come up even if DB is still settling.
+    this.bootTimer = setTimeout(() => {
+      void this.reconcile().catch((err) =>
+        this.logger.warn(`Reconciliation boot failed: ${err instanceof Error ? err.message : String(err)}`)
+      );
+      this.intervalTimer = setInterval(
+        () =>
+          void this.reconcile().catch((err) =>
+            this.logger.warn(`Reconciliation tick failed: ${err instanceof Error ? err.message : String(err)}`)
+          ),
+        hours * 3_600_000
+      );
+    }, 15_000);
   }
 
   onModuleDestroy() {
-    if (this.timer) clearInterval(this.timer);
+    if (this.bootTimer) clearTimeout(this.bootTimer);
+    if (this.intervalTimer) clearInterval(this.intervalTimer);
   }
 
   async reconcile() {
@@ -56,52 +67,76 @@ export class ReconciliationService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async reconcileUnsafe() {
-    const rows = await this.db.query<{
-      source: string;
-      watermark: Date | null;
-      count: string;
-    }>(`
-      SELECT 'nvd' AS source,
-             (SELECT MAX(ts) FROM audit_log
-               WHERE action IN (
-                 'nvd.watermark', 'nvd.pub_sync', 'nvd.pub_catchup',
-                 'nvd.catalog_backfill', 'nvd.catalog_complete'
-               )) AS watermark,
-             (SELECT COUNT(*)::text FROM cve) AS count
-      UNION ALL
-      SELECT 'epss',
-             (SELECT MAX(ts) FROM audit_log WHERE action IN ('epss.ingest', 'epss.watermark')),
-             (SELECT COUNT(*)::text FROM epss_score)
-      UNION ALL
-      SELECT 'kev',
-             (SELECT MAX(ts) FROM audit_log WHERE action IN ('kev.ingest', 'vulncheck.kev.ingest')),
-             (SELECT COUNT(*)::text FROM vulncheck_kev)
-      UNION ALL
-      SELECT 'bdu',
-             (SELECT MAX(ts) FROM audit_log WHERE action = 'bdu.ingest'),
-             (SELECT COUNT(*)::text FROM bdu_vuln)
-    `);
-
     const now = Date.now();
     const staleH = Number(process.env.RECONCILE_STALE_HOURS ?? "12");
     const issues: string[] = [];
 
-    for (const row of rows.rows) {
-      const count = Number(row.count ?? "0");
-      const wm = row.watermark;
-      const lagH = wm ? (now - wm.getTime()) / 3_600_000 : null;
-      if (lagH != null) {
-        reconcileLagGauge.set({ source: row.source }, lagH);
-        if (lagH > staleH) {
-          issues.push(`${row.source}: last activity ${lagH.toFixed(1)}h ago (>${staleH}h)`);
+    const sources: Array<{
+      source: string;
+      count: number;
+      lastActivity: string | null;
+      lagHours: number | null;
+      ok: boolean;
+    }> = [];
+
+    const push = async (source: string, countSql: string, watermarkSql: string, opts?: { optional?: boolean }) => {
+      try {
+        const countR = await this.db.query<{ count: string }>(countSql);
+        const wmR = await this.db.query<{ watermark: Date | null }>(watermarkSql);
+        const count = Number(countR.rows[0]?.count ?? "0");
+        const wm = wmR.rows[0]?.watermark ?? null;
+        const lagH = wm ? (now - wm.getTime()) / 3_600_000 : null;
+        if (lagH != null) {
+          reconcileLagGauge.set({ source }, lagH);
+          if (lagH > staleH) issues.push(`${source}: last activity ${lagH.toFixed(1)}h ago (>${staleH}h)`);
+        } else if (source !== "bdu") {
+          issues.push(`${source}: no ingest activity recorded`);
         }
-      } else if (row.source !== "bdu") {
-        issues.push(`${row.source}: no ingest activity recorded`);
+        if (source === "nvd" && count < 1000) issues.push(`nvd: low CVE count (${count})`);
+        sources.push({
+          source,
+          count,
+          lastActivity: wm?.toISOString() ?? null,
+          lagHours: lagH,
+          ok: wm != null && lagH != null && lagH <= staleH && !(source === "nvd" && count < 1000)
+        });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (opts?.optional) {
+          this.logger.warn(`Reconciliation ${source} skipped: ${msg}`);
+          sources.push({ source, count: 0, lastActivity: null, lagHours: null, ok: false });
+          return;
+        }
+        throw e;
       }
-      if (row.source === "nvd" && count < 1000) {
-        issues.push(`nvd: low CVE count (${count})`);
-      }
-    }
+    };
+
+    await push(
+      "nvd",
+      `SELECT COUNT(*)::text AS count FROM cve`,
+      `SELECT MAX(ts) AS watermark FROM audit_log
+        WHERE action IN (
+          'nvd.watermark', 'nvd.pub_sync', 'nvd.pub_catchup',
+          'nvd.catalog_backfill', 'nvd.catalog_complete'
+        )`
+    );
+    await push(
+      "epss",
+      `SELECT COUNT(*)::text AS count FROM epss_score`,
+      `SELECT MAX(ts) AS watermark FROM audit_log WHERE action IN ('epss.ingest', 'epss.watermark')`
+    );
+    await push(
+      "kev",
+      `SELECT COUNT(*)::text AS count FROM vulncheck_kev`,
+      `SELECT MAX(ts) AS watermark FROM audit_log WHERE action IN ('kev.ingest', 'vulncheck.kev.ingest')`,
+      { optional: true }
+    );
+    await push(
+      "bdu",
+      `SELECT COUNT(*)::text AS count FROM bdu_vuln`,
+      `SELECT MAX(ts) AS watermark FROM audit_log WHERE action = 'bdu.ingest'`,
+      { optional: true }
+    );
 
     if (issues.length) {
       this.logger.warn(`Reconciliation: ${issues.join("; ")}`);
@@ -111,16 +146,7 @@ export class ReconciliationService implements OnModuleInit, OnModuleDestroy {
       ok: issues.length === 0,
       checkedAt: new Date().toISOString(),
       staleHours: staleH,
-      sources: rows.rows.map((r) => ({
-        source: r.source,
-        count: Number(r.count ?? "0"),
-        lastActivity: r.watermark?.toISOString() ?? null,
-        lagHours: r.watermark ? (now - r.watermark.getTime()) / 3_600_000 : null,
-        ok:
-          r.watermark != null &&
-          (now - r.watermark.getTime()) / 3_600_000 <= staleH &&
-          !(r.source === "nvd" && Number(r.count ?? "0") < 1000)
-      })),
+      sources,
       issues
     };
   }

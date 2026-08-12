@@ -136,3 +136,19 @@ CREATE TABLE IF NOT EXISTS kev (
 CREATE INDEX IF NOT EXISTS kev_date_added_idx ON kev (date_added DESC);
 CREATE INDEX IF NOT EXISTS kev_updated_at_idx ON kev (updated_at DESC);
 
+-- VulnCheck KEV (also created by API SchemaService for older volumes).
+CREATE TABLE IF NOT EXISTS vulncheck_kev (
+  cve_id TEXT PRIMARY KEY,
+  date_added TIMESTAMPTZ,
+  cisa_date_added TIMESTAMPTZ,
+  vckev_only BOOLEAN NOT NULL DEFAULT false,
+  ransomware_use TEXT,
+  evidence_count INT NOT NULL DEFAULT 0,
+  xdb_url TEXT,
+  raw JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS vulncheck_kev_date_added_idx ON vulncheck_kev (date_added DESC NULLS LAST);
+CREATE INDEX IF NOT EXISTS vulncheck_kev_vckev_only_idx ON vulncheck_kev (vckev_only) WHERE vckev_only = true;
+
