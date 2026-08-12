@@ -38,6 +38,7 @@ import { ThreatIntelRefreshService } from "../services/threat-intel-refresh.serv
 import { ReconciliationService } from "../services/reconciliation.service.js";
 import { OpsRepairService } from "../services/ops-repair.service.js";
 import { TextEngineBgSweepService } from "../services/text-engine-bg-sweep.service.js";
+import { PgMaintenanceService } from "../services/pg-maintenance.service.js";
 import { VocController } from "../routes/voc.controller.js";
 import { IntegrationSettingsService } from "../services/integration-settings.service.js";
 import { WebTlsService } from "../services/web-tls.service.js";
@@ -81,6 +82,7 @@ import { MetricsPollerService } from "../services/metrics-poller.service.js";
     ReconciliationService,
     OpsRepairService,
     TextEngineBgSweepService,
+    PgMaintenanceService,
     MetricsPollerService,
     FstecBulletinService,
     MpvmSyncService,

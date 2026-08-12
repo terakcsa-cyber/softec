@@ -229,14 +229,20 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 | `HOT24_AI_SWEEP_LIMIT` | 200 | Лимит за проход |
 | `HOT24_AI_SWEEP_ON_START_MS` | 0 | AI sweep при старте (text-engine подставит дефолт, если BG enrich on) |
 | `HOT24_AI_SWEEP_INTERVAL_MS` | 0 | Периодический sweep (0 → text-engine дефолт ~90с при BG enrich) |
-| `HOT24_SCORE_SWEEP` | true* | Догон risk_score (*только если `ai.score` включён) |
+| `HOT24_SCORE_SWEEP` | true* | Догон risk_score (*только если `AI_SCORE_ENABLED`) |
 | `HOT24_SCORE_STALE_HOURS` | 6 | Пересчёт если score старше |
-| `HOT24_SCORE_BOOT` | true* | Score sweep при boot (*если score не выключен) |
+| `HOT24_SCORE_BOOT` | false | Opt-in score sweep при boot ingest (`===true`). Обычно достаточно `HOT24_SCORE_SWEEP` |
 | `AI_SCORE_ENABLED` | `true` | Unified risk_score; `false` только чтобы поставить scoring на паузу |
 | `AI_SCORE_VIA_QUEUE` | false | Legacy Rabbit `ai.score`. По умолчанию score пишется **inline** в ingest/API |
 | `AI_SCORE_INLINE_CONCURRENCY` | 48 | Параллель inline upsert |
 | `BACKLOG_SCORE_SWEEP` | true* | Фоновый догон всего корпуса без `risk_score` (*если `AI_SCORE_ENABLED`) |
 | `BACKLOG_SCORE_SWEEP_LIMIT` | 2500 | CVE за один проход backlog |
+| `AI_KEEP_IDLE_PROCESS` | false | Держать apps/ai живым, когда оба воркера idle (иначе exit 0 + compose `restart: on-failure`) |
+| `AI_PUBLISH_COMPLETED_EVENTS` | false | Публиковать `vuln.*.completed.v1` (потребителей нет) |
+| `PG_MAINTENANCE` | true | Периодический prune + `VACUUM ANALYZE` в API |
+| `AUDIT_LOG_RETENTION_DAYS` | 90 | Удалять старый `audit_log` |
+| `ENRICHMENT_AI_KEEP_PER_CVE` | 2 | Сколько версий `enrichment_ai` оставлять на CVE |
+| `REFRESH_TOKEN_RETENTION_DAYS` | 14 | Удалять revoked/expired refresh tokens |
 | `BACKLOG_SCORE_SWEEP_INTERVAL_MS` | 12000 | Интервал backlog score |
 | `AI_SCORE_SKIP_FRESH_HOURS` | 2 | Пропуск дублей NVD score (только queue path) |
 | `DLQ_BOOT_RETRY` | false | Авто-replay DLQ при старте (prod: false) |
@@ -540,6 +546,19 @@ FSTEC_FEED_SOURCE=tg   # или rss
 ---
 
 ## 12. Резервное копирование и восстановление
+
+### Рост диска Postgres
+
+По умолчанию API раз в сутки (и ~2 мин после старта) делает **prune + `VACUUM ANALYZE`** (не `VACUUM FULL` — без exclusive lock):
+
+- `audit_log` старше `AUDIT_LOG_RETENTION_DAYS` (90)
+- истёкшие `idempotency_key`
+- revoked/expired `refresh_token` старше `REFRESH_TOKEN_RETENTION_DAYS` (14)
+- лишние версии `enrichment_ai` (оставить `ENRICHMENT_AI_KEEP_PER_CVE`, default 2)
+
+Ручной прогон: `pnpm pg:maint`. Отключить: `PG_MAINTENANCE=false`.
+
+В compose для Postgres включены более частые autovacuum scale factors + `wal_compression=on` (нужен recreate контейнера postgres при деплое).
 
 ### Postgres dump
 

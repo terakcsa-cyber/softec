@@ -1,3 +1,4 @@
+export * from "./db/pg-maintenance.js";
 export * from "./ai/enrichment-placeholder.js";
 export * from "./ai/enrichment-maturity.js";
 export * from "./ai/enrichment-display.js";

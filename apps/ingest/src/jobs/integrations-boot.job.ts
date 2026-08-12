@@ -47,9 +47,9 @@ export class IntegrationsBootJob implements OnModuleInit {
       await this.bootEpssIfNeeded();
       await pause(Number(process.env.INTEGRATIONS_BOOT_STEP_PAUSE_MS ?? 1500));
     }
-    if (isAiScoreEnabled() && process.env.HOT24_SCORE_BOOT !== "false") {
+    if (isAiScoreEnabled() && process.env.HOT24_SCORE_BOOT === "true") {
       await this.bootHot24ScoreSweep();
-    } else if (!isAiScoreEnabled()) {
+    } else if (process.env.HOT24_SCORE_BOOT === "true" && !isAiScoreEnabled()) {
       // eslint-disable-next-line no-console
       console.log("[ingest:integrations-boot] hot24 score skip (ai.score disabled)");
     }

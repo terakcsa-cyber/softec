@@ -4,7 +4,16 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
-    command: ["postgres", "-c", "max_connections=200"]
+    command:
+      [
+        "postgres",
+        "-c", "max_connections=200",
+        "-c", "wal_compression=on",
+        "-c", "autovacuum_vacuum_scale_factor=0.05",
+        "-c", "autovacuum_analyze_scale_factor=0.02",
+        "-c", "autovacuum_naptime=30s",
+        "-c", "autovacuum_vacuum_cost_delay=2ms"
+      ]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
@@ -184,7 +193,9 @@ services:
     build:
       context: ..
       dockerfile: apps/ai/Dockerfile
-    restart: unless-stopped
+    # Exit 0 when both workers idle (inline defaults); do not loop-restart.
+    # Keep process: AI_KEEP_IDLE_PROCESS=true. Crash (exit≠0) still restarts.
+    restart: on-failure
     env_file:
       - path: ${APP_ENV_FILE:-../.env.production}
         required: false

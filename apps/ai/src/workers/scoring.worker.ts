@@ -11,6 +11,7 @@ import {
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
+import { AiIdleExitService } from "../services/ai-idle-exit.service.js";
 
 /** Повтор из DLQ / hot24 / интеграции (EPSS, vulncheck) — не отбрасывать как «уже посчитано». */
 function shouldForceScoreRecompute(idempotencyKey: string): boolean {
@@ -23,7 +24,11 @@ function shouldForceScoreRecompute(idempotencyKey: string): boolean {
 
 @Injectable()
 export class ScoringWorker implements OnModuleInit {
-  constructor(private readonly db: DbService, private readonly queue: QueueService) {}
+  constructor(
+    private readonly db: DbService,
+    private readonly queue: QueueService,
+    private readonly idleExit: AiIdleExitService
+  ) {}
 
   async onModuleInit() {
     await this.ensureSchema();
@@ -33,6 +38,7 @@ export class ScoringWorker implements OnModuleInit {
       console.log(
         "[ai:score] disabled (AI_SCORE_ENABLED=false). Unified risk_score will not update."
       );
+      this.idleExit.reportScore(true);
       return;
     }
     if (!shouldScoreViaQueue()) {
@@ -57,8 +63,10 @@ export class ScoringWorker implements OnModuleInit {
           );
         }
       }
+      this.idleExit.reportScore(true);
       return;
     }
+    this.idleExit.reportScore(false);
     const ch = this.queue.channel!;
     // Keep <= PG_POOL_MAX: each message may use DB for several sequential queries.
     ch.prefetch(Number(process.env.AI_SCORE_PREFETCH ?? 4));
@@ -154,7 +162,9 @@ export class ScoringWorker implements OnModuleInit {
           }
         };
 
-        this.queue.publish("vuln.events", "vuln.score.completed.v1", completed);
+        if (process.env.AI_PUBLISH_COMPLETED_EVENTS === "true") {
+          this.queue.publish("vuln.events", "vuln.score.completed.v1", completed);
+        }
         this.queue.ack(msg);
       } catch (err) {
         if (idempotencyInserted && env?.idempotencyKey) {

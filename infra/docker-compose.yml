@@ -3,7 +3,16 @@ name: vuln-intel
 services:
   postgres:
     image: postgres:16-alpine
-    command: ["postgres", "-c", "max_connections=200"]
+    command:
+      [
+        "postgres",
+        "-c", "max_connections=200",
+        "-c", "wal_compression=on",
+        "-c", "autovacuum_vacuum_scale_factor=0.05",
+        "-c", "autovacuum_analyze_scale_factor=0.02",
+        "-c", "autovacuum_naptime=30s",
+        "-c", "autovacuum_vacuum_cost_delay=2ms"
+      ]
     environment:
       POSTGRES_USER: vuln
       POSTGRES_PASSWORD: vuln

@@ -16,6 +16,7 @@ import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
 import { RedisService } from "../services/redis.service.js";
 import { LlmService } from "../services/llm.service.js";
+import { AiIdleExitService } from "../services/ai-idle-exit.service.js";
 
 function coerceEnrichPayloadSource(payload: unknown): unknown {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
@@ -86,7 +87,8 @@ export class EnrichmentWorker implements OnModuleInit {
     private readonly db: DbService,
     private readonly queue: QueueService,
     private readonly redis: RedisService,
-    private readonly llm: LlmService
+    private readonly llm: LlmService,
+    private readonly idleExit: AiIdleExitService
   ) {}
 
   async onModuleInit() {
@@ -113,8 +115,10 @@ export class EnrichmentWorker implements OnModuleInit {
           );
         }
       }
+      this.idleExit.reportEnrich(true);
       return;
     }
+    this.idleExit.reportEnrich(false);
     const isTextEngine = textEngineBoot.textEngine !== "llm";
     const llmCfgEarly = await this.llm.getEffectiveLlmConfig();
     const defaultLlmParallel = isLikelyOllamaOpenAiEndpoint(llmCfgEarly.endpoint) ? 3 : 12;
@@ -211,7 +215,9 @@ export class EnrichmentWorker implements OnModuleInit {
         // eslint-disable-next-line no-console
         console.log(`[ai:enrich] ok cve=${cveId} model=${res.model}`);
       }
-      this.queue.publish("vuln.events", "vuln.enrich.completed.v1", completed);
+      if (process.env.AI_PUBLISH_COMPLETED_EVENTS === "true") {
+        this.queue.publish("vuln.events", "vuln.enrich.completed.v1", completed);
+      }
     };
 
     await ch.consume("ai.enrich", async (msg) => {
@@ -348,7 +354,9 @@ export class EnrichmentWorker implements OnModuleInit {
                   `[ai:enrich] redis cache hit cve=${payload.cveId} (no HTTP to LLM; set AI_ENRICH_REDIS_CACHE=false to always call Ollama)`
                 );
               }
-              this.queue.publish("vuln.events", "vuln.enrich.completed.v1", evt);
+              if (process.env.AI_PUBLISH_COMPLETED_EVENTS === "true") {
+                this.queue.publish("vuln.events", "vuln.enrich.completed.v1", evt);
+              }
               this.queue.ack(msg);
               return;
             }
