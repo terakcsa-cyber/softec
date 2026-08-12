@@ -1,6 +1,7 @@
 export * from "./ai/enrichment-placeholder.js";
 export * from "./ai/enrichment-maturity.js";
 export * from "./ai/enrichment-display.js";
+export * from "./ai/upsert-cve-enrichment.js";
 export * from "./bdu/id.js";
 export * from "./bdu/vendor-product-parse.js";
 export * from "./bdu/vulxml.js";

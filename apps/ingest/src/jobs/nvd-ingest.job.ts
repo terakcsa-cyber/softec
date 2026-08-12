@@ -5,6 +5,7 @@ import {
   AI_ENRICH_QUEUE,
   QueueEventType,
   SQL_EFFECTIVE_PUBLISHED_AT,
+  applyCveEnrichmentsInline,
   applyRiskScoresForCveIds,
   buildEnrichRequestedEvent,
   buildScoreEventsForCveIds,
@@ -17,6 +18,7 @@ import {
   extractVendorProductPairsFromCveRaw,
   fingerprintNvdApiKey,
   getAiEnrichMaxDepth,
+  getTextEngineSettingsFromEnv,
   hot24ScoreHourBucket,
   hot24ScoreIdempotencyKey,
   initialReverseCatalogCursor,
@@ -27,6 +29,7 @@ import {
   isAiScoreEnabled,
   publishEnrichRequested,
   publishScoreEvents,
+  shouldEnrichViaQueue,
   shouldScoreViaQueue,
   shouldSkipEnrichPublishForDepth,
   upsertRiskScoreForCve,
@@ -738,26 +741,30 @@ export class NvdIngestJob implements OnModuleInit {
       })
     );
 
-    // Background text maturity (baseline/translate) for hot-window CVEs.
-    // Prefer hot24 sweep when NVD_FANOUT_ENRICH=false (avoids first-sync flood).
-    // LLM mass fanout stays opt-in (NVD_FANOUT_ENRICH=true).
+    // Background text maturity (baseline/translate): inline by default; queue only for llm / AI_ENRICH_VIA_QUEUE.
     if ((await this.isBackgroundTextEnrichEnabled("fanout")) && isPublishedWithinHours(publishedAtIso)) {
       const mode = await this.resolveTextEngineMode();
-      if (await this.canPublishEnrich("fanout")) {
-        const claimed = await claimEnrichInflight(this.db, input.cveId, mode, {
-          metadata: { via: "fanout" }
-        });
-        if (claimed) {
-          this.publishEnrichJob({
-            cveId: input.cveId,
-            idempotencyKey: `enrich:${idempotencyKey}`,
-            raw: input.raw && typeof input.raw === "object" && !Array.isArray(input.raw)
-              ? (input.raw as Record<string, unknown>)
-              : {},
-            source: input.source === "nvd" || input.source === "mitre" ? input.source : "other",
-            priority: 9
+      const rawObj =
+        input.raw && typeof input.raw === "object" && !Array.isArray(input.raw)
+          ? (input.raw as Record<string, unknown>)
+          : {};
+      if (shouldEnrichViaQueue(mode)) {
+        if (await this.canPublishEnrich("fanout")) {
+          const claimed = await claimEnrichInflight(this.db, input.cveId, mode, {
+            metadata: { via: "fanout" }
           });
+          if (claimed) {
+            this.publishEnrichJob({
+              cveId: input.cveId,
+              idempotencyKey: `enrich:${idempotencyKey}`,
+              raw: rawObj,
+              source: input.source === "nvd" || input.source === "mitre" ? input.source : "other",
+              priority: 9
+            });
+          }
         }
+      } else {
+        await this.enrichItemsInline([{ cveId: input.cveId, raw: rawObj }], "fanout");
       }
     }
 
@@ -1079,11 +1086,10 @@ export class NvdIngestJob implements OnModuleInit {
 
   /**
    * baseline: background card maturity on by default (disable with TEXT_ENGINE_BG_ENRICH=false).
-   * translate: hot24 on by default under TEXT_ENGINE_BG_ENRICH; backlog opt-in via BACKLOG_AI_SWEEP=true.
+   * translate: hot24 + backlog on under TEXT_ENGINE_BG_ENRICH (inline baseline_ru; no MyMemory required).
    * llm: mass fanout/sweep stays opt-in to avoid Ollama overload.
    *
    * Enterprise: `NVD_FANOUT_ENRICH=false` disables per-CVE fanout for ALL engines (prefer hot24 only).
-   * Prefer hot24 + inflight coalesce over fanout to avoid 10k+ duplicate storms on first NVD sync.
    */
   private async isBackgroundTextEnrichEnabled(kind: "fanout" | "hot24" | "backlog"): Promise<boolean> {
     const mode = await this.resolveTextEngineMode();
@@ -1096,11 +1102,39 @@ export class NvdIngestJob implements OnModuleInit {
     // Explicit false disables fanout even when BG enrich is on (recommended with hot24).
     if (kind === "fanout") return process.env.NVD_FANOUT_ENRICH !== "false";
     if (kind === "backlog") {
-      // baseline is free/local — always catch up after hot window. translate/llm stay opt-in (rate limits / GPU).
-      if (mode === "baseline") return process.env.BACKLOG_AI_SWEEP !== "false";
-      return process.env.BACKLOG_AI_SWEEP === "true";
+      // baseline + translate: catch up full corpus unless explicitly disabled.
+      return process.env.BACKLOG_AI_SWEEP !== "false";
     }
     return true;
+  }
+
+  private async enrichItemsInline(
+    items: Array<{ cveId: string; raw: Record<string, unknown> }>,
+    reason: string
+  ): Promise<number> {
+    if (!items.length) return 0;
+    const settings = getTextEngineSettingsFromEnv();
+    const started = Date.now();
+    const n = await applyCveEnrichmentsInline(this.db, items, {
+      concurrency: Number(process.env.AI_ENRICH_INLINE_CONCURRENCY ?? 32),
+      settings,
+      // Fast local RU maturity; full MyMemory translate is optional later / manual.
+      skipTranslate: settings.textEngine === "translate",
+      skipIfMature: true,
+      onError: (cveId, err) => {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ingest:nvd] inline enrich failed (${reason}) cve=${cveId}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    });
+    if (n > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[ingest:nvd] inline enrich ${reason} upserted=${n}/${items.length} in ${Date.now() - started}ms engine=${settings.textEngine}`
+      );
+    }
+    return n;
   }
 
   private async getEnrichQueueDepthCached(): Promise<number> {
@@ -1248,11 +1282,21 @@ export class NvdIngestJob implements OnModuleInit {
    */
   private async sweepHotWindowEnrich() {
     if (!(await this.isBackgroundTextEnrichEnabled("hot24"))) return;
-    if (!(await this.canPublishEnrich("hot24-sweep"))) return;
 
     const mode = await this.resolveTextEngineMode();
-    const defaultLimit = mode === "baseline" ? 800 : mode === "translate" ? 120 : 200;
-    const maxLimit = mode === "baseline" ? 2000 : 500;
+    const viaQueue = shouldEnrichViaQueue(mode);
+    const defaultLimit = viaQueue
+      ? mode === "baseline"
+        ? 800
+        : mode === "translate"
+          ? 120
+          : 200
+      : mode === "baseline"
+        ? 1500
+        : mode === "translate"
+          ? 1500
+          : 200;
+    const maxLimit = viaQueue ? (mode === "baseline" ? 2000 : 500) : 5000;
     const limit = Math.max(1, Math.min(maxLimit, Number(process.env.HOT24_AI_SWEEP_LIMIT ?? defaultLimit)));
     const hourBucket = new Date();
     hourBucket.setMinutes(0, 0, 0);
@@ -1269,18 +1313,24 @@ export class NvdIngestJob implements OnModuleInit {
            LIMIT 1
          ) latest ON true
         WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '24 hours'
-          AND NOT EXISTS (
-            SELECT 1
-              FROM idempotency_key k
-             WHERE k.scope = 'ai.enrich'
-               AND k.key = ('enrich:hot24h:' || c.cve_id || ':' || $2::text || ':' || $3::text)
+          AND (
+            $4::boolean
+            OR NOT EXISTS (
+              SELECT 1
+                FROM idempotency_key k
+               WHERE k.scope = 'ai.enrich'
+                 AND k.key = ('enrich:hot24h:' || c.cve_id || ':' || $2::text || ':' || $3::text)
+            )
           )
-          AND NOT EXISTS (
-            SELECT 1
-              FROM idempotency_key k
-             WHERE k.scope = 'ai.enrich'
-               AND k.key = ('enrich:inflight:' || c.cve_id || ':' || $3::text)
-               AND (k.expires_at IS NULL OR k.expires_at > now())
+          AND (
+            $4::boolean
+            OR NOT EXISTS (
+              SELECT 1
+                FROM idempotency_key k
+               WHERE k.scope = 'ai.enrich'
+                 AND k.key = ('enrich:inflight:' || c.cve_id || ':' || $3::text)
+                 AND (k.expires_at IS NULL OR k.expires_at > now())
+            )
           )
           AND (
             latest.output_text IS NULL
@@ -1295,34 +1345,47 @@ export class NvdIngestJob implements OnModuleInit {
                 OR COALESCE(latest.output_json->>'_display_source', '') IN ('translated', 'baseline_ru')
               )
             )
+            OR (
+              $3::text = 'baseline'
+              AND latest.output_text IS NULL
+            )
           )
      ORDER BY ${SQL_EFFECTIVE_PUBLISHED_AT} DESC NULLS LAST
         LIMIT $1`,
-      [limit, bucket, mode]
+      [limit, bucket, mode, !viaQueue]
     );
 
-    let n = 0;
-    let skippedInflight = 0;
+    const items: Array<{ cveId: string; raw: Record<string, unknown> }> = [];
     for (const row of r.rows) {
-      if (!(await this.canPublishEnrich("hot24-sweep"))) break;
       const publishedIso = extractNvdPublishedIso(row.raw);
       if (!isPublishedWithinHours(publishedIso)) continue;
+      const raw = row.raw;
+      const rawObj =
+        raw != null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+      items.push({ cveId: row.cve_id, raw: rawObj });
+    }
 
-      const claimed = await claimEnrichInflight(this.db, row.cve_id, mode, {
+    if (!viaQueue) {
+      await this.enrichItemsInline(items, "hot24");
+      return;
+    }
+
+    if (!(await this.canPublishEnrich("hot24-sweep"))) return;
+    let n = 0;
+    let skippedInflight = 0;
+    for (const item of items) {
+      if (!(await this.canPublishEnrich("hot24-sweep"))) break;
+      const claimed = await claimEnrichInflight(this.db, item.cveId, mode, {
         metadata: { via: "hot24", bucket }
       });
       if (!claimed) {
         skippedInflight++;
         continue;
       }
-
-      const raw = row.raw;
-      const rawObj =
-        raw != null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
       this.publishEnrichJob({
-        cveId: row.cve_id,
-        idempotencyKey: `enrich:hot24h:${row.cve_id}:${bucket}:${mode}`,
-        raw: rawObj,
+        cveId: item.cveId,
+        idempotencyKey: `enrich:hot24h:${item.cveId}:${bucket}:${mode}`,
+        raw: item.raw,
         priority: 9
       });
       n++;
@@ -1336,17 +1399,18 @@ export class NvdIngestJob implements OnModuleInit {
   }
 
   /**
-   * Catch-up for CVEs older than 24h.
-   * baseline: on by default with TEXT_ENGINE_BG_ENRICH (set BACKLOG_AI_SWEEP=false to disable).
-   * translate/llm: opt-in via BACKLOG_AI_SWEEP=true.
+   * Catch-up for CVEs older than 24h (full corpus with hot24).
+   * baseline/translate: on by default with TEXT_ENGINE_BG_ENRICH (BACKLOG_AI_SWEEP=false to disable).
+   * Inline local templates by default; Rabbit only for llm / AI_ENRICH_VIA_QUEUE.
    */
   private async sweepBacklogEnrich() {
     if (!(await this.isBackgroundTextEnrichEnabled("backlog"))) return;
-    if (!(await this.canPublishEnrich("backlog-sweep"))) return;
 
     const mode = await this.resolveTextEngineMode();
-    const defaultLimit = mode === "baseline" ? 1000 : 400;
-    const limit = Math.max(1, Math.min(2000, Number(process.env.BACKLOG_AI_SWEEP_LIMIT ?? defaultLimit)));
+    const viaQueue = shouldEnrichViaQueue(mode);
+    const defaultLimit = viaQueue ? (mode === "baseline" ? 1000 : 400) : 2500;
+    const maxLimit = viaQueue ? 2000 : 5000;
+    const limit = Math.max(1, Math.min(maxLimit, Number(process.env.BACKLOG_AI_SWEEP_LIMIT ?? defaultLimit)));
     const d = new Date();
     const dayBucket = d.toISOString().slice(0, 10);
 
@@ -1361,18 +1425,24 @@ export class NvdIngestJob implements OnModuleInit {
            LIMIT 1
          ) latest ON true
         WHERE (c.published_at IS NULL OR c.published_at < now() - interval '24 hours')
-          AND NOT EXISTS (
-            SELECT 1
-              FROM idempotency_key k
-             WHERE k.scope = 'ai.enrich'
-               AND k.key = ('enrich:backlog:' || c.cve_id || ':' || $2::text || ':' || $3::text)
+          AND (
+            $4::boolean
+            OR NOT EXISTS (
+              SELECT 1
+                FROM idempotency_key k
+               WHERE k.scope = 'ai.enrich'
+                 AND k.key = ('enrich:backlog:' || c.cve_id || ':' || $2::text || ':' || $3::text)
+            )
           )
-          AND NOT EXISTS (
-            SELECT 1
-              FROM idempotency_key k
-             WHERE k.scope = 'ai.enrich'
-               AND k.key = ('enrich:inflight:' || c.cve_id || ':' || $3::text)
-               AND (k.expires_at IS NULL OR k.expires_at > now())
+          AND (
+            $4::boolean
+            OR NOT EXISTS (
+              SELECT 1
+                FROM idempotency_key k
+               WHERE k.scope = 'ai.enrich'
+                 AND k.key = ('enrich:inflight:' || c.cve_id || ':' || $3::text)
+                 AND (k.expires_at IS NULL OR k.expires_at > now())
+            )
           )
           AND (
             latest.output_text IS NULL
@@ -1390,27 +1460,37 @@ export class NvdIngestJob implements OnModuleInit {
           )
      ORDER BY c.published_at DESC NULLS LAST
         LIMIT $1`,
-      [limit, dayBucket, mode]
+      [limit, dayBucket, mode, !viaQueue]
     );
 
+    const items = r.rows.map((row) => {
+      const raw = row.raw;
+      const rawObj =
+        raw != null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+      return { cveId: row.cve_id, raw: rawObj };
+    });
+
+    if (!viaQueue) {
+      await this.enrichItemsInline(items, "backlog");
+      return;
+    }
+
+    if (!(await this.canPublishEnrich("backlog-sweep"))) return;
     let n = 0;
     let skippedInflight = 0;
-    for (const row of r.rows) {
+    for (const item of items) {
       if (!(await this.canPublishEnrich("backlog-sweep"))) break;
-      const claimed = await claimEnrichInflight(this.db, row.cve_id, mode, {
+      const claimed = await claimEnrichInflight(this.db, item.cveId, mode, {
         metadata: { via: "backlog", dayBucket }
       });
       if (!claimed) {
         skippedInflight++;
         continue;
       }
-      const raw = row.raw;
-      const rawObj =
-        raw != null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
       this.publishEnrichJob({
-        cveId: row.cve_id,
-        idempotencyKey: `enrich:backlog:${row.cve_id}:${dayBucket}:${mode}`,
-        raw: rawObj,
+        cveId: item.cveId,
+        idempotencyKey: `enrich:backlog:${item.cveId}:${dayBucket}:${mode}`,
+        raw: item.raw,
         priority: 6
       });
       n++;

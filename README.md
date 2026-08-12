@@ -222,15 +222,13 @@ rm -f .dev.lock
 
 ### Enrich: queue guards (enterprise)
 
-Per-CVE NVD fanout is off by default (`NVD_FANOUT_ENRICH=false`). For `baseline`/`translate`, hot-window maturity still runs via `TEXT_ENGINE_BG_ENRICH` (hot24), with:
+Per-CVE NVD fanout is off by default (`NVD_FANOUT_ENRICH=false`). For `baseline`/`translate`, card text matures **inline** in ingest (hot24 + backlog) under `TEXT_ENGINE_BG_ENRICH` — no Rabbit required. Translate backlog uses fast `baseline_ru` (cards mature without MyMemory).
 
-- **inflight coalesce** — at most one outstanding `ai.enrich` job per CVE+engine;
-- **`AI_ENRICH_MAX_DEPTH`** (default `2000`) — ingest stops publishing when the queue is deep;
-- **`BACKLOG_AI_SWEEP=false`** — no older-than-24h flood unless explicitly enabled.
+- **`BACKLOG_AI_SWEEP`**: on unless `=false` (remove old `BACKLOG_AI_SWEEP=false` from prod env);
+- **`AI_ENRICH_VIA_QUEUE=true`**: legacy Rabbit path (default only for `TEXT_ENGINE=llm`);
+- **`AI_ENRICH_MAX_DEPTH`**: soft cap when using the queue.
 
 `HOT24_AI_SWEEP` only gates **`TEXT_ENGINE=llm`**. To stop all BG text enrich: `TEXT_ENGINE_BG_ENRICH=false`.
-
-Manual CVE/BDU buttons and digest prepare use the current `TEXT_ENGINE`; non-llm paths often complete in-process without the queue.
 
 ---
 

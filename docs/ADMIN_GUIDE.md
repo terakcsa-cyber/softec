@@ -467,19 +467,22 @@ Force: System Health → Hot24 rescore (hot24 + backlog batch) / `pnpm rescore:h
 ```env
 NVD_FANOUT_ENRICH=false
 TEXT_ENGINE_BG_ENRICH=true
-BACKLOG_AI_SWEEP=false
+# BACKLOG_AI_SWEEP=false   # только чтобы ВЫКЛЮЧИТЬ догон карточек
+BACKLOG_AI_SWEEP_LIMIT=2500
 AI_ENRICH_MAX_DEPTH=2000
 ```
 
-Рекомендуемый prod-профиль: **без per-CVE fanout**, зрелость hot-окна через **hot24** под `TEXT_ENGINE_BG_ENRICH`.  
+Рекомендуемый prod-профиль: **без per-CVE fanout**, зрелость через **hot24 + backlog**.  
+Для `baseline`/`translate` карточки пишутся **inline** в ingest (локальные RU-шаблоны / `baseline_ru`) — очередь `ai.enrich` не нужна.  
 `HOT24_AI_SWEEP=false` **не** останавливает hot24 для `baseline`/`translate` — только для `llm`. Полный стоп BG: `TEXT_ENGINE_BG_ENRICH=false`.
 
-Защиты от хвоста 10k+:
-- **inflight coalesce** — один outstanding job на CVE+engine (`enrich:inflight:…`);
-- **`AI_ENRICH_MAX_DEPTH`** — ingest не публикует, пока глубина ≥ порога;
-- backlog с `NOT EXISTS` по дневному ключу + inflight.
+На серверах со старым `.env`: **уберите `BACKLOG_AI_SWEEP=false`**, иначе backlog карточек останется выключенным.
 
-Manual enrich / digest в `baseline`/`translate` часто идут in-process в API без очереди. Старый хвост можно purge в RabbitMQ.
+Защиты (если всё же queue / llm):
+- **inflight coalesce** — один outstanding job на CVE+engine;
+- **`AI_ENRICH_MAX_DEPTH`** — ingest не публикует, пока глубина ≥ порога.
+
+Manual enrich / digest в `baseline`/`translate` часто идут in-process в API без очереди.
 
 ---
 

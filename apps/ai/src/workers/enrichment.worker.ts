@@ -9,7 +9,8 @@ import {
   llmEndpointRequiresApiKey,
   QueueEventEnvelopeSchema,
   QueueEventType,
-  releaseEnrichInflight
+  releaseEnrichInflight,
+  shouldEnrichViaQueue
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
@@ -92,6 +93,13 @@ export class EnrichmentWorker implements OnModuleInit {
     await this.queue.ensureTopology();
     const ch = this.queue.channel!;
     const textEngineBoot = await this.llm.getTextEngineSettings();
+    if (!shouldEnrichViaQueue(textEngineBoot.textEngine)) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[ai:enrich] idle — card text is written inline by ingest (engine=${textEngineBoot.textEngine}; set AI_ENRICH_VIA_QUEUE=true to consume ai.enrich)`
+      );
+      return;
+    }
     const isTextEngine = textEngineBoot.textEngine !== "llm";
     const llmCfgEarly = await this.llm.getEffectiveLlmConfig();
     const defaultLlmParallel = isLikelyOllamaOpenAiEndpoint(llmCfgEarly.endpoint) ? 3 : 12;
