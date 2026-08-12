@@ -157,8 +157,8 @@ export function StatusChip({ status, compact }: { status: string; compact?: bool
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 border font-semibold",
-        compact ? "rounded px-1.5 py-0.5 text-[10px]" : "rounded-md px-2 py-0.5 text-[11px]",
+        "inline-flex items-center gap-1 border font-semibold uppercase tracking-wide",
+        compact ? "rounded px-1.5 py-0.5 text-[9px]" : "rounded px-2 py-0.5 text-[10px]",
         m.chip
       )}
     >
@@ -173,7 +173,7 @@ export function ScoreBadge({ score, className }: { score: number; className?: st
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-bold tabular-nums",
+        "inline-flex min-w-[2rem] items-center justify-center rounded border px-1.5 py-0.5 text-[11px] font-bold tabular-nums",
         scoreBadgeCls(n),
         className
       )}

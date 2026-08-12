@@ -12,6 +12,7 @@ import {
   ScoreBadge,
   StatusChip,
   normalizeUiTaskStatus,
+  priorityMeta,
   taskIssueKey
 } from "./vuln-task-ui";
 
@@ -43,6 +44,28 @@ function useTaskCardFlags(task: TaskCardModel) {
   return { cveCount, kevCount, reviewOverdue, dueOverdue, dueIso, reviewIso };
 }
 
+function accentRail(task: TaskCardModel, flags: ReturnType<typeof useTaskCardFlags>) {
+  if (flags.reviewOverdue || flags.dueOverdue) return "before:bg-danger";
+  if (flags.kevCount > 0) return "before:bg-warn";
+  const p = String(task.priority_local || "").toLowerCase();
+  if (p === "critical") return "before:bg-danger";
+  if (p === "high") return "before:bg-warn";
+  if (normalizeUiTaskStatus(task.status) === "in_progress") return "before:bg-accent";
+  return "before:bg-border";
+}
+
+function cardShellCls(active: boolean | undefined, dragging?: boolean) {
+  return cn(
+    "relative w-full select-none overflow-hidden rounded-lg border text-left transition",
+    "before:absolute before:inset-y-0 before:left-0 before:w-[3px] before:content-['']",
+    "bg-white dark:bg-[#0d1524]",
+    active
+      ? "border-accent/45 bg-accent/[0.06] shadow-sm ring-1 ring-accent/20"
+      : "border-border/90 hover:border-border hover:bg-slate-50/80 dark:hover:bg-white/[0.03]",
+    dragging ? "cursor-grabbing opacity-50" : "cursor-grab"
+  );
+}
+
 export function TaskCardBody({
   task,
   dense
@@ -50,44 +73,69 @@ export function TaskCardBody({
   task: TaskCardModel;
   dense?: boolean;
 }) {
-  const { cveCount, kevCount, reviewOverdue, dueIso, reviewIso } = useTaskCardFlags(task);
+  const flags = useTaskCardFlags(task);
+  const { cveCount, kevCount, reviewOverdue, dueIso, reviewIso } = flags;
+  const prio = priorityMeta(task.priority_local);
+
   return (
-    <>
-      <div className="flex items-center gap-1.5">
-        <span className="font-mono text-[11px] font-semibold text-accent">{taskIssueKey(task.id)}</span>
+    <div className={cn("px-3 py-2.5", dense && "py-2")}>
+      {/* Header: key · status · score */}
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-[11px] font-semibold tracking-wide text-accent/90">
+          {taskIssueKey(task.id)}
+        </span>
         <StatusChip status={task.status} compact />
-        <ScoreBadge score={task.score_final} className="ml-auto" />
+        <div className="ml-auto flex items-center gap-1.5">
+          {kevCount > 0 ? (
+            <span className="rounded border border-danger/40 bg-danger/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-danger">
+              KEV
+            </span>
+          ) : null}
+          <ScoreBadge score={task.score_final} />
+        </div>
       </div>
+
+      {/* Title */}
       <div
         className={cn(
-          "mt-1.5 font-semibold leading-snug text-fg/95",
-          dense ? "line-clamp-2 text-[13px]" : "line-clamp-2 text-[13px]"
+          "mt-2 font-semibold leading-snug tracking-tight text-fg/95",
+          dense ? "line-clamp-2 text-[13px]" : "line-clamp-2 text-[13.5px]"
         )}
       >
         {task.title}
       </div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+
+      {/* Asset line */}
+      <MetaRow
+        vendor={task.vendor_display}
+        product={task.product_display}
+        className="mt-1 text-[11px] text-muted/90"
+      />
+
+      {/* Priority + CVE chips */}
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
         <PriorityBadge priority={task.priority_local} compact />
-        {kevCount > 0 ? (
-          <span className="rounded-md border border-danger/35 bg-danger/10 px-1.5 py-0.5 text-[10px] font-bold text-danger">
-            KEV
-          </span>
-        ) : null}
         {cveCount != null ? (
-          <span className="rounded-md border border-border bg-white/80 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-fg/75 dark:bg-black/30">
+          <span className="rounded border border-border bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-fg/70 dark:bg-white/[0.04]">
             CVE {cveCount}
           </span>
         ) : null}
+        {prio.sort >= 3 ? (
+          <span className="text-[10px] text-muted" title="Приоритет">
+            P{5 - prio.sort}
+          </span>
+        ) : null}
       </div>
-      <MetaRow vendor={task.vendor_display} product={task.product_display} className="mt-1.5" />
-      <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
-        <AssigneeCell name={task.owner} emptyLabel="без исполнителя" />
-        <span className="ml-auto flex flex-wrap items-center justify-end gap-1">
+
+      {/* Footer */}
+      <div className="mt-2.5 flex min-w-0 items-center gap-2 border-t border-border/70 pt-2">
+        <AssigneeCell name={task.owner} emptyLabel="Unassigned" />
+        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1">
           <DueBadge iso={dueIso} label="Due" />
           {reviewOverdue || reviewIso ? <DueBadge iso={reviewIso} label="Rev" /> : null}
-        </span>
+        </div>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -108,12 +156,11 @@ export function TaskCardDraggable({
     id,
     data: { taskId: task.id, fromStatus: normalizedStatus, containerId }
   });
-  const { reviewOverdue, dueOverdue, kevCount } = useTaskCardFlags(task);
+  const flags = useTaskCardFlags(task);
 
   const style: CSSProperties = {
     transform: CSS.Translate.toString(transform),
-    transition,
-    opacity: isDragging ? 0.45 : 1
+    transition
   };
 
   return (
@@ -122,14 +169,7 @@ export function TaskCardDraggable({
       type="button"
       onClick={onClick}
       style={style}
-      className={cn(
-        "group w-full select-none rounded-xl border px-2.5 py-2 text-left transition",
-        active
-          ? "border-accent/50 bg-accent/[0.08] ring-1 ring-accent/30"
-          : "border-border bg-white hover:border-border hover:bg-slate-50/90 dark:bg-black/30 dark:hover:bg-black/45",
-        isDragging ? "cursor-grabbing" : "cursor-grab",
-        reviewOverdue || dueOverdue ? "border-l-[3px] border-l-danger" : kevCount > 0 ? "border-l-[3px] border-l-warn" : ""
-      )}
+      className={cn(cardShellCls(active, isDragging), accentRail(task, flags))}
       {...attributes}
       {...listeners}
     >
@@ -139,8 +179,15 @@ export function TaskCardDraggable({
 }
 
 export function TaskCardGhost({ task }: { task: TaskCardModel }) {
+  const flags = useTaskCardFlags(task);
   return (
-    <div className="w-[280px] rounded-xl border border-accent/35 bg-white p-2.5 shadow-xl dark:bg-[#0b1220]">
+    <div
+      className={cn(
+        cardShellCls(true, false),
+        accentRail(task, flags),
+        "w-[288px] cursor-grabbing shadow-xl ring-1 ring-accent/25"
+      )}
+    >
       <TaskCardBody task={task} dense />
     </div>
   );
@@ -155,18 +202,12 @@ export function TaskCardStatic({
   active?: boolean;
   onClick: () => void;
 }) {
-  const { reviewOverdue, dueOverdue, kevCount } = useTaskCardFlags(task);
+  const flags = useTaskCardFlags(task);
   return (
     <button
       type="button"
       onClick={onClick}
-      className={cn(
-        "w-full rounded-xl border px-2.5 py-2 text-left transition",
-        active
-          ? "border-accent/50 bg-accent/[0.08]"
-          : "border-border/90 bg-white hover:bg-slate-50 dark:bg-black/30 dark:hover:bg-black/45",
-        reviewOverdue || dueOverdue ? "border-l-[3px] border-l-danger" : kevCount > 0 ? "border-l-[3px] border-l-warn" : ""
-      )}
+      className={cn(cardShellCls(active, false), "cursor-pointer", accentRail(task, flags))}
     >
       <TaskCardBody task={task} />
     </button>
