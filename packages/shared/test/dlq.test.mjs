@@ -25,7 +25,9 @@ function scoreEnvelope(cveId = "CVE-2024-0002") {
 describe("replayDlqMessages", () => {
   it("replays valid enrich and score messages", async () => {
     const prevFlag = process.env.AI_SCORE_ENABLED;
+    const prevVia = process.env.AI_SCORE_VIA_QUEUE;
     process.env.AI_SCORE_ENABLED = "true";
+    process.env.AI_SCORE_VIA_QUEUE = "true";
     try {
       const queue = ["dlq.ai.enrich"];
       const bodies = [enrichEnvelope(), scoreEnvelope()];
@@ -60,9 +62,45 @@ describe("replayDlqMessages", () => {
     } finally {
       if (prevFlag === undefined) delete process.env.AI_SCORE_ENABLED;
       else process.env.AI_SCORE_ENABLED = prevFlag;
+      if (prevVia === undefined) delete process.env.AI_SCORE_VIA_QUEUE;
+      else process.env.AI_SCORE_VIA_QUEUE = prevVia;
     }
   });
 
+  it("skips score replay when scoring is inline (default)", async () => {
+    const prevFlag = process.env.AI_SCORE_ENABLED;
+    const prevVia = process.env.AI_SCORE_VIA_QUEUE;
+    process.env.AI_SCORE_ENABLED = "true";
+    delete process.env.AI_SCORE_VIA_QUEUE;
+    try {
+      let nacked = 0;
+      const channel = {
+        async assertExchange() {},
+        async get() {
+          return { content: Buffer.from(JSON.stringify(scoreEnvelope()), "utf8") };
+        },
+        ack() {},
+        nack() {
+          nacked++;
+        },
+        publish() {
+          throw new Error("should not publish score when inline");
+        }
+      };
+      const res = await replayDlqMessages(channel, {
+        queues: ["dlq.ai.score"],
+        limitPerQueue: 1
+      });
+      assert.equal(res.replayed, 0);
+      assert.equal(res.skipped, 1);
+      assert.equal(nacked, 1);
+    } finally {
+      if (prevFlag === undefined) delete process.env.AI_SCORE_ENABLED;
+      else process.env.AI_SCORE_ENABLED = prevFlag;
+      if (prevVia === undefined) delete process.env.AI_SCORE_VIA_QUEUE;
+      else process.env.AI_SCORE_VIA_QUEUE = prevVia;
+    }
+  });
   it("skips score replay when ai.score disabled", async () => {
     const prevFlag = process.env.AI_SCORE_ENABLED;
     process.env.AI_SCORE_ENABLED = "false";

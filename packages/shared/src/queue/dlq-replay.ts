@@ -5,7 +5,7 @@ import {
   QueueEventType,
   ScoreCveRequestedEventSchema
 } from "./events.js";
-import { isAiScoreEnabled } from "./score-request.js";
+import { isAiScoreEnabled, shouldScoreViaQueue } from "./score-request.js";
 
 export type AmqpGetChannel = {
   get(
@@ -60,7 +60,8 @@ function replayParsedMessage(
     return true;
   }
   if (base.type === QueueEventType.ScoreCveRequested) {
-    if (!isAiScoreEnabled()) return false;
+    // Inline scoring is default — replaying into ai.score only piles up with no consumer.
+    if (!isAiScoreEnabled() || !shouldScoreViaQueue()) return false;
     const p = ScoreCveRequestedEventSchema.safeParse(base.payload);
     if (!p.success) return false;
     const replayedEnv = withDlqReplayKey(base);
@@ -79,9 +80,10 @@ export async function replayDlqMessages(
   channel: AmqpGetChannel,
   opts?: { queues?: readonly string[]; limitPerQueue?: number }
 ): Promise<{ replayed: number; skipped: number; byQueue: Record<string, number> }> {
+  const scoreQueueOn = isAiScoreEnabled() && shouldScoreViaQueue();
   const queues =
     opts?.queues ??
-    (isAiScoreEnabled() ? DLQ_QUEUES : (["dlq.ai.enrich"] as const));
+    (scoreQueueOn ? DLQ_QUEUES : (["dlq.ai.enrich"] as const));
   const limitPerQueue = Math.max(1, Math.min(10_000, opts?.limitPerQueue ?? 200));
   await channel.assertExchange("vuln.events", "topic", { durable: true });
 

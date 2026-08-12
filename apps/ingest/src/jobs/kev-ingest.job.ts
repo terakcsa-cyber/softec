@@ -1,6 +1,11 @@
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
-import { v4 as uuidv4 } from "uuid";
-import { QueueEventType, isAiScoreEnabled, stableJsonStringify, sha256Hex } from "@vuln-intel/shared";
+import {
+  applyRiskScoresForCveIds,
+  buildScoreEventsForCveIds,
+  isAiScoreEnabled,
+  publishScoreEvents,
+  shouldScoreViaQueue
+} from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
 
@@ -79,14 +84,13 @@ export class KevIngestJob implements OnModuleInit {
       const text = await res.text().catch(() => "");
       throw new Error(`KEV fetch failed: ${res.status} ${res.statusText} ${text}`);
     }
-    const data = (await res.json()) as any;
+    const data = (await res.json()) as { vulnerabilities?: KevItem[] };
     const items = (data?.vulnerabilities ?? []) as KevItem[];
     if (!Array.isArray(items) || items.length === 0) return;
 
-    // Upsert catalog rows and request rescoring for CVEs we have.
     const nowIso = new Date().toISOString();
     let touched = 0;
-    let rescored = 0;
+    const toScore: string[] = [];
     for (const it of items) {
       const cveId = String(it?.cveID ?? "");
       if (!/^CVE-\d{4}-\d+$/.test(cveId)) continue;
@@ -118,35 +122,43 @@ export class KevIngestJob implements OnModuleInit {
       );
       touched++;
 
-      const present = await this.db.query<{ cve_id: string }>(`SELECT cve_id FROM cve WHERE cve_id = $1 LIMIT 1`, [cveId]);
+      const present = await this.db.query<{ cve_id: string }>(
+        `SELECT cve_id FROM cve WHERE cve_id = $1 LIMIT 1`,
+        [cveId]
+      );
       if ((present.rowCount ?? 0) === 0) continue;
       if (!isAiScoreEnabled()) continue;
-      rescored++;
+      toScore.push(cveId);
+    }
 
-      const idempotencyKey = await sha256Hex(
-        stableJsonStringify({
-          t: "kev",
-          cveId,
-          dateAdded: it.dateAdded ?? null,
-          dueDate: it.dueDate ?? null
-        })
-      );
-
-      this.queue.publish("vuln.events", "vuln.score.requested.v1", {
-        id: uuidv4(),
-        type: QueueEventType.ScoreCveRequested,
-        ts: nowIso,
-        producer: { service: "ingest", version: "0.0.1" },
-        idempotencyKey: `score:${idempotencyKey}`,
-        payload: { cveId }
+    let rescored = 0;
+    if (toScore.length) {
+      rescored = await applyRiskScoresForCveIds(this.db, toScore, {
+        concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
+        buildQueueEvents: () =>
+          buildScoreEventsForCveIds(toScore, {
+            producer: { service: "ingest", version: "0.0.1" },
+            tag: "kev",
+            tsBucket: "iso"
+          }),
+        publishViaQueue: (events) =>
+          publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
       });
     }
 
     await this.db.query(
       `INSERT INTO audit_log(actor_type, action, metadata)
        VALUES ('system', 'kev.ingest', $1)`,
-      [JSON.stringify({ url, items: items.length, touched, rescored, ts: nowIso })]
+      [
+        JSON.stringify({
+          url,
+          items: items.length,
+          touched,
+          rescored,
+          mode: shouldScoreViaQueue() ? "queue" : "inline",
+          ts: nowIso
+        })
+      ]
     );
   }
 }
-

@@ -40,6 +40,23 @@ export class ScoringWorker implements OnModuleInit {
       console.log(
         "[ai:score] idle — risk scores are written inline (set AI_SCORE_VIA_QUEUE=true to consume ai.score)"
       );
+      // Drop leftover queue/DLQ so Health does not show a fake backlog.
+      if (process.env.AI_SCORE_PURGE_IDLE_QUEUE !== "false") {
+        try {
+          const ch = this.queue.channel!;
+          const main = await ch.purgeQueue("ai.score");
+          const dlq = await ch.purgeQueue("dlq.ai.score");
+          // eslint-disable-next-line no-console
+          console.log(
+            `[ai:score] purged idle leftovers ai.score=${main.messageCount} dlq.ai.score=${dlq.messageCount}`
+          );
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[ai:score] idle purge failed: ${e instanceof Error ? e.message : String(e)}`
+          );
+        }
+      }
       return;
     }
     const ch = this.queue.channel!;

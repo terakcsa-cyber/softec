@@ -462,22 +462,41 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {(
               [
-                ["ai.enrich", qh?.queues?.enrich?.messages, qh?.queues?.enrich?.consumers],
-                ["ai.score", qh?.queues?.score?.messages, qh?.queues?.score?.consumers],
-                ["dlq.ai.enrich", qh?.queues?.dlqEnrich?.messages, null],
-                ["dlq.ai.score", qh?.queues?.dlqScore?.messages, null]
+                ["ai.enrich", qh?.queues?.enrich?.messages, qh?.queues?.enrich?.consumers, qh?.coverage?.enrichViaQueue !== false],
+                ["ai.score", qh?.queues?.score?.messages, qh?.queues?.score?.consumers, qh?.coverage?.scoreViaQueue === true],
+                ["dlq.ai.enrich", qh?.queues?.dlqEnrich?.messages, null, true],
+                ["dlq.ai.score", qh?.queues?.dlqScore?.messages, null, qh?.coverage?.scoreViaQueue === true]
               ] as const
-            ).map(([name, depth, consumers]) => (
+            ).map(([name, depth, consumers, active]) => (
               <div
                 key={name}
-                className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15"
+                className={cn(
+                  "rounded-xl border p-4",
+                  active
+                    ? "border-slate-200 bg-white dark:border-border dark:bg-black/15"
+                    : "border-dashed border-slate-200 bg-slate-50/70 dark:border-border dark:bg-black/10"
+                )}
               >
-                <div className="font-mono text-[11px] text-muted">{name}</div>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="font-mono text-[11px] text-muted">{name}</div>
+                  {!active ? (
+                    <span className="rounded-md border border-border/70 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted">
+                      idle
+                    </span>
+                  ) : null}
+                </div>
                 <div className="mt-1 text-2xl font-semibold tabular-nums">
                   {typeof depth === "number" ? depth.toLocaleString() : "—"}
                 </div>
                 {consumers != null ? (
                   <div className="mt-1 text-[10px] text-muted">consumers: {consumers}</div>
+                ) : null}
+                {!active ? (
+                  <div className="mt-1 text-[10px] text-muted">
+                    {name.includes("score")
+                      ? "score пишется inline — очередь не нужна"
+                      : "очередь не используется"}
+                  </div>
                 ) : null}
               </div>
             ))}
