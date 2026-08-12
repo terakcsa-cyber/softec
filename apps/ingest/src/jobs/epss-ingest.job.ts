@@ -16,8 +16,9 @@ export class EpssIngestJob implements OnModuleInit {
 
   async onModuleInit() {
     if (process.env.EPSS_INGEST_ENABLED === "false") return;
-    const intervalMs = Number(process.env.EPSS_POLL_INTERVAL_MS ?? 24 * 60 * 60 * 1000);
-    const initialDelayMs = Number(process.env.EPSS_INITIAL_DELAY_MS ?? 4_000);
+    // Default 6h — EPSS publishes ~daily; check often enough that overnight stale is rare.
+    const intervalMs = Number(process.env.EPSS_POLL_INTERVAL_MS ?? 6 * 60 * 60 * 1000);
+    const initialDelayMs = Number(process.env.EPSS_INITIAL_DELAY_MS ?? 3_000);
     setTimeout(() => {
       this.runForever(intervalMs).catch((e) => {
         // eslint-disable-next-line no-console
@@ -27,7 +28,7 @@ export class EpssIngestJob implements OnModuleInit {
   }
 
   private async runForever(intervalMs: number) {
-    const failureBackoffMs = Number(process.env.EPSS_FAIL_RETRY_MS ?? 5 * 60_000);
+    const failureBackoffMs = Number(process.env.EPSS_FAIL_RETRY_MS ?? 2 * 60_000);
     let consecutiveFailures = 0;
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -52,32 +53,42 @@ export class EpssIngestJob implements OnModuleInit {
   }
 
   private async runOnce() {
-    const result = await ingestEpssFeed(this.db, { auditMeta: { via: "epss-job" } });
+    const force =
+      process.env.EPSS_FORCE_FULL === "1" ||
+      process.env.EPSS_FORCE_FULL === "true" ||
+      (await this.isStale(36));
+    const result = await ingestEpssFeed(this.db, { auditMeta: { via: "epss-job" }, force });
     const rescored = result.changedCveIds.slice(0, Number(process.env.EPSS_RESCORE_LIMIT ?? 20_000));
-    const events = await buildScoreEventsForCveIds(rescored, {
-      producer: { service: "ingest", version: "0.0.1" },
-      tag: "epss",
-      tsBucket: "iso"
-    });
-    publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
-
-    const nowIso = new Date().toISOString();
-    await this.db.query(
-      `INSERT INTO audit_log(actor_type, action, metadata)
-       VALUES ('system', 'epss.watermark', $1)`,
-      [
-        JSON.stringify({
-          updatedSince: nowIso,
-          rescored: rescored.length,
-          ts: nowIso,
-          sourceUrl: result.sourceUrl
-        })
-      ]
-    );
+    if (rescored.length) {
+      const events = await buildScoreEventsForCveIds(rescored, {
+        producer: { service: "ingest", version: "0.0.1" },
+        tag: "epss",
+        tsBucket: "iso"
+      });
+      publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
+    }
 
     // eslint-disable-next-line no-console
     console.log(
-      `[ingest:epss] ok rows=${result.rows} upserted=${result.upserted} rescored=${rescored.length} source=${result.sourceUrl}`
+      `[ingest:epss] ok rows=${result.rows} upserted=${result.upserted} rescored=${rescored.length}` +
+        ` skippedFresh=${Boolean(result.skippedFresh)} scoreDate=${result.scoreDate ?? "?"} ` +
+        `exploitIntel=${result.exploitIntelRefreshed ?? 0} source=${result.sourceUrl}`
     );
+  }
+
+  /** Force full ingest if last watermark/ingest is older than `hours`. */
+  private async isStale(hours: number): Promise<boolean> {
+    try {
+      const r = await this.db.query<{ ts: Date | null }>(
+        `SELECT MAX(ts) AS ts
+           FROM audit_log
+          WHERE action IN ('epss.ingest', 'epss.watermark')`
+      );
+      const ts = r.rows[0]?.ts ? new Date(r.rows[0].ts).getTime() : 0;
+      if (!ts) return true;
+      return Date.now() - ts > hours * 3600_000;
+    } catch {
+      return true;
+    }
   }
 }

@@ -64,7 +64,8 @@ export class OpsRepairService {
   async runEpss(actorEmail?: string) {
     return this.run("epss", async () => {
       const result = await ingestEpssFeed(this.db, {
-        auditMeta: { reason: "manual", via: "system-health", actor: actorEmail ?? null }
+        auditMeta: { reason: "manual", via: "system-health", actor: actorEmail ?? null },
+        force: true
       });
       const rescored = result.changedCveIds.slice(0, Number(process.env.EPSS_RESCORE_LIMIT ?? 5_000));
       const events = await buildScoreEventsForCveIds(rescored, {
@@ -74,12 +75,14 @@ export class OpsRepairService {
       });
       publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events);
       return {
-        message: `EPSS: rows=${result.rows} upserted=${result.upserted} rescored=${events.length}`,
+        message: `EPSS: rows=${result.rows} upserted=${result.upserted} rescored=${events.length} source=${result.sourceUrl}${result.skippedFresh ? " (fresh)" : ""}`,
         detail: {
           sourceUrl: result.sourceUrl,
           rows: result.rows,
           upserted: result.upserted,
-          rescored: events.length
+          rescored: events.length,
+          scoreDate: result.scoreDate ?? null,
+          exploitIntelRefreshed: result.exploitIntelRefreshed ?? 0
         }
       };
     });
