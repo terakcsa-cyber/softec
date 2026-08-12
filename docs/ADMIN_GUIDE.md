@@ -340,7 +340,9 @@ AUTH_BOOTSTRAP_PASSWORD=UseYourOwnLongPassword1
 ### BDU ФСТЭК
 
 - `vulxml.zip` с bdu.fstec.ru.
-- `BDU_TLS_INSECURE=true` только для dev при проблемах с УЦ.
+- `BDU_TLS_INSECURE=true` только если на VPS TLS к ФСТЭК ломается (часто у зарубежных хостеров); иначе оставьте выключенным.
+- Полный dump XML может быть >512MB: ingest парсит `<vul>` чанками (не грузит весь файл одной JS-строкой).
+- Зеркало GitHub (`BDU_ALLOW_MIRROR_FALLBACK=true`) — запасной снимок, может отставать.
 
 ### Boot sequence (при старте ingest)
 

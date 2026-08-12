@@ -45,6 +45,18 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function formatBduFetchError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  const cause = (err as Error & { cause?: unknown }).cause;
+  if (cause instanceof Error && cause.message && cause.message !== err.message) {
+    return `${err.message} (${cause.message})`;
+  }
+  if (cause != null && typeof cause === "object" && "code" in cause) {
+    return `${err.message} (${String((cause as { code?: string }).code)})`;
+  }
+  return err.message;
+}
+
 async function bduHttpGetToFile(url: string, destPath: string, timeoutMs: number): Promise<void> {
   const dispatcher = bduFetchDispatcher();
   const maxAttempts = Math.max(1, Math.min(8, Number(process.env.BDU_FETCH_MAX_ATTEMPTS ?? 4)));
@@ -76,7 +88,7 @@ async function bduHttpGetToFile(url: string, destPath: string, timeoutMs: number
         const delayMs = Math.min(15_000, 2000 * attempt);
         // eslint-disable-next-line no-console
         console.warn(
-          `[bdu-fetch] attempt ${attempt}/${maxAttempts} failed for ${url}: ${err instanceof Error ? err.message : String(err)}`
+          `[bdu-fetch] attempt ${attempt}/${maxAttempts} failed for ${url}: ${formatBduFetchError(err)}`
         );
         await sleep(delayMs);
       }
@@ -84,7 +96,9 @@ async function bduHttpGetToFile(url: string, destPath: string, timeoutMs: number
   }
 
   throw lastError instanceof Error
-    ? lastError
+    ? new Error(`BDU fetch failed after ${maxAttempts} attempts: ${formatBduFetchError(lastError)}`, {
+        cause: lastError
+      })
     : new Error(`BDU fetch failed after ${maxAttempts} attempts: ${String(lastError)}`);
 }
 
