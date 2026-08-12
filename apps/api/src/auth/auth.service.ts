@@ -15,9 +15,18 @@ import QRCode from "qrcode";
 import { DbService } from "../services/db.service.js";
 import { UserRole, parseUserRole } from "@vuln-intel/shared";
 
-const ACCESS_TTL_SEC = 60 * 15;
+/** Access JWT TTL. Short values cause periodic 401 on live polls (e.g. stats/summary). */
+const ACCESS_TTL_SEC = Math.max(
+  5 * 60,
+  Math.min(24 * 60 * 60, Number(process.env.JWT_ACCESS_TTL_SEC ?? 60 * 60))
+);
 const REFRESH_TTL_SEC = 60 * 60 * 24 * 7;
 const PENDING_TOTP_TTL_SEC = 60 * 5;
+/** Allow a just-rotated refresh token to mint again briefly (parallel apiFetch 401 races). */
+const REFRESH_REUSE_GRACE_MS = Math.max(
+  0,
+  Math.min(120_000, Number(process.env.JWT_REFRESH_REUSE_GRACE_MS ?? 30_000))
+);
 
 function sha256Hex(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
@@ -212,33 +221,52 @@ export class AuthService implements OnApplicationBootstrap {
     const refreshToken = refreshTokenRaw?.trim();
     if (!refreshToken) throw new UnauthorizedException();
     const tokenHash = sha256Hex(refreshToken);
-    const res = await this.db.query<{
+
+    // Atomic claim: first concurrent refresh wins; others fall into reuse grace.
+    const claimed = await this.db.query<{
       id: string;
       user_id: string;
       expires_at: Date;
     }>(
-      `SELECT id, user_id, expires_at
-         FROM refresh_token
+      `UPDATE refresh_token
+          SET revoked_at = now()
         WHERE token_hash = $1
-          AND revoked_at IS NULL`,
+          AND revoked_at IS NULL
+          AND expires_at > now()
+      RETURNING id, user_id, expires_at`,
       [tokenHash]
     );
-    const rt = res.rows[0];
-    if (!rt) throw new UnauthorizedException();
-    if (rt.expires_at.getTime() < Date.now()) {
-      await this.db.query(`UPDATE refresh_token SET revoked_at = now() WHERE id = $1`, [
-        rt.id
-      ]);
-      throw new UnauthorizedException();
+
+    let userId = claimed.rows[0]?.user_id ?? null;
+    if (!userId) {
+      const prior = await this.db.query<{
+        user_id: string;
+        expires_at: Date;
+        revoked_at: Date | null;
+      }>(
+        `SELECT user_id, expires_at, revoked_at
+           FROM refresh_token
+          WHERE token_hash = $1
+          ORDER BY COALESCE(revoked_at, expires_at) DESC
+          LIMIT 1`,
+        [tokenHash]
+      );
+      const row = prior.rows[0];
+      if (!row) throw new UnauthorizedException();
+      if (row.expires_at.getTime() < Date.now()) throw new UnauthorizedException();
+      const revokedAt = row.revoked_at?.getTime() ?? 0;
+      const withinGrace =
+        REFRESH_REUSE_GRACE_MS > 0 &&
+        revokedAt > 0 &&
+        Date.now() - revokedAt <= REFRESH_REUSE_GRACE_MS;
+      if (!withinGrace) throw new UnauthorizedException();
+      userId = row.user_id;
     }
 
-    const user = await this.findUserById(rt.user_id);
+    const user = await this.findUserById(userId);
     if (!user) throw new UnauthorizedException();
     if (!user.enabled) throw new UnauthorizedException("User is disabled");
 
-    await this.db.query(`UPDATE refresh_token SET revoked_at = now() WHERE id = $1`, [
-      rt.id
-    ]);
     return this.issueTokenPair(user);
   }
 

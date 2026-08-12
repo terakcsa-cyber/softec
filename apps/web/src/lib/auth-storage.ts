@@ -20,3 +20,19 @@ export function clearStoredTokens(): void {
   sessionStorage.removeItem(ACCESS);
   sessionStorage.removeItem(REFRESH);
 }
+
+/** Decode JWT `exp` (seconds) without verifying signature — client skew helper only. */
+export function getAccessTokenExpiresAtMs(token: string | null | undefined): number | null {
+  if (!token) return null;
+  try {
+    const parts = token.split(".");
+    if (parts.length < 2) return null;
+    const json = atob(parts[1]!.replace(/-/g, "+").replace(/_/g, "/"));
+    const payload = JSON.parse(json) as { exp?: unknown };
+    return typeof payload.exp === "number" && Number.isFinite(payload.exp)
+      ? payload.exp * 1000
+      : null;
+  } catch {
+    return null;
+  }
+}

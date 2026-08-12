@@ -1,12 +1,16 @@
 import { AUTH_BFF_PREFIX } from "./auth-bff";
 import {
   clearStoredTokens,
+  getAccessTokenExpiresAtMs,
   getStoredAccessToken,
   getStoredRefreshToken,
   setStoredTokens
 } from "./auth-storage";
 
 let refreshInFlight: Promise<boolean> | null = null;
+
+/** Refresh a bit before access JWT expiry so live polls (summary etc.) rarely see 401. */
+const PROACTIVE_REFRESH_SKEW_MS = 90_000;
 
 /** Явное обновление пары токенов (например после 401 на /auth/me). */
 export async function refreshSession(): Promise<boolean> {
@@ -15,6 +19,22 @@ export async function refreshSession(): Promise<boolean> {
     refreshInFlight = null;
   });
   return refreshInFlight;
+}
+
+/**
+ * If access token is missing/near expiry, refresh first.
+ * Returns false only when session is definitively dead (tokens cleared).
+ */
+export async function ensureFreshAccessToken(): Promise<boolean> {
+  const access = getStoredAccessToken();
+  const refresh = getStoredRefreshToken();
+  if (!access && !refresh) return false;
+  const exp = getAccessTokenExpiresAtMs(access);
+  const needsRefresh =
+    !access || exp == null || exp - Date.now() <= PROACTIVE_REFRESH_SKEW_MS;
+  if (!needsRefresh) return true;
+  if (!refresh) return Boolean(access);
+  return refreshSession();
 }
 
 async function doRefresh(): Promise<boolean> {
@@ -27,8 +47,13 @@ async function doRefresh(): Promise<boolean> {
       body: JSON.stringify({ refreshToken: refresh }),
       cache: "no-store"
     });
-    if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      // Definitive auth failure — drop session.
       clearStoredTokens();
+      return false;
+    }
+    if (!res.ok) {
+      // Transient (502/429/5xx): keep existing tokens so the next poll can retry.
       return false;
     }
     const data = (await res.json()) as {
@@ -42,7 +67,7 @@ async function doRefresh(): Promise<boolean> {
     setStoredTokens(data.accessToken, data.refreshToken);
     return true;
   } catch {
-    clearStoredTokens();
+    // Network blip — do not wipe session.
     return false;
   }
 }
@@ -52,6 +77,8 @@ async function doRefresh(): Promise<boolean> {
  */
 export async function apiFetch(input: string, init?: RequestInit): Promise<Response> {
   const url = input;
+  await ensureFreshAccessToken();
+
   const headers = new Headers(init?.headers);
   const token = getStoredAccessToken();
   if (token) headers.set("Authorization", `Bearer ${token}`);

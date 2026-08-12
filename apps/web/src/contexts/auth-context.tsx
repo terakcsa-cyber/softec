@@ -68,19 +68,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshMe = useCallback(async () => {
     let access = getStoredAccessToken();
-    if (!access) {
+    const refresh = getStoredRefreshToken();
+    if (!access && !refresh) {
       setUser(null);
       return;
     }
     let res: Response;
     try {
+      if (!access && refresh) {
+        const renewed = await refreshSession();
+        access = getStoredAccessToken();
+        if (!renewed || !access) {
+          // Keep UI user if tokens still exist after a transient refresh failure.
+          if (!getStoredRefreshToken() && !getStoredAccessToken()) setUser(null);
+          return;
+        }
+      }
       res = await fetchWithTimeout(`${AUTH_BFF_PREFIX}/me`, {
         headers: { authorization: `Bearer ${access}`, accept: "application/json" },
         cache: "no-store"
       });
     } catch {
-      clearStoredTokens();
-      setUser(null);
+      // Network/timeout — do not wipe a still-valid session.
       return;
     }
     if (res.status === 401 && getStoredRefreshToken()) {
@@ -94,16 +103,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
               cache: "no-store"
             });
           } catch {
-            clearStoredTokens();
-            setUser(null);
             return;
           }
         }
       }
     }
-    if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
       clearStoredTokens();
       setUser(null);
+      return;
+    }
+    if (!res.ok) {
+      // Transient API errors should not force logout.
       return;
     }
     const data = (await res.json()) as AuthUser;
