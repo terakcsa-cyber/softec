@@ -98,6 +98,21 @@ export class EnrichmentWorker implements OnModuleInit {
       console.log(
         `[ai:enrich] idle — card text is written inline by ingest (engine=${textEngineBoot.textEngine}; set AI_ENRICH_VIA_QUEUE=true to consume ai.enrich)`
       );
+      if (process.env.AI_ENRICH_PURGE_IDLE_QUEUE !== "false") {
+        try {
+          const main = await ch.purgeQueue("ai.enrich");
+          const dlq = await ch.purgeQueue("dlq.ai.enrich");
+          // eslint-disable-next-line no-console
+          console.log(
+            `[ai:enrich] purged idle leftovers ai.enrich=${main.messageCount} dlq.ai.enrich=${dlq.messageCount}`
+          );
+        } catch (e) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            `[ai:enrich] idle purge failed: ${e instanceof Error ? e.message : String(e)}`
+          );
+        }
+      }
       return;
     }
     const isTextEngine = textEngineBoot.textEngine !== "llm";

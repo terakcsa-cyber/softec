@@ -6,6 +6,8 @@ import {
   ScoreCveRequestedEventSchema
 } from "./events.js";
 import { isAiScoreEnabled, shouldScoreViaQueue } from "./score-request.js";
+import { shouldEnrichViaQueue } from "../ai/upsert-cve-enrichment.js";
+import { normalizeTextEngineMode } from "../llm/vuln-context-engine.js";
 
 export type AmqpGetChannel = {
   get(
@@ -30,14 +32,16 @@ export type AmqpGetChannel = {
   assertExchange(exchange: string, type: string, opts: { durable: boolean }): Promise<unknown>;
 };
 
-const DLQ_QUEUES = ["dlq.ai.enrich", "dlq.ai.score"] as const;
-
 function withDlqReplayKey(env: { idempotencyKey?: string; [k: string]: unknown }) {
   let base =
     typeof env.idempotencyKey === "string" && env.idempotencyKey.length > 0 ? env.idempotencyKey : "unknown";
   const maxBase = 512;
   if (base.length > maxBase) base = base.slice(0, maxBase);
   return { ...env, idempotencyKey: `${base}:dlq:${randomUUID()}` };
+}
+
+function enrichQueueEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return shouldEnrichViaQueue(normalizeTextEngineMode(env.TEXT_ENGINE), env);
 }
 
 function replayParsedMessage(
@@ -48,6 +52,7 @@ function replayParsedMessage(
   if (!parsed.success) return false;
   const base = parsed.data;
   if (base.type === QueueEventType.EnrichCveRequested) {
+    if (!enrichQueueEnabled()) return false;
     const p = EnrichCveRequestedEventSchema.safeParse(base.payload);
     if (!p.success) return false;
     const replayedEnv = withDlqReplayKey(base);
@@ -81,9 +86,16 @@ export async function replayDlqMessages(
   opts?: { queues?: readonly string[]; limitPerQueue?: number }
 ): Promise<{ replayed: number; skipped: number; byQueue: Record<string, number> }> {
   const scoreQueueOn = isAiScoreEnabled() && shouldScoreViaQueue();
+  const enrichQueueOn = enrichQueueEnabled();
   const queues =
     opts?.queues ??
-    (scoreQueueOn ? DLQ_QUEUES : (["dlq.ai.enrich"] as const));
+    ([
+      ...(enrichQueueOn ? (["dlq.ai.enrich"] as const) : []),
+      ...(scoreQueueOn ? (["dlq.ai.score"] as const) : [])
+    ] as const);
+  if (!queues.length) {
+    return { replayed: 0, skipped: 0, byQueue: {} };
+  }
   const limitPerQueue = Math.max(1, Math.min(10_000, opts?.limitPerQueue ?? 200));
   await channel.assertExchange("vuln.events", "topic", { durable: true });
 

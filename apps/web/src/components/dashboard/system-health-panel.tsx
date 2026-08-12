@@ -180,7 +180,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
       const res = await apiFetch("/api/stats/queue", { cache: "no-store" });
       return (await res.json()) as QueueHealth;
     },
-    refetchInterval: 15_000
+    refetchInterval: 60_000
   });
 
   const readinessQ = useQuery({

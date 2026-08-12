@@ -532,7 +532,7 @@ export class StatsController {
       return { ok: true, jobId, hotLimit, total: 0, enqueued: 0 };
     }
 
-    if (textEngine.textEngine !== "llm") {
+    if (textEngine.textEngine !== "llm" || !shouldEnrichViaQueue(textEngine.textEngine)) {
       let ready = 0;
       for (const cveId of cveIds) {
         const res = await this.cveEnrichRunner.enrichNow(cveId, { force: false, allowOutsideHotWindow: true });
@@ -552,6 +552,7 @@ export class StatsController {
               ready,
               cveIds,
               textEngine: textEngine.textEngine,
+              enrichViaQueue: shouldEnrichViaQueue(textEngine.textEngine),
               ts: nowIso
             })
           ]

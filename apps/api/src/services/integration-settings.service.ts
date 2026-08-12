@@ -24,6 +24,9 @@ import {
 } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
 
+let nvdHealthCache: { key: string; ts: number; value: Record<string, unknown> } | null = null;
+let bduHealthCache: { key: string; ts: number; value: Record<string, unknown> } | null = null;
+
 type LlmProfileRow = {
   id: string;
   name: string;
@@ -321,7 +324,21 @@ export class IntegrationSettingsService {
 
   /** Lightweight NVD API probe (same surface as LLM in GET /stats/queue). */
   async probeNvdHealth() {
+    const cacheTtlMs = Math.max(
+      15_000,
+      Math.min(10 * 60_000, Number(process.env.NVD_HEALTH_CACHE_MS ?? 120_000))
+    );
     const resolution = await this.getNvdKeyResolution();
+    const cacheKey = `nvd|${resolution.source}|${resolution.key ? "k" : "no-k"}`;
+    if (nvdHealthCache && nvdHealthCache.key === cacheKey && Date.now() - nvdHealthCache.ts < cacheTtlMs) {
+      return { ...nvdHealthCache.value, cached: true };
+    }
+    const value = await this.probeNvdHealthUncached(resolution);
+    nvdHealthCache = { key: cacheKey, ts: Date.now(), value: value as Record<string, unknown> };
+    return value;
+  }
+
+  private async probeNvdHealthUncached(resolution: Awaited<ReturnType<IntegrationSettingsService["getNvdKeyResolution"]>>) {
     const verify = await this.verifyNvdApiKey();
     const endpoint =
       process.env.NVD_API_BASE?.trim() || "https://services.nvd.nist.gov/rest/json/cves/2.0";
@@ -381,7 +398,8 @@ export class IntegrationSettingsService {
       catalogCveCount: catalog.cveCount,
       catalogTotalUpserted: catalog.totalUpserted,
       catalogCompletedAt: catalog.completedAt,
-      error: ok ? (apiProbeOk ? null : error) : error ?? ingestStale ? "Ingest устарел" : "NVD недоступен"
+      error: ok ? (apiProbeOk ? null : error) : error ?? ingestStale ? "Ingest устарел" : "NVD недоступен",
+      cached: false
     };
   }
 
@@ -413,6 +431,14 @@ export class IntegrationSettingsService {
   /** Доступность bdu.fstec.ru и свежесть ingest (аналог NVD в GET /stats/queue). */
   async probeBduHealth() {
     const sourceUrl = resolveBduVulxmlUrl();
+    const cacheTtlMs = Math.max(
+      15_000,
+      Math.min(10 * 60_000, Number(process.env.BDU_HEALTH_CACHE_MS ?? 120_000))
+    );
+    const cacheKey = `bdu|${sourceUrl}`;
+    if (bduHealthCache && bduHealthCache.key === cacheKey && Date.now() - bduHealthCache.ts < cacheTtlMs) {
+      return { ...bduHealthCache.value, cached: true };
+    }
     const timeoutMs = Math.max(800, Math.min(15_000, Number(process.env.BDU_HEALTH_TIMEOUT_MS ?? 6000)));
     const probe = await probeBduSourceReachability(timeoutMs);
     const lastIngest = await this.getBduLastIngest();
@@ -459,7 +485,7 @@ export class IntegrationSettingsService {
       error = error ?? "Таблица bdu_vuln пуста — запустите ingest (BDU_TLS_INSECURE=true при ошибке TLS)";
     }
 
-    return {
+    const out = {
       configured: true,
       ok,
       sourceProbeOk: probe.ok,
@@ -481,8 +507,11 @@ export class IntegrationSettingsService {
       ingestStaleHint: ingestStale
         ? "Долго нет bdu.ingest в audit_log — проверьте apps/ingest (BDU_INGEST_ENABLED, BDU_TLS_INSECURE, сеть до bdu.fstec.ru)."
         : null,
-      error: ok ? (probe.ok ? null : error) : error ?? (ingestStale ? "BDU ingest устарел" : "BDU недоступен")
+      error: ok ? (probe.ok ? null : error) : error ?? (ingestStale ? "BDU ingest устарел" : "BDU недоступен"),
+      cached: false
     };
+    bduHealthCache = { key: cacheKey, ts: Date.now(), value: out as Record<string, unknown> };
+    return out;
   }
 
   async getUiState() {

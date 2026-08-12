@@ -55,6 +55,13 @@ type NvdApiItem = {
   cve: any;
 };
 
+/** Back off empty backlog sweeps: base → 2× → … capped at 15m. */
+function adaptiveSweepDelayMs(baseMs: number, emptyStreak: number): number {
+  if (emptyStreak <= 0) return baseMs;
+  const factor = Math.min(16, 2 ** Math.min(emptyStreak, 4));
+  return Math.min(15 * 60_000, Math.max(baseMs, baseMs * factor));
+}
+
 @Injectable()
 export class NvdIngestJob implements OnModuleInit {
   /** Сериализуем запросы к NVD (pub-hot и lastMod не бьют rate limit параллельно). */
@@ -65,6 +72,9 @@ export class NvdIngestJob implements OnModuleInit {
   /** Cached ai.enrich depth for fanout backpressure (avoid checkQueue per CVE). */
   private enrichDepthCache: { atMs: number; messages: number } | null = null;
   private enrichDepthSkipLoggedAt = 0;
+  /** Empty backlog ticks → exponential backoff so catch-up does not thrash forever. */
+  private enrichBacklogEmptyStreak = 0;
+  private scoreBacklogEmptyStreak = 0;
 
   constructor(
     @Inject(DbService) private readonly db: DbService,
@@ -169,12 +179,22 @@ export class NvdIngestJob implements OnModuleInit {
 
     const backlogIntervalMs = Number(process.env.BACKLOG_AI_SWEEP_INTERVAL_MS ?? 45_000);
     if (backlogIntervalMs > 0 && process.env.TEXT_ENGINE_BG_ENRICH !== "false") {
-      setInterval(() => {
-        this.sweepBacklogEnrich().catch((e) => {
-          // eslint-disable-next-line no-console
-          console.error("[ingest:nvd] backlog AI sweep interval failed", e);
-        });
-      }, backlogIntervalMs);
+      const scheduleEnrichBacklog = (delayMs: number) => {
+        setTimeout(() => {
+          this.sweepBacklogEnrich()
+            .then((n) => {
+              this.enrichBacklogEmptyStreak = n > 0 ? 0 : this.enrichBacklogEmptyStreak + 1;
+              const next = adaptiveSweepDelayMs(backlogIntervalMs, this.enrichBacklogEmptyStreak);
+              scheduleEnrichBacklog(next);
+            })
+            .catch((e) => {
+              // eslint-disable-next-line no-console
+              console.error("[ingest:nvd] backlog AI sweep interval failed", e);
+              scheduleEnrichBacklog(backlogIntervalMs);
+            });
+        }, delayMs);
+      };
+      scheduleEnrichBacklog(backlogIntervalMs);
     }
 
     // Full-corpus risk_score catch-up (inline). Default ON when scoring enabled.
@@ -190,12 +210,22 @@ export class NvdIngestJob implements OnModuleInit {
         }, scoreBacklogOnStartMs);
       }
       if (scoreBacklogIntervalMs > 0) {
-        setInterval(() => {
-          this.sweepBacklogScore().catch((e) => {
-            // eslint-disable-next-line no-console
-            console.error("[ingest:nvd] backlog score sweep interval failed", e);
-          });
-        }, scoreBacklogIntervalMs);
+        const scheduleScoreBacklog = (delayMs: number) => {
+          setTimeout(() => {
+            this.sweepBacklogScore()
+              .then((n) => {
+                this.scoreBacklogEmptyStreak = n > 0 ? 0 : this.scoreBacklogEmptyStreak + 1;
+                const next = adaptiveSweepDelayMs(scoreBacklogIntervalMs, this.scoreBacklogEmptyStreak);
+                scheduleScoreBacklog(next);
+              })
+              .catch((e) => {
+                // eslint-disable-next-line no-console
+                console.error("[ingest:nvd] backlog score sweep interval failed", e);
+                scheduleScoreBacklog(scoreBacklogIntervalMs);
+              });
+          }, delayMs);
+        };
+        scheduleScoreBacklog(scoreBacklogIntervalMs);
       }
     }
   }
@@ -1099,8 +1129,8 @@ export class NvdIngestJob implements OnModuleInit {
       return process.env.NVD_FANOUT_ENRICH === "true";
     }
     if (process.env.TEXT_ENGINE_BG_ENRICH === "false") return false;
-    // Explicit false disables fanout even when BG enrich is on (recommended with hot24).
-    if (kind === "fanout") return process.env.NVD_FANOUT_ENRICH !== "false";
+    // Explicit opt-in fanout; hot24+backlog cover maturity without per-CVE storms.
+    if (kind === "fanout") return process.env.NVD_FANOUT_ENRICH === "true";
     if (kind === "backlog") {
       // baseline + translate: catch up full corpus unless explicitly disabled.
       return process.env.BACKLOG_AI_SWEEP !== "false";
@@ -1242,13 +1272,13 @@ export class NvdIngestJob implements OnModuleInit {
    * Catch-up risk_score for the whole CVE corpus (missing rows only).
    * Runs frequently in the background so 100k+ CVEs fill without Rabbit.
    */
-  private async sweepBacklogScore() {
-    if (!isAiScoreEnabled()) return;
-    if (process.env.BACKLOG_SCORE_SWEEP === "false") return;
+  private async sweepBacklogScore(): Promise<number> {
+    if (!isAiScoreEnabled()) return 0;
+    if (process.env.BACKLOG_SCORE_SWEEP === "false") return 0;
 
     const limit = Math.max(1, Math.min(10_000, Number(process.env.BACKLOG_SCORE_SWEEP_LIMIT ?? 2500)));
     const rows = await listCvesNeedingRiskScore(this.db, { limit });
-    if (!rows.length) return;
+    if (!rows.length) return 0;
 
     const cveIds = rows.map((r) => r.cve_id);
     const started = Date.now();
@@ -1275,6 +1305,7 @@ export class NvdIngestJob implements OnModuleInit {
         `[ingest:nvd] backlog score ${shouldScoreViaQueue() ? "enqueued" : "upserted"}=${n} in ${Date.now() - started}ms (limit=${limit})`
       );
     }
+    return n;
   }
 
   /**
@@ -1403,8 +1434,8 @@ export class NvdIngestJob implements OnModuleInit {
    * baseline/translate: on by default with TEXT_ENGINE_BG_ENRICH (BACKLOG_AI_SWEEP=false to disable).
    * Inline local templates by default; Rabbit only for llm / AI_ENRICH_VIA_QUEUE.
    */
-  private async sweepBacklogEnrich() {
-    if (!(await this.isBackgroundTextEnrichEnabled("backlog"))) return;
+  private async sweepBacklogEnrich(): Promise<number> {
+    if (!(await this.isBackgroundTextEnrichEnabled("backlog"))) return 0;
 
     const mode = await this.resolveTextEngineMode();
     const viaQueue = shouldEnrichViaQueue(mode);
@@ -1470,12 +1501,13 @@ export class NvdIngestJob implements OnModuleInit {
       return { cveId: row.cve_id, raw: rawObj };
     });
 
+    if (!items.length) return 0;
+
     if (!viaQueue) {
-      await this.enrichItemsInline(items, "backlog");
-      return;
+      return await this.enrichItemsInline(items, "backlog");
     }
 
-    if (!(await this.canPublishEnrich("backlog-sweep"))) return;
+    if (!(await this.canPublishEnrich("backlog-sweep"))) return 0;
     let n = 0;
     let skippedInflight = 0;
     for (const item of items) {
@@ -1501,6 +1533,7 @@ export class NvdIngestJob implements OnModuleInit {
         `[ingest:nvd] backlog text-enrich sweep enqueued=${n} skippedInflight=${skippedInflight} (limit=${limit}, day=${dayBucket}, engine=${mode})`
       );
     }
+    return n;
   }
 
   private async fetchJson(url: string, apiKey?: string) {

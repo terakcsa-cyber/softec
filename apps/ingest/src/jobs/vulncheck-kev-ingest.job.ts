@@ -35,33 +35,47 @@ export class VulncheckKevIngestJob implements OnModuleInit {
   }
 
   private async runForever(intervalMs: number) {
+    let noTokenSleepLogged = false;
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const startedAt = Date.now();
+      let emptyToken = false;
       try {
         await ensureVulncheckKevSchema(this.db);
-        await this.runOnce();
+        emptyToken = await this.runOnce();
       } catch (e) {
         // eslint-disable-next-line no-console
         console.error("[ingest:vulncheck-kev] failed", e);
       }
-      const sleep = Math.max(60_000, intervalMs - (Date.now() - startedAt));
+      // Without API token, don't burn cycles every few hours on a guaranteed skip.
+      const sleep = emptyToken
+        ? Math.max(intervalMs, 24 * 60 * 60 * 1000)
+        : Math.max(60_000, intervalMs - (Date.now() - startedAt));
+      if (emptyToken && !noTokenSleepLogged) {
+        noTokenSleepLogged = true;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[ingest:vulncheck-kev] no token — sleeping ${Math.round(sleep / 3_600_000)}h until next check`
+        );
+      }
       await new Promise((r) => setTimeout(r, sleep));
     }
   }
 
-  async runOnce() {
+  /** @returns true when skipped due to missing API token */
+  async runOnce(): Promise<boolean> {
     const result = await ingestVulncheckKev(this.db, { auditMeta: { via: "ingest_poll" } });
     if (result.skipped) {
       // eslint-disable-next-line no-console
       console.log("[ingest:vulncheck-kev] skip: no API token (settings vulncheck or VULNCHECK_API_TOKEN)");
-      return;
+      return true;
     }
     await this.enqueueScoring(result.touchedCveIds);
     // eslint-disable-next-line no-console
     console.log(
       `[ingest:vulncheck-kev] items=${result.items} touched=${result.touched} vckev_only=${result.vckevOnly} skipped_unknown_cve=${result.skippedUnknown}`
     );
+    return false;
   }
 
   private async enqueueScoring(cveIds: string[]) {

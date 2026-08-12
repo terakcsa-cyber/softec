@@ -26,8 +26,12 @@ describe("replayDlqMessages", () => {
   it("replays valid enrich and score messages", async () => {
     const prevFlag = process.env.AI_SCORE_ENABLED;
     const prevVia = process.env.AI_SCORE_VIA_QUEUE;
+    const prevEnrichVia = process.env.AI_ENRICH_VIA_QUEUE;
+    const prevEngine = process.env.TEXT_ENGINE;
     process.env.AI_SCORE_ENABLED = "true";
     process.env.AI_SCORE_VIA_QUEUE = "true";
+    process.env.AI_ENRICH_VIA_QUEUE = "true";
+    process.env.TEXT_ENGINE = "llm";
     try {
       const queue = ["dlq.ai.enrich"];
       const bodies = [enrichEnvelope(), scoreEnvelope()];
@@ -64,6 +68,10 @@ describe("replayDlqMessages", () => {
       else process.env.AI_SCORE_ENABLED = prevFlag;
       if (prevVia === undefined) delete process.env.AI_SCORE_VIA_QUEUE;
       else process.env.AI_SCORE_VIA_QUEUE = prevVia;
+      if (prevEnrichVia === undefined) delete process.env.AI_ENRICH_VIA_QUEUE;
+      else process.env.AI_ENRICH_VIA_QUEUE = prevEnrichVia;
+      if (prevEngine === undefined) delete process.env.TEXT_ENGINE;
+      else process.env.TEXT_ENGINE = prevEngine;
     }
   });
 
@@ -101,6 +109,7 @@ describe("replayDlqMessages", () => {
       else process.env.AI_SCORE_VIA_QUEUE = prevVia;
     }
   });
+
   it("skips score replay when ai.score disabled", async () => {
     const prevFlag = process.env.AI_SCORE_ENABLED;
     process.env.AI_SCORE_ENABLED = "false";

@@ -39,7 +39,7 @@ export class IntegrationsBootJob implements OnModuleInit {
   private async runBoot() {
     // Sequential after long AFK — avoid concurrent EPSS + TI + NVD heap spikes.
     const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    if (process.env.DLQ_BOOT_RETRY !== "false") {
+    if (process.env.DLQ_BOOT_RETRY === "true") {
       await this.retryDlqIfNeeded();
       await pause(Number(process.env.INTEGRATIONS_BOOT_STEP_PAUSE_MS ?? 1500));
     }

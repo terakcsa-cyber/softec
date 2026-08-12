@@ -1,13 +1,11 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { queueDepthGauge } from "@vuln-intel/shared";
+import {
+  getTextEngineSettingsFromEnv,
+  queueDepthGauge,
+  shouldEnrichViaQueue,
+  shouldScoreViaQueue
+} from "@vuln-intel/shared";
 import { QueueService } from "./queue.service.js";
-
-const POLL_QUEUES = [
-  "ai.enrich",
-  "ai.score",
-  "dlq.ai.enrich",
-  "dlq.ai.score"
-] as const;
 
 @Injectable()
 export class MetricsPollerService implements OnModuleInit, OnModuleDestroy {
@@ -27,8 +25,20 @@ export class MetricsPollerService implements OnModuleInit, OnModuleDestroy {
     if (this.timer) clearInterval(this.timer);
   }
 
+  private activeQueues(): string[] {
+    const out: string[] = [];
+    const textEngine = getTextEngineSettingsFromEnv().textEngine;
+    if (shouldEnrichViaQueue(textEngine)) {
+      out.push("ai.enrich", "dlq.ai.enrich");
+    }
+    if (shouldScoreViaQueue()) {
+      out.push("ai.score", "dlq.ai.score");
+    }
+    return out;
+  }
+
   private async poll() {
-    for (const q of POLL_QUEUES) {
+    for (const q of this.activeQueues()) {
       try {
         const d = await this.queue.getQueueDepth(q);
         queueDepthGauge.set({ queue: q }, d.messages);
