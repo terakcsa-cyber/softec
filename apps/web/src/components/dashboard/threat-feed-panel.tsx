@@ -1,7 +1,16 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Flame, Send, Sparkles, TrendingUp, ClipboardPlus } from "lucide-react";
+import {
+  ClipboardPlus,
+  Eye,
+  Flame,
+  LayoutList,
+  MapPinned,
+  Send,
+  Sparkles,
+  TrendingUp
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
 import { useLivePollInterval } from "@/lib/live-refresh";
@@ -36,7 +45,43 @@ import { ExploitIntelBadges } from "./exploit-intel-badges";
 
 type WindowPreset = "24" | "168" | "720" | "all";
 
+type TiSectionId = "now" | "feed" | "map" | "watchlist";
+
 type WatchlistRow = { id: string; kind: string; value: string; label: string; active: boolean };
+
+type TiNavItem = {
+  id: TiSectionId;
+  label: string;
+  description: string;
+  icon: typeof Flame;
+};
+
+const TI_NAV: TiNavItem[] = [
+  {
+    id: "now",
+    label: "Сейчас",
+    description: "Сначала сюда: hot, новые и дайджест",
+    icon: Flame
+  },
+  {
+    id: "feed",
+    label: "Лента",
+    description: "Сигналы по 24ч / 7д и фильтрам",
+    icon: LayoutList
+  },
+  {
+    id: "map",
+    label: "Карта",
+    description: "Вендоры и активность за 7 дней",
+    icon: MapPinned
+  },
+  {
+    id: "watchlist",
+    label: "Watchlist",
+    description: "Фокус на VOC watchlist",
+    icon: Eye
+  }
+];
 
 const TIME_BUCKET_META: Array<{
   key: ThreatFeedTimeBucket;
@@ -236,6 +281,7 @@ export function ThreatFeedPanel({
   }>({ phase: "idle", total: 0, done: 0 });
   const [casePending, setCasePending] = useState<string | null>(null);
   const [caseMsg, setCaseMsg] = useState<string | null>(null);
+  const [section, setSection] = useState<TiSectionId>("now");
   const limit = 60;
 
   useEffect(() => {
@@ -326,6 +372,15 @@ export function ThreatFeedPanel({
   const toggleVendor = useCallback((key: string) => {
     setVendorFilter((prev) => (prev.includes(key) ? prev.filter((x) => x !== key) : [...prev, key]));
     resetPage();
+    setSection("feed");
+  }, []);
+
+  const goToFeed = useCallback((opts?: { newOnly?: boolean; windowPreset?: WindowPreset; watchlistOnly?: boolean }) => {
+    if (opts?.windowPreset != null) setWindowPreset(opts.windowPreset);
+    if (opts?.newOnly != null) setNewOnly(opts.newOnly);
+    if (opts?.watchlistOnly != null) setWatchlistOnly(opts.watchlistOnly);
+    resetPage();
+    setSection("feed");
   }, []);
 
   const sendDigest = async () => {
@@ -476,18 +531,27 @@ export function ThreatFeedPanel({
     return () => clearTimeout(t);
   }, [items, itemKey]);
 
+  const activeNav = TI_NAV.find((item) => item.id === section) ?? TI_NAV[0]!;
+  const new24 = data?.summary.buckets?.new_24h ?? data?.summary.signals24h ?? 0;
+  const hotCount = data?.summary.hotCves ?? data?.hotCves?.length ?? 0;
+  const sinceCount = data?.summary.sinceCount ?? 0;
+
+  const navBadge = (id: TiSectionId): number | null => {
+    if (id === "now") return hotCount > 0 ? hotCount : new24 > 0 ? new24 : null;
+    if (id === "feed") return total > 0 ? total : null;
+    if (id === "watchlist") return activeWatchlist.length > 0 ? activeWatchlist.length : null;
+    return null;
+  };
+
   return (
-    <div className="space-y-4">
-      <div className="glass rounded-2xl p-5">
+    <div className="glass rounded-2xl">
+      <div className="border-b border-slate-200 px-5 py-4 dark:border-border sm:px-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <Flame className="h-4 w-4 text-warn" />
-              Threat Intelligence
-            </div>
-            <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted">
-              Оперативная доска сигналов: группы по реальному first_seen (24ч / 7д), без «каши» от TI sync.
-              Одна карточка на CVE, время — момент появления сигнала.
+            <div className="text-sm font-semibold tracking-tight text-fg/95">Threat Intelligence</div>
+            <p className="mt-1 max-w-2xl text-xs text-muted">
+              Сначала «Сейчас» — hot и новые за сутки. Лента, карта вендоров и watchlist — отдельными
+              модулями.
             </p>
             {feedQuery.dataUpdatedAt ? (
               <div className="mt-1 text-[10px] text-muted">
@@ -495,39 +559,18 @@ export function ThreatFeedPanel({
               </div>
             ) : null}
           </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              disabled={digestPending}
-              onClick={() => void sendDigest()}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1 text-[11px] text-fg/90 hover:bg-accent/15 disabled:opacity-50"
-            >
-              <Send className="h-3.5 w-3.5" />
-              Суточный TG digest
-            </button>
-            {(
-              [
-                ["vckev_only", "VCK-only"],
-                ["epss_spike", "EPSS spike"],
-                ["has_poc", "PoC"],
-                ["has_public_exploit", "Exploit"]
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => onFilter?.(key)}
-                className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-fg/85 hover:bg-slate-100 dark:border-border dark:bg-black/20"
-                title={EXPLOIT_RADAR_FILTER_LABELS[key].hint}
-              >
-                {label} →
-              </button>
-            ))}
-          </div>
+          <button
+            type="button"
+            disabled={digestPending}
+            onClick={() => void sendDigest()}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-[11px] text-fg/90 hover:bg-accent/15 disabled:opacity-50"
+          >
+            <Send className="h-3.5 w-3.5" />
+            TG digest
+          </button>
         </div>
-
         {digestPrep.phase !== "idle" ? (
-          <div className="mt-2 rounded-lg border border-border bg-white/60 px-3 py-2 dark:bg-black/20">
+          <div className="mt-3 rounded-lg border border-border bg-white/60 px-3 py-2 dark:bg-black/20">
             <div className="flex items-center justify-between gap-3 text-[11px]">
               <div className="flex items-center gap-2 text-muted">
                 <Sparkles className={cn("h-3.5 w-3.5", digestPrep.phase === "preparing" && "animate-pulse")} />
@@ -572,446 +615,597 @@ export function ThreatFeedPanel({
         ) : null}
         {digestMsg ? <div className="mt-2 text-[11px] text-muted">{digestMsg}</div> : null}
         {caseMsg ? <div className="mt-2 text-[11px] text-accent">{caseMsg}</div> : null}
-
-        {(data?.summary.sinceCount ?? 0) > 0 && sinceVisit ? (
-          <div className="mt-3 rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-[11px] text-fg/90">
-            <span className="font-medium">{data!.summary.sinceCount}</span> новых сигналов с прошлого визита (
-            {fmtRelativeTs(sinceVisit)})
-          </div>
-        ) : null}
-
-        {data?.summary ? (
-          <>
-            <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-5">
-              <PulseStat
-                label="Новые 24ч"
-                value={data.summary.buckets?.new_24h ?? data.summary.signals24h}
-                hint="CVE с новым first_seen за 24ч"
-                tone="new"
-              />
-              <PulseStat
-                label="Новые 7д"
-                value={data.summary.buckets?.new_7d ?? Math.max(0, data.summary.signals7d - data.summary.signals24h)}
-                hint="Только 1–7 дней (без суток)"
-              />
-              <PulseStat
-                label="Обновл. 24ч"
-                value={data.summary.buckets?.updated_24h ?? data.summary.updatedSignals24h ?? 0}
-                hint="Изменение сигнала за сутки (не TI sync)"
-                tone="new"
-              />
-              <PulseStat label="Hot CVE" value={data.summary.hotCves} tone="hot" />
-              <PulseStat label="В выборке" value={data.summary.total} hint="Уникальные CVE в окне" />
-            </div>
-            {(data.timeline?.length ?? 0) > 0 ? <ActivityTimeline days={data.timeline} /> : null}
-            {(data.vendorHeatmap?.length ?? 0) > 0 ? (
-              <VendorHeatmap rows={data.vendorHeatmap!} selected={vendorFilter} onSelect={toggleVendor} />
-            ) : null}
-          </>
-        ) : null}
       </div>
 
-      {/* Watchlist bar */}
-      <div className="glass rounded-2xl p-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[11px] font-medium text-fg/85">Watchlist</span>
-          <button
-            type="button"
-            onClick={() => {
-              setWatchlistOnly((v) => !v);
-              resetPage();
-            }}
-            className={cn(
-              "rounded-full border px-2.5 py-1 text-[11px]",
-              watchlistOnly
-                ? "border-accent/40 bg-accent/10 text-accent"
-                : "border-slate-200 text-muted dark:border-border"
-            )}
-          >
-            Только watchlist VOC
-          </button>
-          {vendorFilter.length ? (
-            <button
-              type="button"
-              onClick={() => {
-                setVendorFilter([]);
-                resetPage();
-              }}
-              className="rounded-full border border-slate-200 px-2 py-0.5 text-[10px] text-muted"
-            >
-              Сбросить вендоры ×
-            </button>
-          ) : null}
-          {activeWatchlist.slice(0, 8).map((w) => (
-            <span
-              key={w.id}
-              className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] text-muted dark:border-border dark:bg-black/20"
-              title={`${w.kind}: ${w.value}`}
-            >
-              {w.label}
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {(data?.hotCves?.length ?? 0) > 0 ? (
-        <div className="glass rounded-2xl p-5">
-          <div className="mb-3 flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-warn" />
-            <div className="text-sm font-medium">Hot CVE</div>
-          </div>
-          <ul className="grid gap-2 lg:grid-cols-2">
-            {data!.hotCves!.map((row) => (
-              <li key={row.cve_id}>
-                <div className="flex gap-2 rounded-xl border border-slate-200/90 bg-slate-50/80 px-3 py-2.5 dark:border-white/[0.06] dark:bg-black/20">
-                  <button
-                    type="button"
-                    onClick={() => onOpenCve?.(row.cve_id)}
-                    className="min-w-0 flex-1 text-left"
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-sm font-semibold">{row.cve_id}</span>
-                      <ThreatScoreBadge score={row.threat_score} />
-                    </div>
-                    <div className="mt-1.5">
-                      <ExploitIntelBadges item={row} compact />
-                    </div>
-                  </button>
-                  <button
-                    type="button"
-                    title="VOC кейс + задача"
-                    disabled={casePending === row.cve_id}
-                    onClick={() =>
-                      void createCase({
-                        cve_id: row.cve_id,
-                        signal_type: "vulncheck_kev",
-                        source: "hot",
-                        url: null,
-                        title: null,
-                        confidence: "high",
-                        first_seen_at: row.latest_signal_at,
-                        last_seen_at: row.latest_signal_at,
-                        cvss_base: row.cvss_base,
-                        epss: row.epss,
-                        risk_score: row.risk_score,
-                        vckev_only: row.vckev_only,
-                        epss_spike: row.epss_spike,
-                        has_poc: row.has_poc,
-                        has_public_exploit: row.has_public_exploit,
-                        cisa_kev: row.cisa_kev,
-                        epss_delta_7d: null,
-                        threat_score: row.threat_score,
-                        is_new: false,
-                        vendor: row.vendor,
-                        product: row.product
-                      })
+      <div className="grid lg:grid-cols-[220px_minmax(0,1fr)]">
+        <nav
+          aria-label="Разделы Threat Intelligence"
+          className="border-b border-slate-200 p-3 dark:border-border lg:border-b-0 lg:border-r"
+        >
+          <div className="flex gap-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible lg:pb-0">
+            {TI_NAV.map((item) => {
+              const Icon = item.icon;
+              const selected = item.id === section;
+              const badge = navBadge(item.id);
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    if (item.id === "watchlist") {
+                      setWatchlistOnly(true);
+                      resetPage();
+                    } else if (item.id === "feed" && watchlistOnly && section === "watchlist") {
+                      setWatchlistOnly(false);
+                      resetPage();
                     }
-                    className="shrink-0 rounded-lg border border-slate-200 p-2 hover:bg-white dark:border-border dark:hover:bg-black/30"
+                    setSection(item.id);
+                  }}
+                  className={cn(
+                    "flex min-w-[9.5rem] shrink-0 items-start gap-2.5 rounded-xl border px-3 py-2.5 text-left transition lg:min-w-0 lg:w-full",
+                    selected
+                      ? "border-accent/35 bg-accent/10 text-fg/95"
+                      : "border-transparent text-fg/80 hover:border-slate-200 hover:bg-slate-50 dark:hover:border-border dark:hover:bg-white/[0.04]"
+                  )}
+                >
+                  <Icon
+                    className={cn("mt-0.5 h-4 w-4 shrink-0", selected ? "text-accent" : "text-muted")}
+                    aria-hidden
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-1.5">
+                      <span className="block text-[12px] font-medium leading-tight">{item.label}</span>
+                      {badge != null && badge > 0 ? (
+                        <span className="rounded-full bg-warn/15 px-1.5 py-0.5 font-mono text-[9px] tabular-nums text-warn">
+                          {badge > 999 ? "999+" : badge}
+                        </span>
+                      ) : null}
+                    </span>
+                    <span className="mt-0.5 hidden text-[10px] leading-snug text-muted lg:block">
+                      {item.description}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          <p className="mt-3 hidden px-1 text-[10px] leading-relaxed text-muted lg:block">
+            Порядок внимания: Hot → новые 24ч → обновления → остальная лента.
+          </p>
+        </nav>
+
+        <div className="min-w-0 p-5 sm:p-6">
+          <div className="mb-5">
+            <h2 className="text-sm font-medium text-fg/95">{activeNav.label}</h2>
+            <p className="mt-1 text-xs text-muted">{activeNav.description}</p>
+          </div>
+
+          {section === "now" ? (
+            <div className="space-y-5">
+              {sinceCount > 0 && sinceVisit ? (
+                <div className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-2 text-[11px] text-fg/90">
+                  <span className="font-medium">{sinceCount}</span> новых сигналов с прошлого визита (
+                  {fmtRelativeTs(sinceVisit)})
+                </div>
+              ) : null}
+
+              {data?.summary ? (
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+                  <button type="button" className="text-left" onClick={() => goToFeed({ windowPreset: "24", newOnly: true })}>
+                    <PulseStat
+                      label="Новые 24ч"
+                      value={new24}
+                      hint="Открыть ленту: только новые за сутки"
+                      tone="new"
+                    />
+                  </button>
+                  <button type="button" className="text-left" onClick={() => goToFeed({ windowPreset: "168", newOnly: false })}>
+                    <PulseStat
+                      label="Новые 7д"
+                      value={data.summary.buckets?.new_7d ?? Math.max(0, data.summary.signals7d - data.summary.signals24h)}
+                      hint="Открыть ленту за 7 дней"
+                    />
+                  </button>
+                  <button type="button" className="text-left" onClick={() => goToFeed({ windowPreset: "24", newOnly: false })}>
+                    <PulseStat
+                      label="Обновл. 24ч"
+                      value={data.summary.buckets?.updated_24h ?? data.summary.updatedSignals24h ?? 0}
+                      hint="Изменение сигнала за сутки (не TI sync)"
+                      tone="new"
+                    />
+                  </button>
+                  <PulseStat label="Hot CVE" value={hotCount} tone="hot" />
+                  <PulseStat label="В выборке" value={data.summary.total} hint="Уникальные CVE в окне" />
+                </div>
+              ) : feedQuery.isLoading ? (
+                <div className="text-sm text-muted">Загрузка…</div>
+              ) : null}
+
+              <div>
+                <div className="mb-2 text-[11px] font-medium text-fg/85">Быстрый переход в Exploit Radar</div>
+                <div className="flex flex-wrap gap-2">
+                  {(
+                    [
+                      ["vckev_only", "VCK-only"],
+                      ["epss_spike", "EPSS spike"],
+                      ["has_poc", "PoC"],
+                      ["has_public_exploit", "Exploit"]
+                    ] as const
+                  ).map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => onFilter?.(key)}
+                      className="rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-fg/85 hover:bg-slate-100 dark:border-border dark:bg-black/20"
+                      title={EXPLOIT_RADAR_FILTER_LABELS[key].hint}
+                    >
+                      {label} →
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => goToFeed({ windowPreset: "168" })}
+                    className="rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-[11px] text-accent"
                   >
-                    <ClipboardPlus className="h-4 w-4 text-accent" />
+                    Открыть ленту →
                   </button>
                 </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
+              </div>
 
-      <div className="glass rounded-2xl p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap gap-1.5">
-            {(
-              [
-                ["24", "24 ч"],
-                ["168", "7 д"],
-                ["720", "30 д"],
-                ["all", "Всё"]
-              ] as const
-            ).map(([k, label]) => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => {
-                  setWindowPreset(k);
-                  resetPage();
-                }}
-                className={cn(
-                  "rounded-full border px-2.5 py-1 text-[11px]",
-                  windowPreset === k
-                    ? "border-accent/40 bg-accent/10 text-fg/90"
-                    : "border-slate-200 bg-white text-muted dark:border-border dark:bg-black/20"
-                )}
-              >
-                {label}
-              </button>
-            ))}
-            <button
-              type="button"
-              onClick={() => {
-                setNewOnly((v) => !v);
-                resetPage();
-              }}
-              className={cn(
-                "rounded-full border px-2.5 py-1 text-[11px]",
-                newOnly ? "border-accent/40 bg-accent/10 text-accent" : "border-slate-200 text-muted"
+              {(data?.hotCves?.length ?? 0) > 0 ? (
+                <div>
+                  <div className="mb-3 flex items-center gap-2">
+                    <Sparkles className="h-4 w-4 text-warn" />
+                    <div className="text-sm font-medium">Hot CVE — смотреть первым</div>
+                  </div>
+                  <ul className="grid gap-2 lg:grid-cols-2">
+                    {data!.hotCves!.map((row) => (
+                      <li key={row.cve_id}>
+                        <div className="flex gap-2 rounded-xl border border-warn/25 bg-warn/[0.06] px-3 py-2.5 dark:border-warn/20">
+                          <button
+                            type="button"
+                            onClick={() => onOpenCve?.(row.cve_id)}
+                            className="min-w-0 flex-1 text-left"
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-mono text-sm font-semibold">{row.cve_id}</span>
+                              <ThreatScoreBadge score={row.threat_score} />
+                            </div>
+                            <div className="mt-1.5">
+                              <ExploitIntelBadges item={row} compact />
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            title="VOC кейс + задача"
+                            disabled={casePending === row.cve_id}
+                            onClick={() =>
+                              void createCase({
+                                cve_id: row.cve_id,
+                                signal_type: "vulncheck_kev",
+                                source: "hot",
+                                url: null,
+                                title: null,
+                                confidence: "high",
+                                first_seen_at: row.latest_signal_at,
+                                last_seen_at: row.latest_signal_at,
+                                cvss_base: row.cvss_base,
+                                epss: row.epss,
+                                risk_score: row.risk_score,
+                                vckev_only: row.vckev_only,
+                                epss_spike: row.epss_spike,
+                                has_poc: row.has_poc,
+                                has_public_exploit: row.has_public_exploit,
+                                cisa_kev: row.cisa_kev,
+                                epss_delta_7d: null,
+                                threat_score: row.threat_score,
+                                is_new: false,
+                                vendor: row.vendor,
+                                product: row.product
+                              })
+                            }
+                            className="shrink-0 rounded-lg border border-slate-200 p-2 hover:bg-white dark:border-border dark:hover:bg-black/30"
+                          >
+                            <ClipboardPlus className="h-4 w-4 text-accent" />
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : !feedQuery.isLoading ? (
+                <div className="rounded-xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-muted dark:border-border">
+                  Hot CVE пока нет — смотрите «Лента» (новые 24ч) или «Карта» по вендорам.
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {section === "map" ? (
+            <div className="space-y-2">
+              {(data?.timeline?.length ?? 0) > 0 ? <ActivityTimeline days={data!.timeline!} /> : null}
+              {(data?.vendorHeatmap?.length ?? 0) > 0 ? (
+                <VendorHeatmap rows={data!.vendorHeatmap!} selected={vendorFilter} onSelect={toggleVendor} />
+              ) : !feedQuery.isLoading ? (
+                <div className="text-sm text-muted">Нет данных по вендорам за выбранное окно.</div>
+              ) : (
+                <div className="text-sm text-muted">Загрузка…</div>
               )}
-            >
-              Только новые
-            </button>
-          </div>
-          <select
-            value={sort}
-            onChange={(e) => {
-              setSort(e.target.value as ThreatFeedSort);
-              resetPage();
-            }}
-            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs dark:border-border dark:bg-black/20"
-          >
-            <option value="threat">Threat score</option>
-            <option value="recent">Сначала по first_seen</option>
-          </select>
-        </div>
+              {vendorFilter.length > 0 ? (
+                <p className="pt-2 text-[11px] text-muted">
+                  Выбранные вендоры применяются в «Ленте». Клик по вендору открывает ленту.
+                </p>
+              ) : (
+                <p className="pt-2 text-[11px] text-muted">Клик по вендору — фильтр ленты и переход туда.</p>
+              )}
+            </div>
+          ) : null}
 
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          <button
-            type="button"
-            onClick={() => {
-              setSignalType(null);
-              resetPage();
-            }}
-            className={cn(
-              "rounded-full border px-2 py-0.5 text-[10px]",
-              signalType == null ? "border-accent/40 bg-accent/10" : "border-slate-200 text-muted"
-            )}
-          >
-            Все типы
-          </button>
-          {EXPLOIT_SIGNAL_TYPES.map((t) => {
-            const n = typeCounts.get(t) ?? 0;
-            if (n === 0 && signalType !== t) return null;
-            return (
-              <button
-                key={t}
-                type="button"
-                onClick={() => {
-                  setSignalType(signalType === t ? null : t);
-                  resetPage();
-                }}
-                className={cn(
-                  "rounded-full border px-2 py-0.5 text-[10px]",
-                  signalType === t ? "border-accent/40 bg-accent/10" : "border-slate-200 text-muted"
-                )}
-              >
-                {exploitSignalLabel(t)}
-                {n > 0 ? ` · ${n}` : ""}
-              </button>
-            );
-          })}
-        </div>
-
-        {(vendorFilter.length > 0 || watchlistOnly || newOnly || signalType) ? (
-          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-warn/25 bg-warn/10 px-3 py-2 text-[11px]">
-            <span className="text-warn">Активные фильтры:</span>
-            {vendorFilter.map((v) => (
-              <button
-                key={v}
-                type="button"
-                className="rounded-full border border-warn/30 px-2 py-0.5"
-                onClick={() => toggleVendor(v)}
-              >
-                vendor:{v} ×
-              </button>
-            ))}
-            {watchlistOnly ? <span className="rounded-full border px-2 py-0.5">watchlist</span> : null}
-            {newOnly ? <span className="rounded-full border px-2 py-0.5">новые</span> : null}
-            {signalType ? <span className="rounded-full border px-2 py-0.5">{exploitSignalLabel(signalType)}</span> : null}
-          </div>
-        ) : null}
-
-        <div className="mt-4 space-y-4">
-          {feedQuery.isLoading ? (
-            <div className="text-sm text-muted">Загрузка…</div>
-          ) : items.length === 0 ? (
-            <div className="space-y-2 text-sm text-muted">
-              <div>Нет сигналов под выбранные фильтры.</div>
-              {(vendorFilter.length > 0 || watchlistOnly || newOnly || signalType) ? (
+          {section === "watchlist" ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs text-accent"
                   onClick={() => {
-                    setVendorFilter([]);
-                    setWatchlistOnly(false);
-                    setNewOnly(false);
+                    setWatchlistOnly((v) => !v);
+                    resetPage();
+                  }}
+                  className={cn(
+                    "rounded-full border px-2.5 py-1 text-[11px]",
+                    watchlistOnly
+                      ? "border-accent/40 bg-accent/10 text-accent"
+                      : "border-slate-200 text-muted dark:border-border"
+                  )}
+                >
+                  Только watchlist VOC
+                </button>
+                <button
+                  type="button"
+                  onClick={() => goToFeed({ watchlistOnly: true, windowPreset: "168" })}
+                  className="rounded-lg border border-accent/30 bg-accent/10 px-2.5 py-1 text-[11px] text-accent"
+                >
+                  Показать в ленте →
+                </button>
+              </div>
+              {activeWatchlist.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-muted dark:border-border">
+                  Watchlist пуст. Добавьте вендоры/продукты в VOC — они появятся здесь.
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {activeWatchlist.map((w) => (
+                    <span
+                      key={w.id}
+                      className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-fg/85 dark:border-border dark:bg-black/20"
+                      title={`${w.kind}: ${w.value}`}
+                    >
+                      {w.label}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : null}
+
+          {section === "feed" ? (
+            <div>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex flex-wrap gap-1.5">
+                  {(
+                    [
+                      ["24", "24 ч"],
+                      ["168", "7 д"],
+                      ["720", "30 д"],
+                      ["all", "Всё"]
+                    ] as const
+                  ).map(([k, label]) => (
+                    <button
+                      key={k}
+                      type="button"
+                      onClick={() => {
+                        setWindowPreset(k);
+                        resetPage();
+                      }}
+                      className={cn(
+                        "rounded-full border px-2.5 py-1 text-[11px]",
+                        windowPreset === k
+                          ? "border-accent/40 bg-accent/10 text-fg/90"
+                          : "border-slate-200 bg-white text-muted dark:border-border dark:bg-black/20"
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewOnly((v) => !v);
+                      resetPage();
+                    }}
+                    className={cn(
+                      "rounded-full border px-2.5 py-1 text-[11px]",
+                      newOnly ? "border-accent/40 bg-accent/10 text-accent" : "border-slate-200 text-muted"
+                    )}
+                  >
+                    Только новые
+                  </button>
+                </div>
+                <select
+                  value={sort}
+                  onChange={(e) => {
+                    setSort(e.target.value as ThreatFeedSort);
+                    resetPage();
+                  }}
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs dark:border-border dark:bg-black/20"
+                >
+                  <option value="threat">Threat score</option>
+                  <option value="recent">Сначала по first_seen</option>
+                </select>
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
                     setSignalType(null);
                     resetPage();
                   }}
+                  className={cn(
+                    "rounded-full border px-2 py-0.5 text-[10px]",
+                    signalType == null ? "border-accent/40 bg-accent/10" : "border-slate-200 text-muted"
+                  )}
                 >
-                  Сбросить все фильтры
+                  Все типы
                 </button>
+                {EXPLOIT_SIGNAL_TYPES.map((t) => {
+                  const n = typeCounts.get(t) ?? 0;
+                  if (n === 0 && signalType !== t) return null;
+                  return (
+                    <button
+                      key={t}
+                      type="button"
+                      onClick={() => {
+                        setSignalType(signalType === t ? null : t);
+                        resetPage();
+                      }}
+                      className={cn(
+                        "rounded-full border px-2 py-0.5 text-[10px]",
+                        signalType === t ? "border-accent/40 bg-accent/10" : "border-slate-200 text-muted"
+                      )}
+                    >
+                      {exploitSignalLabel(t)}
+                      {n > 0 ? ` · ${n}` : ""}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {(vendorFilter.length > 0 || watchlistOnly || newOnly || signalType) ? (
+                <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-warn/25 bg-warn/10 px-3 py-2 text-[11px]">
+                  <span className="text-warn">Активные фильтры:</span>
+                  {vendorFilter.map((v) => (
+                    <button
+                      key={v}
+                      type="button"
+                      className="rounded-full border border-warn/30 px-2 py-0.5"
+                      onClick={() => toggleVendor(v)}
+                    >
+                      vendor:{v} ×
+                    </button>
+                  ))}
+                  {watchlistOnly ? <span className="rounded-full border px-2 py-0.5">watchlist</span> : null}
+                  {newOnly ? <span className="rounded-full border px-2 py-0.5">новые</span> : null}
+                  {signalType ? (
+                    <span className="rounded-full border px-2 py-0.5">{exploitSignalLabel(signalType)}</span>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="ml-auto text-[10px] text-muted underline"
+                    onClick={() => {
+                      setVendorFilter([]);
+                      setWatchlistOnly(false);
+                      setNewOnly(false);
+                      setSignalType(null);
+                      resetPage();
+                    }}
+                  >
+                    Сбросить
+                  </button>
+                </div>
+              ) : null}
+
+              <div className="mt-4 space-y-4">
+                {feedQuery.isLoading ? (
+                  <div className="text-sm text-muted">Загрузка…</div>
+                ) : items.length === 0 ? (
+                  <div className="space-y-2 text-sm text-muted">
+                    <div>Нет сигналов под выбранные фильтры.</div>
+                    {(vendorFilter.length > 0 || watchlistOnly || newOnly || signalType) ? (
+                      <button
+                        type="button"
+                        className="rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs text-accent"
+                        onClick={() => {
+                          setVendorFilter([]);
+                          setWatchlistOnly(false);
+                          setNewOnly(false);
+                          setSignalType(null);
+                          resetPage();
+                        }}
+                      >
+                        Сбросить все фильтры
+                      </button>
+                    ) : null}
+                  </div>
+                ) : (
+                  groupedSections.map((bucket) => (
+                    <section key={bucket.key} className="space-y-2">
+                      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-200/80 pb-1.5 dark:border-white/[0.06]">
+                        <div>
+                          <div className="text-[12px] font-semibold text-fg/90">{bucket.label}</div>
+                          <div className="text-[10px] text-muted">{bucket.hint}</div>
+                        </div>
+                        <div className="tabular-nums text-[11px] text-muted">
+                          {bucket.items.length}
+                          {bucket.total > bucket.items.length ? ` / ${bucket.total}` : ""} CVE
+                        </div>
+                      </div>
+                      {bucket.items.length === 0 ? (
+                        <div className="text-[11px] text-muted">На этой странице нет карточек этой группы.</div>
+                      ) : (
+                        bucket.items.map((it, i) => {
+                          const k = itemKey(it, i);
+                          const when = signalDisplayTime(it);
+                          return (
+                            <article
+                              key={k}
+                              className={cn(
+                                "rounded-xl border px-3 py-2.5 transition-[transform,box-shadow] duration-300",
+                                flashKeys.has(k) && "ring-2 ring-accent/30 shadow-sm",
+                                flashKeys.has(k) && "ti-enter",
+                                bumpKeys.has(k) && "ti-bump",
+                                it.is_new
+                                  ? "border-accent/25 bg-accent/[0.04]"
+                                  : it.is_updated
+                                    ? "border-warn/20 bg-warn/[0.04]"
+                                    : "border-slate-200/90 bg-slate-50/80 dark:border-white/[0.06] dark:bg-black/20"
+                              )}
+                            >
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => onOpenCve?.(it.cve_id)}
+                                      className="font-mono text-xs font-semibold text-accent hover:underline"
+                                    >
+                                      {it.cve_id}
+                                    </button>
+                                    <ThreatScoreBadge score={it.threat_score} />
+                                    {it.is_new ? (
+                                      <span className="rounded-full border border-accent/35 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
+                                        NEW 24ч
+                                      </span>
+                                    ) : it.is_updated ? (
+                                      <span className="rounded-full border border-warn/35 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
+                                        UPD 24ч
+                                      </span>
+                                    ) : bucket.key === "new_7d" ? (
+                                      <span className="rounded-full border border-slate-300 bg-white/70 px-2 py-0.5 text-[10px] text-muted dark:border-border dark:bg-black/20">
+                                        NEW 7д
+                                      </span>
+                                    ) : null}
+                                    <span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent">
+                                      {exploitSignalLabel(it.signal_type)}
+                                    </span>
+                                    {(it.signal_count ?? 1) > 1 ? (
+                                      <span className="text-[10px] text-muted">{it.signal_count} сигналов</span>
+                                    ) : null}
+                                  </div>
+                                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                                    <ExploitIntelBadges
+                                      item={{
+                                        exploit_known: it.cisa_kev,
+                                        vckev_only: it.vckev_only,
+                                        epss_spike: it.epss_spike,
+                                        epss_delta_7d: it.epss_delta_7d,
+                                        has_poc: it.has_poc,
+                                        has_public_exploit: it.has_public_exploit
+                                      }}
+                                      compact
+                                    />
+                                    <EpssSparkline values={it.epss_sparkline} />
+                                  </div>
+                                </div>
+                                <div className="flex shrink-0 items-start gap-1">
+                                  <button
+                                    type="button"
+                                    title="VOC кейс + задача"
+                                    disabled={casePending === it.cve_id}
+                                    onClick={() => void createCase(it)}
+                                    className="rounded-lg border border-slate-200 p-1.5 hover:bg-white dark:border-border dark:hover:bg-black/30"
+                                  >
+                                    <ClipboardPlus className="h-3.5 w-3.5 text-accent" />
+                                  </button>
+                                  <div className="min-w-[7.5rem] text-right text-[10px] text-muted">
+                                    <div className="text-fg/80">{fmtRelativeTs(when.primary)}</div>
+                                    <div className="opacity-80">{when.label}</div>
+                                    {when.secondary ? (
+                                      <div className="mt-0.5 opacity-70">впервые {fmtRelativeTs(when.secondary)}</div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted">
+                                {it.vendor ? (
+                                  <span className="text-fg/80">
+                                    {it.vendor}
+                                    {it.product ? ` / ${it.product}` : ""}
+                                  </span>
+                                ) : null}
+                                <span>
+                                  CVSS <span className="font-mono text-fg/80">{it.cvss_base ?? "—"}</span>
+                                </span>
+                                <span>
+                                  EPSS <span className="font-mono text-fg/80">{fmtEpssPct(it.epss) ?? "—"}</span>
+                                  {it.epss_delta_7d != null ? (
+                                    <span className="ml-1">({fmtEpssDelta(it.epss_delta_7d)})</span>
+                                  ) : null}
+                                </span>
+                                <span>
+                                  Risk <span className="font-mono text-fg/80">{it.risk_score ?? "—"}</span>
+                                </span>
+                              </div>
+                              {it.url || it.title ? (
+                                <div className="mt-1.5 text-[11px]">
+                                  {it.url ? (
+                                    <a
+                                      href={it.url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-fg/85 hover:underline"
+                                    >
+                                      {it.title?.trim() || it.url}
+                                    </a>
+                                  ) : (
+                                    it.title
+                                  )}
+                                </div>
+                              ) : null}
+                            </article>
+                          );
+                        })
+                      )}
+                    </section>
+                  ))
+                )}
+              </div>
+
+              {pages > 1 ? (
+                <div className="mt-4 flex items-center justify-between text-xs">
+                  <button
+                    type="button"
+                    disabled={offset <= 0}
+                    onClick={() => setOffset((o) => Math.max(0, o - limit))}
+                    className="rounded-lg border px-2 py-1 disabled:opacity-40"
+                  >
+                    Назад
+                  </button>
+                  <span className="text-muted">
+                    {page}/{pages} · {total.toLocaleString("ru-RU")}
+                  </span>
+                  <button
+                    type="button"
+                    disabled={offset + limit >= total}
+                    onClick={() => setOffset((o) => o + limit)}
+                    className="rounded-lg border px-2 py-1 disabled:opacity-40"
+                  >
+                    Далее
+                  </button>
+                </div>
               ) : null}
             </div>
-          ) : (
-            groupedSections.map((section) => (
-              <section key={section.key} className="space-y-2">
-                <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-200/80 pb-1.5 dark:border-white/[0.06]">
-                  <div>
-                    <div className="text-[12px] font-semibold text-fg/90">{section.label}</div>
-                    <div className="text-[10px] text-muted">{section.hint}</div>
-                  </div>
-                  <div className="tabular-nums text-[11px] text-muted">
-                    {section.items.length}
-                    {section.total > section.items.length ? ` / ${section.total}` : ""} CVE
-                  </div>
-                </div>
-                {section.items.length === 0 ? (
-                  <div className="text-[11px] text-muted">На этой странице нет карточек этой группы.</div>
-                ) : (
-                  section.items.map((it, i) => {
-                    const k = itemKey(it, i);
-                    const when = signalDisplayTime(it);
-                    return (
-                      <article
-                        key={k}
-                        className={cn(
-                          "rounded-xl border px-3 py-2.5 transition-[transform,box-shadow] duration-300",
-                          flashKeys.has(k) && "ring-2 ring-accent/30 shadow-sm",
-                          flashKeys.has(k) && "ti-enter",
-                          bumpKeys.has(k) && "ti-bump",
-                          it.is_new
-                            ? "border-accent/25 bg-accent/[0.04]"
-                            : it.is_updated
-                              ? "border-warn/20 bg-warn/[0.04]"
-                              : "border-slate-200/90 bg-slate-50/80 dark:border-white/[0.06] dark:bg-black/20"
-                        )}
-                      >
-                        <div className="flex flex-wrap items-start justify-between gap-2">
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <button
-                                type="button"
-                                onClick={() => onOpenCve?.(it.cve_id)}
-                                className="font-mono text-xs font-semibold text-accent hover:underline"
-                              >
-                                {it.cve_id}
-                              </button>
-                              <ThreatScoreBadge score={it.threat_score} />
-                              {it.is_new ? (
-                                <span className="rounded-full border border-accent/35 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
-                                  NEW 24ч
-                                </span>
-                              ) : it.is_updated ? (
-                                <span className="rounded-full border border-warn/35 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
-                                  UPD 24ч
-                                </span>
-                              ) : section.key === "new_7d" ? (
-                                <span className="rounded-full border border-slate-300 bg-white/70 px-2 py-0.5 text-[10px] text-muted dark:border-border dark:bg-black/20">
-                                  NEW 7д
-                                </span>
-                              ) : null}
-                              <span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent">
-                                {exploitSignalLabel(it.signal_type)}
-                              </span>
-                              {(it.signal_count ?? 1) > 1 ? (
-                                <span className="text-[10px] text-muted">{it.signal_count} сигналов</span>
-                              ) : null}
-                            </div>
-                            <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                              <ExploitIntelBadges
-                                item={{
-                                  exploit_known: it.cisa_kev,
-                                  vckev_only: it.vckev_only,
-                                  epss_spike: it.epss_spike,
-                                  epss_delta_7d: it.epss_delta_7d,
-                                  has_poc: it.has_poc,
-                                  has_public_exploit: it.has_public_exploit
-                                }}
-                                compact
-                              />
-                              <EpssSparkline values={it.epss_sparkline} />
-                            </div>
-                          </div>
-                          <div className="flex shrink-0 items-start gap-1">
-                            <button
-                              type="button"
-                              title="VOC кейс + задача"
-                              disabled={casePending === it.cve_id}
-                              onClick={() => void createCase(it)}
-                              className="rounded-lg border border-slate-200 p-1.5 hover:bg-white dark:border-border dark:hover:bg-black/30"
-                            >
-                              <ClipboardPlus className="h-3.5 w-3.5 text-accent" />
-                            </button>
-                            <div className="min-w-[7.5rem] text-right text-[10px] text-muted">
-                              <div className="text-fg/80">{fmtRelativeTs(when.primary)}</div>
-                              <div className="opacity-80">{when.label}</div>
-                              {when.secondary ? (
-                                <div className="mt-0.5 opacity-70">впервые {fmtRelativeTs(when.secondary)}</div>
-                              ) : null}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted">
-                          {it.vendor ? (
-                            <span className="text-fg/80">
-                              {it.vendor}
-                              {it.product ? ` / ${it.product}` : ""}
-                            </span>
-                          ) : null}
-                          <span>
-                            CVSS <span className="font-mono text-fg/80">{it.cvss_base ?? "—"}</span>
-                          </span>
-                          <span>
-                            EPSS <span className="font-mono text-fg/80">{fmtEpssPct(it.epss) ?? "—"}</span>
-                            {it.epss_delta_7d != null ? (
-                              <span className="ml-1">({fmtEpssDelta(it.epss_delta_7d)})</span>
-                            ) : null}
-                          </span>
-                          <span>
-                            Risk <span className="font-mono text-fg/80">{it.risk_score ?? "—"}</span>
-                          </span>
-                        </div>
-                        {it.url || it.title ? (
-                          <div className="mt-1.5 text-[11px]">
-                            {it.url ? (
-                              <a href={it.url} target="_blank" rel="noreferrer" className="text-fg/85 hover:underline">
-                                {it.title?.trim() || it.url}
-                              </a>
-                            ) : (
-                              it.title
-                            )}
-                          </div>
-                        ) : null}
-                      </article>
-                    );
-                  })
-                )}
-              </section>
-            ))
-          )}
+          ) : null}
         </div>
-
-        {pages > 1 ? (
-          <div className="mt-4 flex items-center justify-between text-xs">
-            <button
-              type="button"
-              disabled={offset <= 0}
-              onClick={() => setOffset((o) => Math.max(0, o - limit))}
-              className="rounded-lg border px-2 py-1 disabled:opacity-40"
-            >
-              Назад
-            </button>
-            <span className="text-muted">
-              {page}/{pages} · {total.toLocaleString("ru-RU")}
-            </span>
-            <button
-              type="button"
-              disabled={offset + limit >= total}
-              onClick={() => setOffset((o) => o + limit)}
-              className="rounded-lg border px-2 py-1 disabled:opacity-40"
-            >
-              Далее
-            </button>
-          </div>
-        ) : null}
       </div>
     </div>
   );

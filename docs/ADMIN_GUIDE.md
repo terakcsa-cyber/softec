@@ -255,7 +255,9 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 
 ### EPSS
 
-Ежедневный CSV.gz (FIRST → Cyentia failover), boot при пустой/stale таблице; rescore через `ai.score` только если score включён (`TEXT_ENGINE=llm` / `AI_SCORE_ENABLED=true`). Ручной sync: System Health → Управление или `pnpm epss:sync` / `POST /api/stats/ops/epss/sync`.
+Ежедневный CSV.gz (мульти-mirror / FIRST failover + integrity checks), boot при пустой/stale таблице; poll по умолчанию ~6ч (`EPSS_POLL_INTERVAL_MS`). Rescore через `ai.score` только если score включён (`TEXT_ENGINE=llm` / `AI_SCORE_ENABLED=true`). Ручной sync: System Health → Управление или `pnpm epss:sync` / `POST /api/stats/ops/epss/sync`.
+
+**UI:** Overview показывает **EPSS · база** (корпус). Низкий EPSS среди CVE за 24ч ожидаем: дневной feed отстаёт от NVD ~сутки — не трактовать как сбой sync.
 
 | Переменная | Default | Описание |
 |------------|---------|----------|
@@ -694,6 +696,8 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 **Ожидание:** Boot import в первые 30с.  
 **Проверка:** логи `[ingest:integrations-boot] epss`, `pnpm epss:sync`.  
 **Env:** `EPSS_BOOT_ON_START=true`.
+
+**Не путать с:** EPSS ≈0 среди CVE, опубликованных за последние ~24ч — feed FIRST обычно на день позади NVD; покрытие смотрите по корпусу (Overview «EPSS · база»).
 
 ### INC-06: RabbitMQ PRECONDITION_FAILED
 

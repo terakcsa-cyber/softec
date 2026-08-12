@@ -308,10 +308,12 @@ export function OverviewDashboardPanel({
     const hotCvss = data.hot24CvssCount ?? 0;
     const useHot = hotTotal > 0;
     const pRisk = pct(useHot ? hotScored : data.scoredCount, useHot ? hotTotal : total);
-    const pEpss = pct(useHot ? hotEpss : data.epssCount, useHot ? hotTotal : total);
+    // EPSS daily feed lags new NVD publishes by ~1 day — hot-24h EPSS≈0 is normal, not a broken sync.
+    const pEpssCorpus = pct(data.epssCount, total);
+    const pEpssHot = pct(hotEpss, hotTotal);
     const pCvss = pct(useHot ? hotCvss : data.cvssCount, useHot ? hotTotal : total);
     const pAi = pct(useHot ? hotAi : ai, useHot ? hotTotal : total);
-    const health = intelHealthScore({ risk: pRisk, epss: pEpss, cvss: pCvss, ai: pAi });
+    const health = intelHealthScore({ risk: pRisk, epss: pEpssCorpus, cvss: pCvss, ai: pAi });
     const corpusAiPct = pct(ai, total);
     return {
       total,
@@ -323,7 +325,8 @@ export function OverviewDashboardPanel({
       hotCvss,
       useHot,
       pRisk,
-      pEpss,
+      pEpss: pEpssCorpus,
+      pEpssHot,
       pCvss,
       pAi,
       health,
@@ -816,7 +819,7 @@ export function OverviewDashboardPanel({
             <div className="text-[13px] font-semibold tracking-tight">Покрытие интеллектом</div>
             <p className="mt-0.5 text-[11px] text-muted">
               {useHot
-                ? `Доля зрелых карточек среди CVE, опубликованных за 24ч (знаменатель ${hotTotal.toLocaleString()}). Индекс = Risk / EPSS / CVSS / ИИ.`
+                ? `Risk / CVSS / ИИ — среди CVE за 24ч (знаменатель ${hotTotal.toLocaleString()}). EPSS — по всей базе: дневной feed отстаёт от свежих публикаций.`
                 : "Доля CVE с risk score / EPSS / CVSS / ИИ относительно всей базы."}
             </p>
           </div>
@@ -833,11 +836,15 @@ export function OverviewDashboardPanel({
             hint="CVE с risk_score / знаменатель окна"
           />
           <CoverageTrack
-            label={useHot ? "EPSS · 24ч" : "EPSS"}
-            value={useHot ? hotEpss : data.epssCount}
-            total={useHot ? hotTotal : total}
+            label="EPSS · база"
+            value={data.epssCount}
+            total={total}
             tone="bg-warn"
-            hint="CVE с EPSS / знаменатель окна"
+            hint={
+              useHot
+                ? `Полный корпус EPSS. За 24ч с EPSS: ${hotEpss.toLocaleString()} / ${hotTotal.toLocaleString()} (часто ≈0 — feed лагает ~сутки, это норма).`
+                : "CVE с EPSS / вся база"
+            }
           />
           <CoverageTrack
             label={useHot ? "CVSS · 24ч" : "CVSS"}
@@ -859,8 +866,13 @@ export function OverviewDashboardPanel({
             Вся база (вторично): ИИ{" "}
             <span className="tabular-nums text-fg/75">
               {corpusAiPct}% · {ai.toLocaleString()} / {total.toLocaleString()}
+            </span>
+            {" · "}
+            EPSS за 24ч{" "}
+            <span className="tabular-nums text-fg/75">
+              {metrics.pEpssHot}% · {hotEpss.toLocaleString()} / {hotTotal.toLocaleString()}
             </span>{" "}
-            CVE — полный корпус, не «актуальность за 24ч».
+            — низкое значение у свежих CVE ожидаемо, пока FIRST/EPSS не догонит scoreDate.
           </p>
         ) : null}
 
