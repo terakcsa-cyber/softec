@@ -19,16 +19,17 @@ describe("queue schemas", () => {
 });
 
 describe("isAiScoreEnabled", () => {
-  it("defaults off for baseline/translate", () => {
-    assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "baseline" }), false);
-    assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "translate" }), false);
-    assert.equal(isAiScoreEnabled({}), false);
+  it("defaults to enabled (deterministic risk score)", () => {
+    assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "baseline" }), true);
+    assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "translate" }), true);
+    assert.equal(isAiScoreEnabled({}), true);
   });
 
-  it("enables for llm or AI_SCORE_ENABLED=true", () => {
+  it("respects explicit AI_SCORE_ENABLED override", () => {
     assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "llm" }), true);
     assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "baseline", AI_SCORE_ENABLED: "true" }), true);
     assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "llm", AI_SCORE_ENABLED: "false" }), false);
+    assert.equal(isAiScoreEnabled({ AI_SCORE_ENABLED: "0" }), false);
   });
 });
 
@@ -56,10 +57,8 @@ describe("publishScoreEvents", () => {
   });
 
   it("no-ops when score disabled", async () => {
-    const prevEngine = process.env.TEXT_ENGINE;
     const prevFlag = process.env.AI_SCORE_ENABLED;
-    process.env.TEXT_ENGINE = "baseline";
-    delete process.env.AI_SCORE_ENABLED;
+    process.env.AI_SCORE_ENABLED = "false";
     try {
       const calls = [];
       const events = await buildScoreEventsForCveIds(["CVE-2024-0001"], {
@@ -70,8 +69,6 @@ describe("publishScoreEvents", () => {
       assert.equal(n, 0);
       assert.equal(calls.length, 0);
     } finally {
-      if (prevEngine === undefined) delete process.env.TEXT_ENGINE;
-      else process.env.TEXT_ENGINE = prevEngine;
       if (prevFlag === undefined) delete process.env.AI_SCORE_ENABLED;
       else process.env.AI_SCORE_ENABLED = prevFlag;
     }

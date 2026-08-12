@@ -163,6 +163,18 @@ cd vuln-intel-platform
 
 Важно: публичный HTTPS — `WEB_TLS_PUBLISHED_PORT=443` (tls-proxy). Прямой web — `WEB_PUBLISHED_PORT=3000`. Не ставь оба в `443`.
 
+### Уроки первого боевого деплоя (уже закрыты в коде)
+
+| Симптом | Причина | Что сделано |
+|---------|---------|-------------|
+| `Unable to locate package docker-compose-plugin` | Ubuntu без Docker apt repo | `deploy.sh` ставит Docker через `get.docker.com` |
+| `undici … markAsUncloneable` | undici 8 на Node 20 | pin `undici@^6.27` |
+| `vulncheck_kev` / `auth_user` does not exist | race schema vs reconcile | schema → migrations → soft reconcile |
+| `Bind 443 already allocated` | web и tls-proxy оба на 443 | auto-split портов в `deploy.sh` |
+| BDU `string longer than 0x1fffffe8` | vulxml >512MB | chunked parse `<vul>` |
+| FSTEC `fetch failed` | TLS с зарубежного VPS | `BDU_TLS_INSECURE=1` + mirror fallback |
+| risk score «не считается» | score был выкл. без LLM | `AI_SCORE_ENABLED=true` по умолчанию |
+
 ## Backup и restore
 
 Postgres backup:

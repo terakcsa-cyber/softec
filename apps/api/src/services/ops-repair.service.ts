@@ -94,7 +94,7 @@ export class OpsRepairService {
       if (!isAiScoreEnabled()) {
         return {
           message:
-            "Hot24 score skipped: ai.score disabled (set TEXT_ENGINE=llm or AI_SCORE_ENABLED=true)",
+            "Hot24 score skipped: ai.score disabled (set AI_SCORE_ENABLED=true)",
           detail: { enqueued: 0, skipped: true, reason: "ai_score_disabled" }
         };
       }

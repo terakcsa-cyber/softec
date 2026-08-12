@@ -1074,7 +1074,7 @@ export class StatsController {
     if (queue === "dlq.ai.score" && !isAiScoreEnabled()) {
       return {
         ok: false,
-        error: "ai.score disabled (set TEXT_ENGINE=llm or AI_SCORE_ENABLED=true before retrying dlq.ai.score)"
+        error: "ai.score disabled (set AI_SCORE_ENABLED=true before retrying dlq.ai.score)"
       };
     }
     const limit = Math.max(1, Math.min(50_000, Number(limitRaw ?? 1000)));

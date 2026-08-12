@@ -298,21 +298,32 @@ install_linux_packages() {
   fi
 
   if command -v apt-get >/dev/null 2>&1; then
-    log "Installing required packages with apt-get."
+    log "Installing ca-certificates/curl; Docker via official convenience script if needed."
     run_as_root apt-get update || return 1
-    run_as_root apt-get install -y ca-certificates curl docker.io docker-compose-plugin || return 1
+    run_as_root apt-get install -y ca-certificates curl || return 1
+    # Ubuntu universe often lacks docker-compose-plugin; get.docker.com installs Engine + Compose v2.
+    if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+      log "Installing Docker Engine + Compose plugin via get.docker.com"
+      curl -fsSL https://get.docker.com | run_as_root sh || return 1
+    fi
     return 0
   fi
 
   if command -v dnf >/dev/null 2>&1; then
     log "Installing required packages with dnf."
-    run_as_root dnf install -y ca-certificates curl docker docker-compose-plugin || return 1
+    run_as_root dnf install -y ca-certificates curl || return 1
+    if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+      curl -fsSL https://get.docker.com | run_as_root sh || return 1
+    fi
     return 0
   fi
 
   if command -v yum >/dev/null 2>&1; then
     log "Installing required packages with yum."
-    run_as_root yum install -y ca-certificates curl docker docker-compose-plugin || return 1
+    run_as_root yum install -y ca-certificates curl || return 1
+    if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+      curl -fsSL https://get.docker.com | run_as_root sh || return 1
+    fi
     return 0
   fi
 
@@ -482,9 +493,14 @@ ensure_port_available() {
   fi
   validate_port "$port" || die "Invalid port: $port"
 
+  # 443/80 are reserved for tls-proxy; direct web uses WEB_PUBLISHED_PORT (usually 3000).
+  if [[ "$port" == "443" || "$port" == "80" ]]; then
+    log "Public port $port will be used by tls-proxy; web container stays on WEB_PUBLISHED_PORT (3000 by default)."
+  fi
+
   if port_in_use "$port"; then
     if ! confirm "Port $port already has a listener. Continue and let Docker/Compose handle it?"; then
-      die "Choose another port with --port=PORT or free port $port."
+      die "Choose another port with --port=PORT or free port $port (ss -tlnp | grep :$port)."
     fi
   fi
 }
@@ -592,6 +608,14 @@ normalize_env_file() {
     [[ "$STAGING" == "1" ]] && fallback_web="3080"
     log "WEB_PUBLISHED_PORT and WEB_TLS_PUBLISHED_PORT both $web_pub; moving web publish to $fallback_web."
     write_env_value WEB_PUBLISHED_PORT "$fallback_web" "$ENV_FILE"
+  fi
+
+  # Risk score is deterministic; keep enabled on fresh prod unless operator opted out.
+  local score_flag
+  score_flag="$(read_env_value AI_SCORE_ENABLED "$ENV_FILE" || true)"
+  if [[ -z "$score_flag" ]]; then
+    write_env_value AI_SCORE_ENABLED "true" "$ENV_FILE"
+    log "Setting AI_SCORE_ENABLED=true (unified risk_score worker)."
   fi
 
   local le_auto
@@ -794,6 +818,35 @@ run_post_deploy_smoke() {
     return 1
   fi
   log "ok api internal /health"
+
+  # Catch the first-boot footguns we hit in production.
+  if ! APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
+    exec -T api node -e "require('undici'); process.exit(0)" >/dev/null 2>&1; then
+    warn "undici failed to load inside api (Node/undici mismatch) — check undici pin"
+    return 1
+  fi
+  log "ok api undici load"
+
+  local score_enabled
+  score_enabled="$(read_env_value AI_SCORE_ENABLED "$ENV_FILE" || true)"
+  if [[ "${score_enabled,,}" == "false" || "${score_enabled}" == "0" ]]; then
+    warn "AI_SCORE_ENABLED=false — risk_score will not update until enabled"
+  else
+    if APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
+      logs --tail=40 ai 2>/dev/null | grep -q '\[ai:score\] disabled'; then
+      warn "ai container still reports score disabled — rebuild ai image after pull"
+    else
+      log "ok ai.score consumer expected enabled"
+    fi
+  fi
+
+  local web_pub tls_pub
+  web_pub="$(read_env_value WEB_PUBLISHED_PORT "$ENV_FILE" || true)"
+  tls_pub="$(read_env_value WEB_TLS_PUBLISHED_PORT "$ENV_FILE" || true)"
+  if [[ -n "$web_pub" && -n "$tls_pub" && "$web_pub" == "$tls_pub" ]]; then
+    warn "WEB_PUBLISHED_PORT and WEB_TLS_PUBLISHED_PORT both $web_pub — tls-proxy will fail to bind"
+    return 1
+  fi
 
   if ! SMOKE_WEB_URL="http://127.0.0.1:${port}" SMOKE_API_SKIP=1 node "$ROOT_DIR/scripts/post-deploy-smoke.mjs"; then
     warn "Web post-deploy smoke failed"

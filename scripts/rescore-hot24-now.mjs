@@ -2,7 +2,7 @@
 /**
  * Поставить в очередь ai.score все CVE за 24ч без свежего risk_score.
  * node --env-file=.env scripts/rescore-hot24-now.mjs
- * Requires TEXT_ENGINE=llm or AI_SCORE_ENABLED=true.
+ * Requires AI_SCORE_ENABLED=true (default).
  */
 import amqplib from "amqplib";
 import pg from "pg";
@@ -18,7 +18,7 @@ import {
 async function main() {
   if (!isAiScoreEnabled()) {
     console.error(
-      "[rescore-hot24] ai.score disabled — set TEXT_ENGINE=llm or AI_SCORE_ENABLED=true"
+      "[rescore-hot24] ai.score disabled — set AI_SCORE_ENABLED=true"
     );
     process.exit(2);
   }

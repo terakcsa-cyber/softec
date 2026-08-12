@@ -58,7 +58,8 @@ const replacements = {
   AUTH_ALLOW_REGISTER: "false",
   AUTH_ALLOW_REGISTER_IN_PRODUCTION: "false",
   ALLOW_INTERNAL_API_BEARER: "false",
-  BDU_ALLOW_MIRROR_FALLBACK: "true"
+  BDU_ALLOW_MIRROR_FALLBACK: "true",
+  AI_SCORE_ENABLED: "true"
 };
 
 function renderLine(line) {

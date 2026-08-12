@@ -64,10 +64,8 @@ describe("replayDlqMessages", () => {
   });
 
   it("skips score replay when ai.score disabled", async () => {
-    const prevEngine = process.env.TEXT_ENGINE;
     const prevFlag = process.env.AI_SCORE_ENABLED;
-    process.env.TEXT_ENGINE = "baseline";
-    delete process.env.AI_SCORE_ENABLED;
+    process.env.AI_SCORE_ENABLED = "false";
     try {
       let nacked = 0;
       const channel = {
@@ -91,8 +89,6 @@ describe("replayDlqMessages", () => {
       assert.equal(res.skipped, 1);
       assert.equal(nacked, 1);
     } finally {
-      if (prevEngine === undefined) delete process.env.TEXT_ENGINE;
-      else process.env.TEXT_ENGINE = prevEngine;
       if (prevFlag === undefined) delete process.env.AI_SCORE_ENABLED;
       else process.env.AI_SCORE_ENABLED = prevFlag;
     }

@@ -231,13 +231,13 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 | `HOT24_AI_SWEEP_INTERVAL_MS` | 0 | Периодический sweep (0=выкл) |
 | `HOT24_SCORE_SWEEP` | true* | Догон risk_score (*только если `ai.score` включён) |
 | `HOT24_SCORE_STALE_HOURS` | 6 | Пересчёт если score старше |
-| `HOT24_SCORE_BOOT` | true* | Score sweep при boot (*только если `ai.score` включён) |
-| `AI_SCORE_ENABLED` | (auto) | `true`/`false` override; иначе `ai.score` включается только при `TEXT_ENGINE=llm` |
+| `HOT24_SCORE_BOOT` | true* | Score sweep при boot (*если score не выключен) |
+| `AI_SCORE_ENABLED` | `true` | Unified risk_score; `false` только чтобы поставить scoring на паузу |
 | `AI_SCORE_SKIP_FRESH_HOURS` | 2 | Пропуск дублей NVD score |
 | `DLQ_BOOT_RETRY` | false | Авто-replay DLQ при старте (prod: false) |
 | `DLQ_BOOT_RETRY_LIMIT` | 200 | Лимит на очередь |
 
-> **`ai.score` / `dlq.ai.score`:** из коробки выключены (`TEXT_ENGINE=baseline|translate`). Включаются при `TEXT_ENGINE=llm` или `AI_SCORE_ENABLED=true`. Пока score выключен, readiness **не** считает глубину `dlq.ai.score`.
+> **`ai.score`:** по умолчанию **включён** (risk score — детерминированный расчёт, не LLM). Отключается только `AI_SCORE_ENABLED=false`. Пока score выключен, readiness **не** считает глубину `dlq.ai.score`.
 
 ### Text engine / LLM
 
@@ -255,7 +255,7 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 
 ### EPSS
 
-Ежедневный CSV.gz (мульти-mirror / FIRST failover + integrity checks), boot при пустой/stale таблице; poll по умолчанию ~6ч (`EPSS_POLL_INTERVAL_MS`). Rescore через `ai.score` только если score включён (`TEXT_ENGINE=llm` / `AI_SCORE_ENABLED=true`). Ручной sync: System Health → Управление или `pnpm epss:sync` / `POST /api/stats/ops/epss/sync`.
+Ежедневный CSV.gz (мульти-mirror / FIRST failover + integrity checks), boot при пустой/stale таблице; poll по умолчанию ~6ч (`EPSS_POLL_INTERVAL_MS`). Rescore через `ai.score` (по умолчанию включён; выкл. `AI_SCORE_ENABLED=false`). Ручной sync: System Health → Управление или `pnpm epss:sync` / `POST /api/stats/ops/epss/sync`.
 
 **UI:** Overview показывает **EPSS · база** (корпус). Низкий EPSS среди CVE за 24ч ожидаем: дневной feed отстаёт от NVD ~сутки — не трактовать как сбой sync.
 
@@ -681,7 +681,7 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 
 **Симптомы:** Пользователь видит большое число в summary.  
 **Пояснение:** Это COUNT всех scores, не очередь.  
-**Проверка:** при включённом score (`TEXT_ENGINE=llm` / `AI_SCORE_ENABLED=true`) — `ai.score` depth ≈ 0, `HOT24_SCORE_SWEEP=true`, `pnpm rescore:hot24`.
+**Проверка:** `ai.score` depth ≈ 0 (если не `AI_SCORE_ENABLED=false`), `HOT24_SCORE_SWEEP=true`, `pnpm rescore:hot24`.
 
 ### INC-03: 401 для всех пользователей UI
 

@@ -30,7 +30,7 @@ export class ScoringWorker implements OnModuleInit {
     if (!isAiScoreEnabled()) {
       // eslint-disable-next-line no-console
       console.log(
-        "[ai:score] disabled (set TEXT_ENGINE=llm or AI_SCORE_ENABLED=true to consume ai.score)"
+        "[ai:score] disabled (AI_SCORE_ENABLED=false). Unified risk_score will not update."
       );
       return;
     }

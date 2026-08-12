@@ -12,7 +12,7 @@ const EVENT_TYPE = "vuln.score.requested.v1";
 
 const { isAiScoreEnabled } = await import("../packages/shared/dist/index.js");
 if (!isAiScoreEnabled()) {
-  console.error("[rescore-all] ai.score disabled — set TEXT_ENGINE=llm or AI_SCORE_ENABLED=true");
+  console.error("[rescore-all] ai.score disabled — set AI_SCORE_ENABLED=true");
   process.exit(2);
 }
 
