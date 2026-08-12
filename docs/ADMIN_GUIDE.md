@@ -621,6 +621,14 @@ docker compose --env-file .env.production \
 
 Без helper доступна только проверка; apply откажет с понятным RU-сообщением.
 
+Если apply падает на **git fetch**: one-shot updater обычно **без SSH-ключей**. Задайте публичный/с токеном HTTPS в `PLATFORM_UPDATE_REPO_URL` (скрипт fetch’ит по нему в `origin/<branch>`). Либо обновляйте вручную на хосте, где SSH уже работает:
+
+```bash
+cd /opt/vuln-intel-platform
+git fetch origin main
+bash scripts/platform-update.sh
+```
+
 Эквивалент CLI:
 
 ```bash

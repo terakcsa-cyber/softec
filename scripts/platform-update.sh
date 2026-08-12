@@ -10,6 +10,7 @@
 #
 # Env:
 #   PLATFORM_UPDATE_BRANCH   (default: current branch or main)
+#   PLATFORM_UPDATE_REPO_URL (optional HTTPS/SSH URL; used when origin fetch fails / no SSH in updater)
 #   PLATFORM_UPDATE_ENV_FILE  (default: .env.production)
 #   PLATFORM_UPDATE_COMPOSE_FILE (default: infra/docker-compose.prod.yml)
 #   PLATFORM_UPDATE_BACKUP=1   (default: 1) — pg_dump before apply
@@ -139,10 +140,27 @@ fi
 
 before_sha="$(git rev-parse HEAD)"
 write_status "fetch" "Загрузка обновлений с remote (ветка $BRANCH)…"
-git fetch --prune origin "$BRANCH" || die "git fetch не удался (проверьте доступ к репозиторию)"
+
+# Prefer PLATFORM_UPDATE_REPO_URL when set: one-shot updater containers usually have no SSH agent,
+# while UI "check" already works via this URL. Fetch into refs/remotes/origin/<branch> without
+# permanently rewriting `origin` (host may keep SSH remote for interactive use).
+REPO_URL="${PLATFORM_UPDATE_REPO_URL:-}"
+fetch_err=""
+if [[ -n "$REPO_URL" ]]; then
+  log "Fetch via PLATFORM_UPDATE_REPO_URL → origin/$BRANCH"
+  if ! fetch_err="$(git fetch --prune "$REPO_URL" "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}" 2>&1)"; then
+    die "git fetch не удался по PLATFORM_UPDATE_REPO_URL (проверьте URL/токен/сеть): ${fetch_err:-unknown}"
+  fi
+else
+  origin_url="$(git remote get-url origin 2>/dev/null || true)"
+  log "Fetch via origin${origin_url:+ ($origin_url)}"
+  if ! fetch_err="$(git fetch --prune origin "$BRANCH" 2>&1)"; then
+    die "git fetch не удался (origin=${origin_url:-none}). Для Docker apply задайте HTTPS PLATFORM_UPDATE_REPO_URL или смонтируйте SSH-ключи: ${fetch_err:-unknown}"
+  fi
+fi
 
 remote_sha="$(git rev-parse "origin/$BRANCH" 2>/dev/null || true)"
-[[ -n "$remote_sha" ]] || die "Не удалось определить origin/$BRANCH"
+[[ -n "$remote_sha" ]] || die "Не удалось определить origin/$BRANCH после fetch"
 
 if [[ "$before_sha" == "$remote_sha" ]]; then
   write_status "done" "Обновлений нет — уже на $before_sha"

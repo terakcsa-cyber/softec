@@ -720,6 +720,7 @@ export class PlatformUpdateService {
       env: {
         ...process.env,
         PLATFORM_UPDATE_BRANCH: cfg.branch || process.env.PLATFORM_UPDATE_BRANCH || "",
+        PLATFORM_UPDATE_REPO_URL: cfg.repoUrl || process.env.PLATFORM_UPDATE_REPO_URL || "",
         PLATFORM_UPDATE_ENV_FILE: cfg.envFile,
         PLATFORM_UPDATE_COMPOSE_FILE: cfg.composeFile,
         PLATFORM_UPDATE_BACKUP: cfg.backup ? "1" : "0",
@@ -763,6 +764,8 @@ export class PlatformUpdateService {
       "-e",
       `PLATFORM_UPDATE_BRANCH=${cfg.branch || ""}`,
       "-e",
+      `PLATFORM_UPDATE_REPO_URL=${cfg.repoUrl || ""}`,
+      "-e",
       `PLATFORM_UPDATE_ENV_FILE=${cfg.envFile}`,
       "-e",
       `PLATFORM_UPDATE_COMPOSE_FILE=${cfg.composeFile}`,
@@ -775,7 +778,7 @@ export class PlatformUpdateService {
       "docker:27-cli",
       "sh",
       "-c",
-      "apk add --no-cache git bash curl >/dev/null && bash scripts/platform-update.sh"
+      "apk add --no-cache git bash curl openssh-client >/dev/null && bash scripts/platform-update.sh"
     ];
 
     const id = await this.execCapture("docker", args, { timeoutMs: 120_000 });
