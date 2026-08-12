@@ -33,6 +33,7 @@
     "smoke:post-deploy": "node scripts/post-deploy-smoke.mjs",
     "smoke:integration": "node scripts/integration-api-smoke.mjs",
     "backup:pg": "bash scripts/pg-backup.sh",
+    "update:platform": "bash scripts/platform-update.sh",
     "lint": "turbo lint",
     "typecheck": "turbo typecheck",
     "format": "prettier -w .",

@@ -10,10 +10,22 @@ export const BDU_DD_MM_YYYY_SQL_REGEX = "^\\d{2}\\.\\d{2}\\.\\d{4}$";
 export function sqlBduFstecAttentionWithinHours(alias: string, hours: number): string {
   const h = Math.max(1, Math.min(168, Math.floor(hours)));
   return `(
-    (${alias}.publication_date ~ '${BDU_DD_MM_YYYY_SQL_REGEX}'
-      AND to_timestamp(${alias}.publication_date, 'DD.MM.YYYY') >= now() - interval '${h} hours')
-    OR (${alias}.last_upd_date ~ '${BDU_DD_MM_YYYY_SQL_REGEX}'
-      AND to_timestamp(${alias}.last_upd_date, 'DD.MM.YYYY') >= now() - interval '${h} hours')
+    ${alias}.publication_date = ANY(ARRAY(
+      SELECT to_char(d::date, 'DD.MM.YYYY')
+      FROM generate_series(
+        date_trunc('day', now() - interval '${h} hours'),
+        date_trunc('day', now()),
+        interval '1 day'
+      ) AS d
+    ))
+    OR ${alias}.last_upd_date = ANY(ARRAY(
+      SELECT to_char(d::date, 'DD.MM.YYYY')
+      FROM generate_series(
+        date_trunc('day', now() - interval '${h} hours'),
+        date_trunc('day', now()),
+        interval '1 day'
+      ) AS d
+    ))
   )`;
 }
 

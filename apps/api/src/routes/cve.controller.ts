@@ -25,6 +25,7 @@ import { escapePgLikePattern } from "../pg-like.util.js";
 import { CveEnrichRunnerService } from "../services/cve-enrich-runner.service.js";
 import { CveNvdImportService } from "../services/cve-nvd-import.service.js";
 import { DbService } from "../services/db.service.js";
+import { IntegrationSettingsService } from "../services/integration-settings.service.js";
 
 type EnrichmentAiQueryRow = {
   model?: string;
@@ -127,7 +128,8 @@ export class CveController {
   constructor(
     private readonly db: DbService,
     private readonly enrichRunner: CveEnrichRunnerService,
-    private readonly nvdImport: CveNvdImportService
+    private readonly nvdImport: CveNvdImportService,
+    private readonly integration: IntegrationSettingsService
   ) {}
 
   private buildCveLinks(cveId: string) {
@@ -763,11 +765,27 @@ export class CveController {
     if ((r.rowCount ?? 0) === 0) throw new NotFoundException("CVE not found");
 
     const forceOn = force === "true" || force === "1";
+    const textEngine = await this.integration.getTextEngineSettings();
     const cveRow = r.rows[0]!;
     const publishedIso =
       (cveRow.published_at ? parseNvdTimestampIso(cveRow.published_at.toISOString()) : undefined) ??
       extractNvdPublishedIso(cveRow.raw);
     const inHotWindow = isPublishedWithinHours(publishedIso, CVE_HOT_WINDOW_HOURS);
+
+    if (textEngine.textEngine !== "llm") {
+      const res = await this.enrichRunner.enrichNow(cveId, {
+        force: forceOn,
+        allowOutsideHotWindow: true
+      });
+      return {
+        ok: Boolean(res) || !forceOn,
+        status: res ? ("ready" as const) : forceOn ? ("failed" as const) : ("cached" as const),
+        cveId,
+        textEngine: textEngine.textEngine,
+        output_json: res?.outputJson ?? null,
+        output_text: res?.outputText ?? null
+      };
+    }
 
     if (!forceOn && !inHotWindow) {
       return {
@@ -929,6 +947,7 @@ export class CveController {
       found: true,
       cve: cve.rows[0],
       links: this.buildCveLinks(cveId),
+      textEngine: (await this.integration.getTextEngineSettings()).textEngine,
       exploitIntel: {
         signals: exploitSignals.rows.map((r) => ({
           signal_type: r.signal_type,

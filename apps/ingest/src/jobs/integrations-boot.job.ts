@@ -34,11 +34,15 @@ export class IntegrationsBootJob implements OnModuleInit {
   }
 
   private async runBoot() {
+    // Sequential after long AFK — avoid concurrent EPSS + TI + NVD heap spikes.
+    const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
     if (process.env.DLQ_BOOT_RETRY !== "false") {
       await this.retryDlqIfNeeded();
+      await pause(Number(process.env.INTEGRATIONS_BOOT_STEP_PAUSE_MS ?? 1500));
     }
     if (process.env.EPSS_BOOT_ON_START !== "false") {
       await this.bootEpssIfNeeded();
+      await pause(Number(process.env.INTEGRATIONS_BOOT_STEP_PAUSE_MS ?? 1500));
     }
     if (process.env.HOT24_SCORE_BOOT !== "false") {
       await this.bootHot24ScoreSweep();
@@ -84,9 +88,16 @@ export class IntegrationsBootJob implements OnModuleInit {
     const countR = await this.db.query<{ c: string }>(`SELECT COUNT(*)::text AS c FROM epss_score`);
     const count = Number(countR.rows[0]?.c ?? "0");
     const force = process.env.EPSS_BOOT_FORCE === "true";
-    if (!force && count > 0) {
+    const staleHours = Math.max(1, Number(process.env.EPSS_BOOT_STALE_HOURS ?? "24"));
+    const lastR = await this.db.query<{ ts: Date | null }>(
+      `SELECT MAX(ts) AS ts FROM audit_log WHERE action IN ('epss.ingest', 'epss.watermark')`
+    );
+    const lastTs = lastR.rows[0]?.ts ? new Date(lastR.rows[0].ts).getTime() : 0;
+    const lagH = lastTs > 0 ? (Date.now() - lastTs) / 3_600_000 : Number.POSITIVE_INFINITY;
+    const stale = !Number.isFinite(lagH) || lagH > staleHours;
+    if (!force && count > 0 && !stale) {
       // eslint-disable-next-line no-console
-      console.log(`[ingest:integrations-boot] epss skip (rows=${count})`);
+      console.log(`[ingest:integrations-boot] epss skip (rows=${count}, lag=${lagH.toFixed(1)}h)`);
       return;
     }
 

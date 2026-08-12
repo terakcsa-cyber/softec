@@ -11,13 +11,15 @@ import {
 } from "@nestjs/common";
 import {
   bduFstecUrl,
-  isLlmEnrichFailureRow,
-  isLlmNotConfiguredEnrichment,
+  isMatureEnrichmentForTextEngine,
   normalizeBduId,
-  sqlBduFstecAttentionWithinHours
+  resolveBduCardEnrichment,
+  sqlBduFstecAttentionWithinHours,
+  type TextEngineMode
 } from "@vuln-intel/shared";
 import { BduEnrichRunnerService } from "../services/bdu-enrich-runner.service.js";
 import { DbService } from "../services/db.service.js";
+import { IntegrationSettingsService } from "../services/integration-settings.service.js";
 import { escapePgLikePattern } from "../pg-like.util.js";
 
 type EnrichmentBduQueryRow = {
@@ -45,22 +47,20 @@ const ENRICHMENT_BDU_RECENT_LIMIT = 20;
 function pickAiPayloadForGet(rows: EnrichmentBduQueryRow[]): EnrichmentBduQueryRow | null {
   if (!rows.length) return null;
   const normalized = rows.map(normalizeEnrichmentOutputJson);
-  const successes = normalized.filter(
-    (r) => !isLlmNotConfiguredEnrichment(r) && !isLlmEnrichFailureRow(r)
+  const successes = normalized.filter((r) =>
+    isMatureEnrichmentForTextEngine(r, "baseline")
   );
   if (successes.length > 0) return successes[0] ?? null;
-  const hit = normalized.find((r) => !isLlmNotConfiguredEnrichment(r));
-  return hit ?? null;
+  return null;
 }
 
-function pickRowForEnrichCacheHit(rows: EnrichmentBduQueryRow[]): EnrichmentBduQueryRow | null {
+function pickRowForEnrichCacheHit(
+  rows: EnrichmentBduQueryRow[],
+  textEngine: TextEngineMode = "baseline"
+): EnrichmentBduQueryRow | null {
   if (!rows.length) return null;
   const normalized = rows.map(normalizeEnrichmentOutputJson);
-  return (
-    normalized.find(
-      (r) => !isLlmNotConfiguredEnrichment(r) && !isLlmEnrichFailureRow(r)
-    ) ?? null
-  );
+  return normalized.find((r) => isMatureEnrichmentForTextEngine(r, textEngine)) ?? null;
 }
 
 type BduRow = {
@@ -139,7 +139,8 @@ function parseBduSearch(qRaw: string): { bduIds: string[]; needle: string } {
 export class BduController {
   constructor(
     private readonly db: DbService,
-    private readonly enrichRunner: BduEnrichRunnerService
+    private readonly enrichRunner: BduEnrichRunnerService,
+    private readonly integration: IntegrationSettingsService
   ) {}
 
   @Post("lookup")
@@ -338,6 +339,22 @@ export class BduController {
     if ((exists.rowCount ?? 0) === 0) throw new NotFoundException();
 
     const forceOn = force === "1" || force === "true" || force === "yes";
+    const textEngine = await this.integration.getTextEngineSettings();
+    if (textEngine.textEngine !== "llm") {
+      const res = await this.enrichRunner.enrichNow(bduId, {
+        force: forceOn,
+        allowOutsideHotWindow: true
+      });
+      return {
+        ok: Boolean(res) || !forceOn,
+        queued: false,
+        cached: !res && !forceOn,
+        status: res ? ("ready" as const) : forceOn ? ("failed" as const) : ("cached" as const),
+        textEngine: textEngine.textEngine,
+        output_json: res?.outputJson ?? null,
+        output_text: res?.outputText ?? null
+      };
+    }
     const latestAi = await this.db.query<EnrichmentBduQueryRow>(
       `SELECT model, prompt_version, output_json, output_text, created_at
          FROM enrichment_bdu
@@ -346,7 +363,7 @@ export class BduController {
         LIMIT ${ENRICHMENT_BDU_RECENT_LIMIT}`,
       [bduId]
     );
-    if (!forceOn && pickRowForEnrichCacheHit(latestAi.rows) != null) {
+    if (!forceOn && pickRowForEnrichCacheHit(latestAi.rows, textEngine.textEngine) != null) {
       return { ok: true, queued: false, cached: true };
     }
     this.enrichRunner.scheduleEnrich(bduId, { force: forceOn, allowOutsideHotWindow: true });
@@ -378,12 +395,40 @@ export class BduController {
         LIMIT ${ENRICHMENT_BDU_RECENT_LIMIT}`,
       [bduId]
     );
-    const aiPayload = pickAiPayloadForGet(ai.rows);
+    const aiPayloadRaw = pickAiPayloadForGet(ai.rows);
     const fstecUrl = row.fstec_url || bduFstecUrl(row.bdu_id);
 
+    let linkedCveRaw: unknown = null;
+    const primaryLinked = linkedIds[0] ?? null;
+    if (primaryLinked) {
+      const rawR = await this.db.query<{ raw: unknown }>(
+        `SELECT raw FROM cve WHERE cve_id = $1 LIMIT 1`,
+        [primaryLinked]
+      );
+      linkedCveRaw = rawR.rows[0]?.raw ?? null;
+    }
+
+    const resolvedJson = resolveBduCardEnrichment(
+      aiPayloadRaw?.output_json ?? null,
+      bduId,
+      {
+        name: row.name,
+        description: row.description,
+        solution: row.solution,
+        software_names: row.software_names,
+        severity: row.severity,
+        exploit_status: row.exploit_status,
+        has_exploit: row.has_exploit
+      },
+      linkedCveRaw
+    );
+
+    const textEngine = await this.integration.getTextEngineSettings();
     return {
       found: true,
       bdu: mapBduRow(row, linkedIds),
+      textEngine: textEngine.textEngine,
+      linkedCveRaw,
       links: {
         fstec: fstecUrl,
         cves: linkedIds.map((cveId) => ({
@@ -391,17 +436,17 @@ export class BduController {
           nvd: `https://nvd.nist.gov/vuln/detail/${cveId}`
         }))
       },
-      ai: aiPayload
-        ? {
-            model: aiPayload.model,
-            prompt_version: aiPayload.prompt_version,
-            output_json: normalizeEnrichmentOutputJson(aiPayload).output_json,
-            output_text: aiPayload.output_text,
-            created_at: aiPayload.created_at
-              ? new Date(aiPayload.created_at).toISOString()
-              : null
-          }
-        : null
+      ai: {
+        model: aiPayloadRaw?.model ?? "bdu-baseline",
+        prompt_version: aiPayloadRaw?.prompt_version ?? "v1",
+        output_json: resolvedJson,
+        output_text:
+          aiPayloadRaw?.output_text ??
+          (typeof resolvedJson.summary === "string" ? resolvedJson.summary : null),
+        created_at: aiPayloadRaw?.created_at
+          ? new Date(aiPayloadRaw.created_at).toISOString()
+          : null
+      }
     };
   }
 

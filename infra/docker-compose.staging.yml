@@ -52,6 +52,10 @@ services:
     build:
       context: ..
       dockerfile: apps/api/Dockerfile
+      args:
+        PLATFORM_GIT_SHA: ${PLATFORM_GIT_SHA:-}
+        PLATFORM_GIT_BRANCH: ${PLATFORM_GIT_BRANCH:-}
+        PLATFORM_GIT_TAG: ${PLATFORM_GIT_TAG:-}
     restart: unless-stopped
     env_file:
       - path: ${APP_ENV_FILE:-../.env.staging}
@@ -61,6 +65,20 @@ services:
       API_HOST: 0.0.0.0
       PORT: 4001
       DEPLOY_ENV: staging
+      TLS_CERTS_DIR: /certs
+      TLS_PROXY_ADMIN_URL: http://tls-proxy:2019
+      TLS_ACME_WEBROOT: /var/www/certbot
+      CERTBOT_CONFIG_DIR: /data/letsencrypt
+      WEB_TLS_PUBLISHED_PORT: ${WEB_TLS_PUBLISHED_PORT:-8443}
+      PLATFORM_UPDATE_REPO_URL: ${PLATFORM_UPDATE_REPO_URL:-}
+      PLATFORM_UPDATE_BRANCH: ${PLATFORM_UPDATE_BRANCH:-}
+      PLATFORM_UPDATE_APPLY_ENABLED: ${PLATFORM_UPDATE_APPLY_ENABLED:-false}
+      PLATFORM_UPDATE_ENV_FILE: ${PLATFORM_UPDATE_ENV_FILE:-.env.staging}
+      PLATFORM_UPDATE_COMPOSE_FILE: ${PLATFORM_UPDATE_COMPOSE_FILE:-infra/docker-compose.staging.yml}
+    volumes:
+      - tls_staging_certs:/certs
+      - acme_staging_webroot:/var/www/certbot
+      - letsencrypt_staging_data:/data/letsencrypt
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,6 +119,32 @@ services:
       start_period: 30s
       retries: 30
 
+  tls-proxy:
+    build:
+      context: ./tls-proxy
+    restart: unless-stopped
+    environment:
+      TLS_CERTS_DIR: /certs
+    volumes:
+      - tls_staging_certs:/certs
+      - acme_staging_webroot:/var/www/certbot
+    ports:
+      - "${WEB_TLS_PUBLISHED_PORT:-8443}:443"
+      - "${WEB_TLS_HTTP_PORT:-8080}:80"
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO- http://127.0.0.1:2019/config/ >/dev/null 2>&1 || exit 1"
+        ]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 12
+
   ingest:
     build:
       context: ..
@@ -123,6 +167,27 @@ services:
       api:
         condition: service_healthy
 
+  libretranslate:
+    build:
+      context: ./translate-proxy
+    image: vuln-intel-translate-proxy:local
+    restart: unless-stopped
+    expose:
+      - "5000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5000
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/languages', timeout=3)\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
   ai:
     build:
       context: ..
@@ -141,8 +206,13 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      libretranslate:
+        condition: service_healthy
 
 volumes:
   pg_staging_data:
   redis_staging_data:
   rabbitmq_staging_data:
+  tls_staging_certs:
+  acme_staging_webroot:
+  letsencrypt_staging_data:

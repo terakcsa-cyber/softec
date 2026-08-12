@@ -4,15 +4,21 @@ import { useTheme } from "@/contexts/theme-context";
 import { Moon, Sun } from "lucide-react";
 import { cn } from "../ui/cn";
 
-export function AppearanceSettings() {
+export function AppearanceSettings({ embedded = false }: { embedded?: boolean }) {
   const { theme, setTheme } = useTheme();
 
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-border dark:bg-white/[0.04] dark:shadow-none">
-      <div className="text-sm font-medium text-fg/90">Оформление</div>
-      <p className="mt-1 text-xs text-muted">Тема интерфейса сохраняется в этом браузере.</p>
+      {!embedded ? (
+        <>
+          <div className="text-sm font-medium text-fg/90">Оформление</div>
+          <p className="mt-1 text-xs text-muted">Тема интерфейса сохраняется в этом браузере.</p>
+        </>
+      ) : (
+        <p className="text-xs text-muted">Тема сохраняется локально в этом браузере.</p>
+      )}
 
-      <div className="mt-4 flex flex-wrap gap-2">
+      <div className={cn("flex flex-wrap gap-2", embedded ? "mt-3" : "mt-4")}>
         <button
           type="button"
           onClick={() => setTheme("dark")}

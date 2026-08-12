@@ -11,7 +11,7 @@ type SetupResponse = {
   qrDataUrl?: string;
 };
 
-export function SecuritySettings() {
+export function SecuritySettings({ embedded = false }: { embedded?: boolean }) {
   const { user, logout, refreshMe } = useAuth();
   const [setup, setSetup] = useState<SetupResponse | null>(null);
   const [enableCode, setEnableCode] = useState("");
@@ -114,11 +114,16 @@ export function SecuritySettings() {
   if (!user) return null;
 
   return (
-    <div className="space-y-6">
-      <div>
-        <div className="text-sm font-medium text-fg/90">Аккаунт</div>
-        <div className="mt-1 text-sm text-muted">
-          <span className="text-fg/80">{user.email}</span>
+    <div className="space-y-5">
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-border dark:bg-white/[0.04] dark:shadow-none">
+        {!embedded ? <div className="text-sm font-medium text-fg/90">Аккаунт</div> : null}
+        <div className={embedded ? "text-sm text-muted" : "mt-1 text-sm text-muted"}>
+          <span className="text-fg/85">{user.email}</span>
+          {user.role ? (
+            <span className="ml-2 rounded-md border border-slate-200 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted dark:border-border">
+              {user.role}
+            </span>
+          ) : null}
         </div>
         <button
           type="button"

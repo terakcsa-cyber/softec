@@ -9,11 +9,11 @@ import {
   Activity,
   AlertCircle,
   ChevronRight,
+  Inbox,
   Loader2,
   Radio,
   RefreshCw,
   ShieldAlert,
-  Target,
   X,
   Bookmark,
   Briefcase,
@@ -54,6 +54,7 @@ import { isSlaBreached, slaRemainingLabel, slaTone } from "@/lib/voc-case-client
 
 type SourceTab = "all" | VocSource | "watchlist";
 type StatusTab = "active" | "open" | "claimed" | "done" | "all";
+type SectionTab = "queue" | "cases" | "watchlist" | "shift";
 
 function fmtWhen(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -65,13 +66,18 @@ function fmtWhen(iso: string | null | undefined): string {
 export function VocHomePanel({
   onOpenCve,
   onOpenBdu,
-  onOpenTgLink
+  onOpenTgLink,
+  variant = "card"
 }: {
   onOpenCve?: (cveId: string) => void;
   onOpenBdu?: (bduId: string) => void;
   onOpenTgLink?: (link: string) => void;
+  /** `page` — отдельный модуль с вкладками; `card` — компактный блок (legacy). */
+  variant?: "card" | "page";
 }) {
+  const isPage = variant === "page";
   const { userEmail, mergeItems, setStatus, pendingKey, error, clearError } = useVocQueueTriage();
+  const [section, setSection] = useState<SectionTab>("queue");
   const [sourceTab, setSourceTab] = useState<SourceTab>("all");
   const [statusTab, setStatusTab] = useState<StatusTab>("active");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -80,6 +86,7 @@ export function VocHomePanel({
   const [casePending, setCasePending] = useState(false);
 
   const liveOpts = useLiveQueryOptions();
+  const tgLiveOpts = useLiveQueryOptions(60_000);
 
   const queueQuery = useQuery({
     queryKey: ["voc", "queue", sourceTab === "tg" ? "all" : sourceTab, statusTab],
@@ -100,7 +107,7 @@ export function VocHomePanel({
       if (!res.ok) throw new Error(body.error ?? "TG feed");
       return body;
     },
-    ...liveOpts
+    ...tgLiveOpts
   });
 
   const watchlistQuery = useQuery({
@@ -120,7 +127,8 @@ export function VocHomePanel({
   const tgTriageQuery = useQuery({
     queryKey: ["voc", "triage", "tg"],
     queryFn: () => fetchVocTriageBySource("tg", 240),
-    ...liveOpts
+    enabled: sourceTab === "all" || sourceTab === "tg" || sourceTab === "watchlist",
+    ...tgLiveOpts
   });
 
   const tgTriageMap = useMemo(() => {
@@ -131,10 +139,12 @@ export function VocHomePanel({
     return map;
   }, [tgTriageQuery.data]);
 
+  const tgRecentItems = useMemo(
+    () => (tgFeedQuery.data?.items ?? []).filter((it) => isWithinLast24h(it.pubDate)),
+    [tgFeedQuery.data?.items]
+  );
+
   const tgItems = useMemo((): VocQueueItem[] => {
-    const feed = tgFeedQuery.data?.items ?? [];
-    const recent = feed.filter((it) => isWithinLast24h(it.pubDate));
-    const cveIds = [...new Set(recent.flatMap((it) => it.cveIds ?? []))].slice(0, 40);
     const intelByCve = new Map<string, TgCveIntel>();
     const apiItems = queueQuery.data?.items ?? [];
     for (const row of apiItems) {
@@ -149,10 +159,9 @@ export function VocHomePanel({
         vp_product: (row.payload.vp_product as string | null) ?? null
       });
     }
-    void cveIds;
 
     const watchlist = watchlistQuery.data ?? [];
-    const rows = buildTgCriticalRows(recent, intelByCve, { minScore: 24 });
+    const rows = buildTgCriticalRows(tgRecentItems, intelByCve, { minScore: 24 });
     return rows.map((row) => {
       const scored = scoreTgForVoc({
         score: row.score,
@@ -194,7 +203,7 @@ export function VocHomePanel({
         }
       };
     });
-  }, [tgFeedQuery.data?.items, queueQuery.data?.items, tgTriageMap, watchlistQuery.data]);
+  }, [tgRecentItems, queueQuery.data?.items, tgTriageMap, watchlistQuery.data]);
 
   const items = useMemo(() => {
     const base = queueQuery.data?.items ?? [];
@@ -248,13 +257,13 @@ export function VocHomePanel({
       open: items.filter((i) => i.status === "open").length,
       claimed: items.filter((i) => i.status === "claimed").length,
       p1: items.filter((i) => i.vocPriority === "p1").length,
-      tg: tgItems.length,
+      tg: tgRecentItems.length,
       watchlist: items.filter((i) => hasWatchlistHit(i)).length,
       cases: casesQuery.data?.length ?? items.filter((i) => i.caseId).length,
       apiTotal: s.total ?? 0,
       watchlistRules: (watchlistQuery.data ?? []).filter((r) => r.active).length
     };
-  }, [items, queueQuery.data?.stats, tgItems.length, watchlistQuery.data, casesQuery.data?.length]);
+  }, [items, queueQuery.data?.stats, tgRecentItems.length, watchlistQuery.data, casesQuery.data?.length]);
 
   async function handleCreateCase(item: VocQueueItem) {
     setCaseError(null);
@@ -346,20 +355,49 @@ export function VocHomePanel({
 
   const loading =
     queueQuery.isLoading ||
-    ((sourceTab === "all" || sourceTab === "tg") && (tgFeedQuery.isLoading || tgTriageQuery.isLoading));
+    (sourceTab === "tg" && (tgFeedQuery.isLoading || tgTriageQuery.isLoading));
   const refreshing = queueQuery.isFetching || tgFeedQuery.isFetching || tgTriageQuery.isFetching;
+  const tgFeedErrorMessage =
+    tgFeedQuery.error instanceof Error
+      ? tgFeedQuery.error.message
+      : tgFeedQuery.error
+        ? "Не удалось загрузить TG-ленту"
+        : null;
+  const tgStatLoading = tgFeedQuery.isLoading && !tgFeedQuery.data;
+  const statCards = [
+    { label: "В ленте", value: stats.total, icon: Activity },
+    { label: "P1", value: stats.p1, icon: ShieldAlert },
+    { label: "В очереди", value: stats.open, icon: CircleIcon },
+    { label: "В работе", value: stats.claimed, icon: UserIcon },
+    { label: "Кейсы", value: stats.cases, icon: Briefcase },
+    { label: "Watchlist", value: stats.watchlist, icon: Bookmark },
+    {
+      label: "TG 24ч",
+      value: stats.tg,
+      icon: Radio,
+      loading: tgStatLoading,
+      error: tgFeedErrorMessage
+    }
+  ];
 
   return (
-    <section className="rounded-2xl border border-indigo-200/70 bg-gradient-to-br from-indigo-50/60 via-white to-slate-50/80 p-5 ring-1 ring-indigo-200/40 dark:border-indigo-900/40 dark:from-indigo-950/30 dark:via-black/20 dark:to-black/30 dark:ring-indigo-800/30">
+    <section
+      className={cn(
+        isPage
+          ? "space-y-5"
+          : "rounded-2xl border border-indigo-200/70 bg-gradient-to-br from-indigo-50/60 via-white to-slate-50/80 p-5 ring-1 ring-indigo-200/40 dark:border-indigo-900/40 dark:from-indigo-950/30 dark:via-black/20 dark:to-black/30 dark:ring-indigo-800/30"
+      )}
+    >
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex items-center gap-2 text-base font-semibold tracking-tight text-fg/95">
-            <Target className="h-4 w-4 text-indigo-500" />
+            <Inbox className="h-4 w-4 text-indigo-500" />
             VOC — очередь смены
           </div>
           <p className="mt-1 max-w-3xl text-[12px] leading-relaxed text-muted">
-            Единая операционная лента: NVD, БДУ ФСТЭК и Telegram. Платформа ранжирует сигналы — вы верифицируете на
-            инфре. ↑↓ навигация, Enter — открыть карточку.
+            {isPage
+              ? "Операционная лента смены: NVD, БДУ и Telegram. Ранжирование — платформа, верификация — вы. ↑↓ навигация, Enter — открыть."
+              : "Единая операционная лента: NVD, БДУ ФСТЭК и Telegram. Платформа ранжирует сигналы — вы верифицируете на инфре. ↑↓ навигация, Enter — открыть карточку."}
           </p>
         </div>
         <button
@@ -383,16 +421,9 @@ export function VocHomePanel({
         </button>
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-7">
-        {[
-          { label: "В ленте", value: stats.total, icon: Activity },
-          { label: "P1", value: stats.p1, icon: ShieldAlert },
-          { label: "В очереди", value: stats.open, icon: CircleIcon },
-          { label: "В работе", value: stats.claimed, icon: UserIcon },
-          { label: "Кейсы", value: stats.cases, icon: Briefcase },
-          { label: "Watchlist", value: stats.watchlist, icon: Bookmark },
-          { label: "TG 24ч", value: stats.tg, icon: Radio }
-        ].map((c, i) => (
+      {(!isPage || section === "queue") ? (
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-7">
+        {statCards.map((c, i) => (
           <motion.div
             key={c.label}
             initial={{ opacity: 0, y: 6 }}
@@ -405,26 +436,82 @@ export function VocHomePanel({
               {c.label}
             </div>
             <div className="mt-0.5 text-xl font-semibold">
-              <LiveNumber value={c.value} />
+              {c.error ? (
+                <span className="text-sm font-semibold text-danger">Ошибка</span>
+              ) : c.loading ? (
+                <span className="inline-block animate-pulse tabular-nums text-muted">…</span>
+              ) : (
+                <LiveNumber value={c.value} />
+              )}
             </div>
           </motion.div>
         ))}
       </div>
+      ) : null}
 
-      <VocWatchlistPanel className="mt-4" />
-      <VocShiftPanel className="mt-4" />
-      <VocCasesPanel
-        className="mt-4"
-        currentUserEmail={userEmail}
-        onSelectRefKey={(refKey) => {
-          const idx = items.findIndex((i) => i.refKey === refKey);
-          if (idx >= 0) {
-            setKbdIndex(idx);
-            setSelectedKey(refKey);
-          }
-        }}
-      />
+      {isPage ? (
+        <div className="flex flex-wrap gap-2 border-b border-slate-200/80 pb-3 dark:border-white/10">
+          {(
+            [
+              ["queue", "Очередь", Activity],
+              ["cases", "Кейсы", Briefcase],
+              ["watchlist", "Watchlist", Bookmark],
+              ["shift", "Смена / KPI", Clock]
+            ] as const
+          ).map(([key, label, Icon]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => setSection(key)}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-[12px] font-medium transition",
+                section === key
+                  ? "border-indigo-400/45 bg-indigo-500/15 text-fg/95"
+                  : "border-slate-200 bg-white text-muted hover:text-fg/85 dark:border-white/10 dark:bg-black/25"
+              )}
+            >
+              <Icon className="h-3.5 w-3.5" />
+              {label}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <>
+          <VocWatchlistPanel className="mt-4" />
+          <VocShiftPanel className="mt-4" />
+          <VocCasesPanel
+            className="mt-4"
+            currentUserEmail={userEmail}
+            onSelectRefKey={(refKey) => {
+              const idx = items.findIndex((i) => i.refKey === refKey);
+              if (idx >= 0) {
+                setKbdIndex(idx);
+                setSelectedKey(refKey);
+              }
+            }}
+          />
+        </>
+      )}
 
+      {isPage && section === "watchlist" ? <VocWatchlistPanel className="mt-1" /> : null}
+      {isPage && section === "shift" ? <VocShiftPanel className="mt-1" /> : null}
+      {isPage && section === "cases" ? (
+        <VocCasesPanel
+          className="mt-1"
+          currentUserEmail={userEmail}
+          onSelectRefKey={(refKey) => {
+            setSection("queue");
+            const idx = items.findIndex((i) => i.refKey === refKey);
+            if (idx >= 0) {
+              setKbdIndex(idx);
+              setSelectedKey(refKey);
+            }
+          }}
+        />
+      ) : null}
+
+      {(!isPage || section === "queue") && (
+        <>
       {caseError ? (
         <div className="mt-4 flex items-start gap-2 rounded-xl border border-danger/35 bg-danger/10 px-3 py-2 text-[12px] text-danger">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -442,6 +529,13 @@ export function VocHomePanel({
           <button type="button" onClick={clearError} className="shrink-0 rounded p-0.5 hover:bg-danger/10">
             <X className="h-4 w-4" />
           </button>
+        </div>
+      ) : null}
+
+      {tgFeedErrorMessage ? (
+        <div className="mt-4 flex items-start gap-2 rounded-xl border border-danger/35 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div className="min-w-0 flex-1">Не удалось загрузить TG-ленту: {tgFeedErrorMessage}</div>
         </div>
       ) : null}
 
@@ -495,11 +589,11 @@ export function VocHomePanel({
         ))}
       </div>
 
-      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
         <div
           className={cn(
-            "max-h-[min(36rem,calc(100vh-14rem))] space-y-2 overflow-y-auto overscroll-contain pr-1",
-            "[scrollbar-width:thin]"
+            "space-y-2 overflow-y-auto overscroll-contain pr-1 [scrollbar-width:thin]",
+            isPage ? "max-h-[min(44rem,calc(100vh-16rem))]" : "max-h-[min(36rem,calc(100vh-14rem))]"
           )}
         >
           {loading ? (
@@ -708,6 +802,8 @@ export function VocHomePanel({
           )}
         </div>
       </div>
+        </>
+      )}
     </section>
   );
 }

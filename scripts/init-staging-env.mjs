@@ -65,9 +65,7 @@ const replacements = {
   METRICS_ENABLED: "true",
   METRICS_POLL_QUEUES: "true",
   RECONCILE_ENABLED: "true",
-  RECONCILE_STALE_HOURS: "12",
-  ASV_NUCLEI_ENABLED: "0",
-  MSF_ENABLED: "0"
+  RECONCILE_STALE_HOURS: "12"
 };
 
 function renderLine(line) {

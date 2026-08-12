@@ -22,7 +22,7 @@ export class ThreatIntelBootJob implements OnModuleInit {
 
   async onModuleInit() {
     if (process.env.THREAT_INTEL_BOOT_REFRESH === "false") return;
-    const delayMs = Number(process.env.THREAT_INTEL_BOOT_DELAY_MS ?? 4_000);
+    const delayMs = Number(process.env.THREAT_INTEL_BOOT_DELAY_MS ?? 45_000);
     setTimeout(() => {
       this.runBoot().catch((e) => {
         // eslint-disable-next-line no-console

@@ -17,6 +17,7 @@ import {
   initialReverseCatalogCursor,
   isPublishedWithinHours,
   listHot24CvesNeedingScore,
+  normalizeTextEngineMode,
   publishScoreEvents,
   NVD_CATALOG_FLOOR_ISO,
   NVD_CATALOG_SCAN_MODE,
@@ -30,7 +31,8 @@ import {
   resolveNvdCatalogTurboParams,
   stableJsonStringify,
   sha256Hex,
-  type NvdCatalogDoc
+  type NvdCatalogDoc,
+  type TextEngineMode
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
@@ -73,7 +75,8 @@ export class NvdIngestJob implements OnModuleInit {
     }
 
     const intervalMs = Number(process.env.NVD_POLL_INTERVAL_MS ?? 15 * 60 * 1000);
-    const initialDelayMs = Number(process.env.NVD_INITIAL_DELAY_MS ?? 12_000);
+    // After long AFK, give IntegrationsBoot (EPSS) a head start before NVD heap work.
+    const initialDelayMs = Number(process.env.NVD_INITIAL_DELAY_MS ?? 25_000);
 
     setTimeout(() => {
       void this.bootstrapCatalogBackfill();
@@ -104,29 +107,41 @@ export class NvdIngestJob implements OnModuleInit {
       }, pubHotOnStartMs);
     }
 
-    const sweepOnStartMs = Number(process.env.HOT24_AI_SWEEP_ON_START_MS ?? 8_000);
-    if (sweepOnStartMs > 0 && (process.env.HOT24_AI_SWEEP !== "false" || process.env.HOT24_SCORE_SWEEP !== "false")) {
+    const enrichSweepOnStartMs = Number(process.env.HOT24_AI_SWEEP_ON_START_MS ?? 8_000);
+    const scoreSweepOnStartMs = Number(process.env.HOT24_SCORE_SWEEP_ON_START_MS ?? 8_000);
+    const onStartMs = [enrichSweepOnStartMs, scoreSweepOnStartMs].filter((n) => n > 0);
+    // Env files often set HOT24_AI_SWEEP_ON_START_MS=0 to protect LLM; still warm text-engine maturity.
+    if (onStartMs.length === 0 && process.env.TEXT_ENGINE_BG_ENRICH !== "false") {
+      onStartMs.push(5_000);
+    }
+    if (onStartMs.length > 0) {
       setTimeout(() => {
         this.sweepHotWindowPipelines().catch((e) => {
           // eslint-disable-next-line no-console
           console.error("[ingest:nvd] hot24h sweep on start failed", e);
         });
-      }, sweepOnStartMs);
+      }, Math.min(...onStartMs));
     }
 
-    const sweepIntervalMs = Number(process.env.HOT24_AI_SWEEP_INTERVAL_MS ?? 0);
-    if (sweepIntervalMs > 0 && (process.env.HOT24_AI_SWEEP !== "false" || process.env.HOT24_SCORE_SWEEP !== "false")) {
+    const enrichSweepIntervalMs = Number(process.env.HOT24_AI_SWEEP_INTERVAL_MS ?? 0);
+    const scoreSweepIntervalMs = Number(process.env.HOT24_SCORE_SWEEP_INTERVAL_MS ?? 0);
+    const intervalCandidates = [enrichSweepIntervalMs, scoreSweepIntervalMs].filter((n) => n > 0);
+    // Text-engine maturity: aggressive default (90s) so hot cards mature quickly without waiting for NVD cycle.
+    if (intervalCandidates.length === 0 && process.env.TEXT_ENGINE_BG_ENRICH !== "false") {
+      intervalCandidates.push(90_000);
+    }
+    if (intervalCandidates.length > 0) {
       setInterval(() => {
         this.sweepHotWindowPipelines().catch((e) => {
           // eslint-disable-next-line no-console
           console.error("[ingest:nvd] hot24h sweep interval failed", e);
         });
-      }, sweepIntervalMs);
+      }, Math.min(...intervalCandidates));
     }
 
-    // Старше 24ч: по умолчанию не догоняем в фоне — только по открытию CVE в UI. Включить: BACKLOG_AI_SWEEP=true
+    // Older than 24h: baseline backlog on by default with TEXT_ENGINE_BG_ENRICH; translate/llm need BACKLOG_AI_SWEEP=true.
     const backlogOnStartMs = Number(process.env.BACKLOG_AI_SWEEP_ON_START_MS ?? 20_000);
-    if (backlogOnStartMs > 0 && process.env.BACKLOG_AI_SWEEP === "true") {
+    if (backlogOnStartMs > 0 && process.env.TEXT_ENGINE_BG_ENRICH !== "false") {
       setTimeout(() => {
         this.sweepBacklogEnrich().catch((e) => {
           // eslint-disable-next-line no-console
@@ -135,8 +150,8 @@ export class NvdIngestJob implements OnModuleInit {
       }, backlogOnStartMs);
     }
 
-    const backlogIntervalMs = Number(process.env.BACKLOG_AI_SWEEP_INTERVAL_MS ?? 30_000);
-    if (backlogIntervalMs > 0 && process.env.BACKLOG_AI_SWEEP === "true") {
+    const backlogIntervalMs = Number(process.env.BACKLOG_AI_SWEEP_INTERVAL_MS ?? 45_000);
+    if (backlogIntervalMs > 0 && process.env.TEXT_ENGINE_BG_ENRICH !== "false") {
       setInterval(() => {
         this.sweepBacklogEnrich().catch((e) => {
           // eslint-disable-next-line no-console
@@ -687,9 +702,9 @@ export class NvdIngestJob implements OnModuleInit {
       })
     );
 
-    // Фоновое ИИ: только CVE за последние 24ч (как view=last24h). Остальные — по открытию в UI (POST /enrich).
-    // Отключить весь fanout: NVD_FANOUT_ENRICH=false.
-    if (process.env.NVD_FANOUT_ENRICH !== "false" && isPublishedWithinHours(publishedAtIso)) {
+    // Background text maturity (baseline/translate) for hot-window CVEs.
+    // LLM mass fanout stays opt-in (NVD_FANOUT_ENRICH=true) to avoid Ollama overload.
+    if ((await this.isBackgroundTextEnrichEnabled("fanout")) && isPublishedWithinHours(publishedAtIso)) {
       this.queue.publish(
         "vuln.events",
         "vuln.enrich.requested.v1",
@@ -1000,6 +1015,40 @@ export class NvdIngestJob implements OnModuleInit {
     await Promise.all([this.sweepHotWindowEnrich(), this.sweepHotWindowScore()]);
   }
 
+  private async resolveTextEngineMode(): Promise<TextEngineMode> {
+    try {
+      const r = await this.db.query<{ value: unknown }>(
+        `SELECT value FROM app_integration_settings WHERE key = 'textEngine' LIMIT 1`
+      );
+      const v = r.rows[0]?.value as { textEngine?: unknown } | undefined;
+      if (v?.textEngine != null) return normalizeTextEngineMode(v.textEngine);
+    } catch {
+      // table may not exist on very first boot
+    }
+    return normalizeTextEngineMode(process.env.TEXT_ENGINE);
+  }
+
+  /**
+   * baseline: background card maturity on by default (disable with TEXT_ENGINE_BG_ENRICH=false).
+   * translate: hot24/fanout on by default; backlog opt-in (MyMemory rate limits) via BACKLOG_AI_SWEEP=true.
+   * llm: mass fanout/sweep stays opt-in to avoid Ollama overload.
+   */
+  private async isBackgroundTextEnrichEnabled(kind: "fanout" | "hot24" | "backlog"): Promise<boolean> {
+    const mode = await this.resolveTextEngineMode();
+    if (mode === "llm") {
+      if (kind === "backlog") return process.env.BACKLOG_AI_SWEEP === "true";
+      if (kind === "hot24") return process.env.HOT24_AI_SWEEP === "true";
+      return process.env.NVD_FANOUT_ENRICH === "true";
+    }
+    if (process.env.TEXT_ENGINE_BG_ENRICH === "false") return false;
+    if (kind === "backlog") {
+      // baseline is free/local — always catch up after hot window. translate/llm stay opt-in (rate limits / GPU).
+      if (mode === "baseline") return true;
+      return process.env.BACKLOG_AI_SWEEP === "true";
+    }
+    return true;
+  }
+
   /**
    * Догоняем risk_score для CVE из окна 24ч без свежего score.
    * Ключ idempotency `score:hot24h:…` — один прогон в час на CVE.
@@ -1029,14 +1078,15 @@ export class NvdIngestJob implements OnModuleInit {
   }
 
   /**
-   * Догоняем ИИ для CVE из окна 24ч, у которых нет успешной записи в enrichment_ai:
-   * бэкфилл без fanout, сбой до фикса LLM, «LLM not configured», последняя строка — enrich_error.
-   * Ключ idempotency отдельный от ingest (`enrich:hot24h:…`), чтобы после настройки Llama повторить обработку.
+   * Background text maturity for hot-window CVEs missing enrichment_ai (or baseline-only when TEXT_ENGINE=translate).
    */
   private async sweepHotWindowEnrich() {
-    if (process.env.HOT24_AI_SWEEP === "false") return;
+    if (!(await this.isBackgroundTextEnrichEnabled("hot24"))) return;
 
-    const limit = Math.max(1, Math.min(500, Number(process.env.HOT24_AI_SWEEP_LIMIT ?? 200)));
+    const mode = await this.resolveTextEngineMode();
+    const defaultLimit = mode === "baseline" ? 800 : mode === "translate" ? 120 : 200;
+    const maxLimit = mode === "baseline" ? 2000 : 500;
+    const limit = Math.max(1, Math.min(maxLimit, Number(process.env.HOT24_AI_SWEEP_LIMIT ?? defaultLimit)));
     const hourBucket = new Date();
     hourBucket.setMinutes(0, 0, 0);
     const bucket = hourBucket.toISOString().slice(0, 13);
@@ -1045,7 +1095,7 @@ export class NvdIngestJob implements OnModuleInit {
       `SELECT c.cve_id, c.raw
          FROM cve c
     LEFT JOIN LATERAL (
-          SELECT output_text, output_json
+          SELECT output_text, output_json, model, prompt_version
             FROM enrichment_ai
            WHERE cve_id = c.cve_id
         ORDER BY created_at DESC
@@ -1056,17 +1106,25 @@ export class NvdIngestJob implements OnModuleInit {
             SELECT 1
               FROM idempotency_key k
              WHERE k.scope = 'ai.enrich'
-               AND k.key = ('enrich:hot24h:' || c.cve_id || ':' || $2::text)
+               AND k.key = ('enrich:hot24h:' || c.cve_id || ':' || $2::text || ':' || $3::text)
           )
           AND (
             latest.output_text IS NULL
             OR latest.output_text = 'LLM not configured.'
             OR COALESCE(latest.output_json->>'summary', '') LIKE 'LLM not configured%'
             OR (latest.output_json @> '{"_enrich_error": true}'::jsonb)
+            OR (
+              $3::text = 'translate'
+              AND NOT (
+                latest.model = 'translate'
+                OR latest.prompt_version = 'translate-v1'
+                OR COALESCE(latest.output_json->>'_display_source', '') IN ('translated', 'baseline_ru')
+              )
+            )
           )
      ORDER BY ${SQL_EFFECTIVE_PUBLISHED_AT} DESC NULLS LAST
         LIMIT $1`,
-      [limit, bucket]
+      [limit, bucket, mode]
     );
 
     let n = 0;
@@ -1085,10 +1143,9 @@ export class NvdIngestJob implements OnModuleInit {
           type: QueueEventType.EnrichCveRequested,
           ts: new Date().toISOString(),
           producer: { service: "ingest", version: "0.0.1" },
-          idempotencyKey: `enrich:hot24h:${row.cve_id}:${bucket}`,
+          idempotencyKey: `enrich:hot24h:${row.cve_id}:${bucket}:${mode}`,
           payload: {
             cveId: row.cve_id,
-            // VulnerabilitySourceSchema: nvd | mitre | other — sweep не отдельный enum
             source: "other",
             raw: rawObj
           }
@@ -1099,17 +1156,21 @@ export class NvdIngestJob implements OnModuleInit {
     }
     if (n > 0) {
       // eslint-disable-next-line no-console
-      console.log(`[ingest:nvd] hot24h AI sweep enqueued=${n} (limit=${limit}, bucket=${bucket})`);
+      console.log(`[ingest:nvd] hot24h text-enrich sweep enqueued=${n} (limit=${limit}, bucket=${bucket}, engine=${mode})`);
     }
   }
 
   /**
-   * Опционально: догон CVE старше 24ч в фоне. По умолчанию выкл.; включить BACKLOG_AI_SWEEP=true.
+   * Catch-up for CVEs older than 24h.
+   * baseline: on by default with TEXT_ENGINE_BG_ENRICH (set BACKLOG_AI_SWEEP=false to disable).
+   * translate/llm: opt-in via BACKLOG_AI_SWEEP=true.
    */
   private async sweepBacklogEnrich() {
-    if (process.env.BACKLOG_AI_SWEEP !== "true") return;
+    if (!(await this.isBackgroundTextEnrichEnabled("backlog"))) return;
 
-    const limit = Math.max(1, Math.min(2000, Number(process.env.BACKLOG_AI_SWEEP_LIMIT ?? 400)));
+    const mode = await this.resolveTextEngineMode();
+    const defaultLimit = mode === "baseline" ? 1000 : 400;
+    const limit = Math.max(1, Math.min(2000, Number(process.env.BACKLOG_AI_SWEEP_LIMIT ?? defaultLimit)));
     const d = new Date();
     const dayBucket = d.toISOString().slice(0, 10);
 
@@ -1117,7 +1178,7 @@ export class NvdIngestJob implements OnModuleInit {
       `SELECT c.cve_id, c.raw
          FROM cve c
     LEFT JOIN LATERAL (
-          SELECT output_text, output_json
+          SELECT output_text, output_json, model, prompt_version
             FROM enrichment_ai
            WHERE cve_id = c.cve_id
         ORDER BY created_at DESC
@@ -1129,10 +1190,18 @@ export class NvdIngestJob implements OnModuleInit {
             OR latest.output_text = 'LLM not configured.'
             OR COALESCE(latest.output_json->>'summary', '') LIKE 'LLM not configured%'
             OR (latest.output_json @> '{"_enrich_error": true}'::jsonb)
+            OR (
+              $2::text = 'translate'
+              AND NOT (
+                latest.model = 'translate'
+                OR latest.prompt_version = 'translate-v1'
+                OR COALESCE(latest.output_json->>'_display_source', '') IN ('translated', 'baseline_ru')
+              )
+            )
           )
      ORDER BY c.published_at DESC NULLS LAST
         LIMIT $1`,
-      [limit]
+      [limit, mode]
     );
 
     let n = 0;
@@ -1148,7 +1217,7 @@ export class NvdIngestJob implements OnModuleInit {
           type: QueueEventType.EnrichCveRequested,
           ts: new Date().toISOString(),
           producer: { service: "ingest", version: "0.0.1" },
-          idempotencyKey: `enrich:backlog:${row.cve_id}:${dayBucket}`,
+          idempotencyKey: `enrich:backlog:${row.cve_id}:${dayBucket}:${mode}`,
           payload: {
             cveId: row.cve_id,
             source: "other",
@@ -1161,7 +1230,7 @@ export class NvdIngestJob implements OnModuleInit {
     }
     if (n > 0) {
       // eslint-disable-next-line no-console
-      console.log(`[ingest:nvd] backlog AI sweep enqueued=${n} (limit=${limit}, day=${dayBucket})`);
+      console.log(`[ingest:nvd] backlog text-enrich sweep enqueued=${n} (limit=${limit}, day=${dayBucket}, engine=${mode})`);
     }
   }
 

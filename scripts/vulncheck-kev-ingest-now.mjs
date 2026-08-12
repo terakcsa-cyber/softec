@@ -159,7 +159,16 @@ async function main() {
       `INSERT INTO cve_exploit_signal (cve_id, signal_type, source, url, title, confidence, last_seen_at)
        VALUES ($1, 'vulncheck_kev', 'vulncheck', $2, 'VulnCheck KEV', 'high', now())
        ON CONFLICT (cve_id, signal_type, source, COALESCE(url, ''))
-       DO UPDATE SET last_seen_at = now()`,
+       DO UPDATE SET
+         title = EXCLUDED.title,
+         confidence = EXCLUDED.confidence,
+         last_seen_at = CASE
+           WHEN cve_exploit_signal.title IS DISTINCT FROM EXCLUDED.title
+             OR cve_exploit_signal.confidence IS DISTINCT FROM EXCLUDED.confidence
+             OR cve_exploit_signal.url IS DISTINCT FROM EXCLUDED.url
+           THEN now()
+           ELSE cve_exploit_signal.last_seen_at
+         END`,
       [cveId, xdbUrl ?? `vulncheck:kev:${cveId}`]
     );
 

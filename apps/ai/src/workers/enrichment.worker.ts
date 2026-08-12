@@ -4,8 +4,8 @@ import type { QueueEventEnvelope } from "@vuln-intel/shared";
 import {
   EnrichCveRequestedEventSchema,
   isLikelyOllamaOpenAiEndpoint,
-  isLlmEnrichFailureRow,
   isLlmNotConfiguredEnrichment,
+  isMatureEnrichmentForTextEngine,
   llmEndpointRequiresApiKey,
   QueueEventEnvelopeSchema,
   QueueEventType
@@ -90,13 +90,105 @@ export class EnrichmentWorker implements OnModuleInit {
   async onModuleInit() {
     await this.queue.ensureTopology();
     const ch = this.queue.channel!;
+    const textEngineBoot = await this.llm.getTextEngineSettings();
+    const isTextEngine = textEngineBoot.textEngine !== "llm";
     const llmCfgEarly = await this.llm.getEffectiveLlmConfig();
     const defaultLlmParallel = isLikelyOllamaOpenAiEndpoint(llmCfgEarly.endpoint) ? 3 : 12;
-    const llmMaxParallelForGate = Math.max(1, Number(process.env.LLM_MAX_PARALLEL ?? defaultLlmParallel));
+    // baseline: near-instant local templates — high parallelism. translate: keep low to avoid MyMemory 429.
+    const defaultTextParallel =
+      textEngineBoot.textEngine === "baseline" ? 48 : textEngineBoot.textEngine === "translate" ? 3 : defaultLlmParallel;
+    const llmMaxParallelForGate = Math.max(
+      1,
+      Number(process.env.LLM_MAX_PARALLEL ?? (isTextEngine ? defaultTextParallel : defaultLlmParallel))
+    );
     const llmGate = new LlmConcurrencyGate(llmMaxParallelForGate);
 
+    const defaultPrefetch = isTextEngine
+      ? textEngineBoot.textEngine === "baseline"
+        ? 64
+        : 6
+      : 10;
     // Prefetch может быть > параллели к LLM: лишние сообщения ждут в gate (очередь не теряется).
-    ch.prefetch(Math.max(1, Number(process.env.AI_ENRICH_PREFETCH ?? 10)));
+    ch.prefetch(Math.max(1, Number(process.env.AI_ENRICH_PREFETCH ?? defaultPrefetch)));
+
+    const persistEnrichment = async (
+      cveId: string,
+      res: {
+        model: string;
+        promptVersion: string;
+        inputHash: string;
+        outputJson: unknown;
+        outputText?: string;
+        tokensInput?: number;
+        tokensOutput?: number;
+        costUsd?: number;
+      },
+      opts?: { cacheKey?: string | null; useRedisCache?: boolean }
+    ) => {
+      await this.db.query(
+        `INSERT INTO enrichment_ai(cve_id, model, prompt_version, input_hash, output_json, output_text, tokens_input, tokens_output, cost_usd)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+         ON CONFLICT (cve_id, model, prompt_version, input_hash) DO UPDATE SET
+           output_json = EXCLUDED.output_json,
+           output_text = EXCLUDED.output_text,
+           tokens_input = EXCLUDED.tokens_input,
+           tokens_output = EXCLUDED.tokens_output,
+           cost_usd = EXCLUDED.cost_usd`,
+        [
+          cveId,
+          res.model,
+          res.promptVersion,
+          res.inputHash,
+          JSON.stringify(res.outputJson),
+          res.outputText ?? null,
+          res.tokensInput ?? null,
+          res.tokensOutput ?? null,
+          res.costUsd ?? null
+        ]
+      );
+
+      const completed = {
+        id: uuidv4(),
+        type: QueueEventType.EnrichCveCompleted,
+        ts: new Date().toISOString(),
+        producer: { service: "ai", version: "0.0.1" },
+        idempotencyKey: `enrich-completed:${cveId}:${res.inputHash}`,
+        payload: {
+          cveId,
+          model: res.model,
+          promptVersion: res.promptVersion,
+          inputHash: res.inputHash,
+          outputJson: res.outputJson,
+          outputText: res.outputText,
+          tokensInput: res.tokensInput,
+          tokensOutput: res.tokensOutput,
+          costUsd: res.costUsd
+        }
+      };
+
+      if (
+        opts?.useRedisCache &&
+        opts.cacheKey &&
+        !isLlmNotConfiguredEnrichment({
+          output_json: res.outputJson,
+          output_text: res.outputText ?? null
+        })
+      ) {
+        const src =
+          res.outputJson && typeof res.outputJson === "object" && !Array.isArray(res.outputJson)
+            ? String((res.outputJson as Record<string, unknown>)._display_source ?? "")
+            : "";
+        // Only cache fully translated / baseline rows — not partial translate work-in-progress.
+        if (src !== "baseline_ru" || textEngineBoot.textEngine === "baseline") {
+          await this.redis.client.set(opts.cacheKey, JSON.stringify(completed), "EX", 60 * 60 * 24 * 30);
+        }
+      }
+      if (process.env.AI_LOG_ENRICH_OK !== "false") {
+        // eslint-disable-next-line no-console
+        console.log(`[ai:enrich] ok cve=${cveId} model=${res.model}`);
+      }
+      this.queue.publish("vuln.events", "vuln.enrich.completed.v1", completed);
+    };
 
     await ch.consume("ai.enrich", async (msg) => {
       if (!msg) return;
@@ -152,22 +244,25 @@ export class EnrichmentWorker implements OnModuleInit {
           }
         }
 
-        // If we already have a successful enrichment row, do not call the LLM again.
-        // This keeps the queue "real" even if producers accidentally enqueue duplicates.
-        const existing = await this.db.query<{ output_text: string | null; output_json: unknown }>(
-          `SELECT output_text, output_json
+        // If we already have a mature enrichment for the active text engine, skip.
+        const textEngineEarly = await this.llm.getTextEngineSettings();
+        const existing = await this.db.query<{
+          output_text: string | null;
+          output_json: unknown;
+          model: string | null;
+          prompt_version: string | null;
+        }>(
+          `SELECT output_text, output_json, model, prompt_version
              FROM enrichment_ai
             WHERE cve_id = $1
          ORDER BY created_at DESC
-            LIMIT 1`,
+            LIMIT 20`,
           [payload.cveId]
         );
-        const row = existing.rows[0];
-        if (
-          row &&
-          !isLlmNotConfiguredEnrichment(row) &&
-          !isLlmEnrichFailureRow({ output_json: row.output_json })
-        ) {
+        const mature = existing.rows.find((row) =>
+          isMatureEnrichmentForTextEngine(row, textEngineEarly.textEngine)
+        );
+        if (mature) {
           if (process.env.AI_LOG_DEDUPE === "true") {
             // eslint-disable-next-line no-console
             console.log(`[ai:enrich] already enriched; ack cve=${payload.cveId} key=${env.idempotencyKey}`);
@@ -193,21 +288,28 @@ export class EnrichmentWorker implements OnModuleInit {
         }
         idempotencyInserted = true;
 
+        const textEngine = textEngineEarly;
         const useRedisCache = process.env.AI_ENRICH_REDIS_CACHE !== "false";
-        const cacheKey = `ai:enrich:${payload.cveId}:${this.llm.getPromptVersion()}`;
+        const cacheVersion = textEngine.textEngine === "llm" ? this.llm.getPromptVersion() : `${textEngine.textEngine}-v1`;
+        const cacheKey = `ai:enrich:${payload.cveId}:${cacheVersion}`;
         const cached = useRedisCache ? await this.redis.client.get(cacheKey) : null;
         if (cached) {
           try {
             const evt = JSON.parse(cached) as {
-              payload?: { outputJson?: unknown; outputText?: string | null };
+              payload?: { outputJson?: unknown; outputText?: string | null; model?: string; promptVersion?: string };
             };
             const p = evt.payload;
             if (
               p &&
-              !isLlmNotConfiguredEnrichment({
-                output_json: p.outputJson,
-                output_text: p.outputText ?? null
-              })
+              isMatureEnrichmentForTextEngine(
+                {
+                  output_json: p.outputJson,
+                  output_text: p.outputText ?? null,
+                  model: p.model ?? null,
+                  prompt_version: p.promptVersion ?? null
+                },
+                textEngine.textEngine
+              )
             ) {
               if (process.env.AI_LOG_ENRICH_CACHE !== "false") {
                 // eslint-disable-next-line no-console
@@ -225,68 +327,38 @@ export class EnrichmentWorker implements OnModuleInit {
           }
         }
 
-        const res = await llmGate.use(() =>
-          this.llm.generateVulnContext({
-            cveId: payload.cveId,
-            raw: payload.raw
-          })
-        );
+        const res =
+          textEngine.textEngine === "translate"
+            ? await (async () => {
+                // Phase 1: persist baseline_ru immediately so the card is mature.
+                const quick = await llmGate.use(() =>
+                  this.llm.generateVulnContext({
+                    cveId: payload.cveId,
+                    raw: payload.raw,
+                    skipTranslate: true
+                  })
+                );
+                await persistEnrichment(payload.cveId, quick, {
+                  useRedisCache: false,
+                  cacheKey: null
+                });
+                // Phase 2: rate-limited translate upgrade (may stay baseline_ru on 429/errors).
+                return llmGate.use(() =>
+                  this.llm.generateVulnContext({
+                    cveId: payload.cveId,
+                    raw: payload.raw,
+                    skipTranslate: false
+                  })
+                );
+              })()
+            : await llmGate.use(() =>
+                this.llm.generateVulnContext({
+                  cveId: payload.cveId,
+                  raw: payload.raw
+                })
+              );
 
-        await this.db.query(
-          `INSERT INTO enrichment_ai(cve_id, model, prompt_version, input_hash, output_json, output_text, tokens_input, tokens_output, cost_usd)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-           ON CONFLICT (cve_id, model, prompt_version, input_hash) DO UPDATE SET
-             output_json = EXCLUDED.output_json,
-             output_text = EXCLUDED.output_text,
-             tokens_input = EXCLUDED.tokens_input,
-             tokens_output = EXCLUDED.tokens_output,
-             cost_usd = EXCLUDED.cost_usd`,
-          [
-            payload.cveId,
-            res.model,
-            res.promptVersion,
-            res.inputHash,
-            JSON.stringify(res.outputJson),
-            res.outputText ?? null,
-            res.tokensInput ?? null,
-            res.tokensOutput ?? null,
-            res.costUsd ?? null
-          ]
-        );
-
-        const completed = {
-          id: uuidv4(),
-          type: QueueEventType.EnrichCveCompleted,
-          ts: new Date().toISOString(),
-          producer: { service: "ai", version: "0.0.1" },
-          idempotencyKey: `enrich-completed:${payload.cveId}:${res.inputHash}`,
-          payload: {
-            cveId: payload.cveId,
-            model: res.model,
-            promptVersion: res.promptVersion,
-            inputHash: res.inputHash,
-            outputJson: res.outputJson,
-            outputText: res.outputText,
-            tokensInput: res.tokensInput,
-            tokensOutput: res.tokensOutput,
-            costUsd: res.costUsd
-          }
-        };
-
-        if (
-          useRedisCache &&
-          !isLlmNotConfiguredEnrichment({
-            output_json: res.outputJson,
-            output_text: res.outputText ?? null
-          })
-        ) {
-          await this.redis.client.set(cacheKey, JSON.stringify(completed), "EX", 60 * 60 * 24 * 30);
-        }
-        if (process.env.AI_LOG_ENRICH_OK !== "false") {
-          // eslint-disable-next-line no-console
-          console.log(`[ai:enrich] ok cve=${payload.cveId} model=${res.model}`);
-        }
-        this.queue.publish("vuln.events", "vuln.enrich.completed.v1", completed);
+        await persistEnrichment(payload.cveId, res, { useRedisCache, cacheKey });
         this.queue.ack(msg);
       } catch (err) {
         if (idempotencyInserted && env?.idempotencyKey) {
@@ -322,7 +394,7 @@ export class EnrichmentWorker implements OnModuleInit {
       }
     });
 
-    const pref = Math.max(1, Number(process.env.AI_ENRICH_PREFETCH ?? 10));
+    const pref = Math.max(1, Number(process.env.AI_ENRICH_PREFETCH ?? defaultPrefetch));
     const cfg = await this.llm.getEffectiveLlmConfig();
     const needsKey = llmEndpointRequiresApiKey(cfg.endpoint);
     const keyOk = Boolean(cfg.apiKey?.length);
@@ -333,7 +405,7 @@ export class EnrichmentWorker implements OnModuleInit {
       maxAgeRaw === undefined || maxAgeRaw === "" ? 24 : Number(maxAgeRaw);
     // eslint-disable-next-line no-console
     console.log(
-      `[ai:enrich] worker ready queue=ai.enrich prefetch=${pref} llmMaxParallel=${llmMaxParallelForGate} redisEnrichCache=${redisCache} queuePublishedMaxAgeHours=${queueMaxAgeHours <= 0 ? "off" : String(queueMaxAgeHours)} llmEndpoint=${cfg.endpoint} model=${cfg.model} needsApiKey=${needsKey} hasKey=${keyOk}`
+      `[ai:enrich] worker ready queue=ai.enrich prefetch=${pref} llmMaxParallel=${llmMaxParallelForGate} textEngine=${textEngineBoot.textEngine} redisEnrichCache=${redisCache} queuePublishedMaxAgeHours=${queueMaxAgeHours <= 0 ? "off" : String(queueMaxAgeHours)} llmEndpoint=${cfg.endpoint} model=${cfg.model} needsApiKey=${needsKey} hasKey=${keyOk}`
     );
     if (needsKey && !keyOk) {
       // eslint-disable-next-line no-console

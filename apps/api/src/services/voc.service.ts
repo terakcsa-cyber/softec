@@ -442,7 +442,15 @@ export class VocService {
       short_description: string | null;
       vuln_class: string | null;
     }>(
-      `SELECT c.cve_id, c.published_at,
+      `WITH recent_cve AS MATERIALIZED (
+        SELECT c.cve_id, c.published_at, c.cvss_base, c.raw
+          FROM cve c
+         WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} IS NOT NULL
+           AND ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '${CVE_HOT_WINDOW_HOURS} hours'
+         ORDER BY ${SQL_EFFECTIVE_PUBLISHED_AT} DESC NULLS LAST
+         LIMIT 5000
+      )
+       SELECT c.cve_id, c.published_at,
               rs.score AS risk_score, es.score AS epss, c.cvss_base,
               (k.cve_id IS NOT NULL) AS exploit_known,
               COALESCE(ei.epss_spike, false) AS epss_spike,
@@ -457,7 +465,7 @@ export class VocService {
                 ''
               ) for 180), '') AS short_description,
               ${vulnClassGuessSql} AS vuln_class
-         FROM cve c
+         FROM recent_cve c
     LEFT JOIN LATERAL (
       SELECT vp.vendor, vp.product FROM cve_vendor_product vp
        WHERE vp.cve_id = c.cve_id
@@ -472,9 +480,7 @@ export class VocService {
        WHERE ea.cve_id = c.cve_id
        ORDER BY ea.created_at DESC LIMIT 1
     ) ea1 ON TRUE
-        WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} IS NOT NULL
-          AND ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '${CVE_HOT_WINDOW_HOURS} hours'
-          AND (
+        WHERE (
             k.cve_id IS NOT NULL
             OR es.score >= 0.5
             OR c.cvss_base >= 9
@@ -546,57 +552,81 @@ export class VocService {
     const minEpss = 0.5;
     const minCvss = 9.0;
 
-    const r = await this.db.query<{
+    const candidates = await this.db.query<{
       bdu_id: string;
       name: string;
       publication_date: string | null;
       cvss_score: number | null;
       has_exploit: boolean;
-      linked_hot: boolean;
-      linked_count: number;
+      cve_ids: string[] | null;
     }>(
-      `SELECT b.bdu_id, b.name, b.publication_date, b.cvss_score, b.has_exploit,
-              EXISTS (
-                SELECT 1 FROM cve c_u
-           LEFT JOIN epss_score es_u ON es_u.cve_id = c_u.cve_id
-           LEFT JOIN kev k_u ON k_u.cve_id = c_u.cve_id
-               WHERE (k_u.cve_id IS NOT NULL OR es_u.score >= $1 OR c_u.cvss_base >= $2)
-                 AND (
-                   c_u.cve_id = ANY(b.cve_ids)
-                   OR EXISTS (SELECT 1 FROM cve_bdu_link l_u WHERE l_u.bdu_id = b.bdu_id AND l_u.cve_id = c_u.cve_id)
-                 )
-              ) AS linked_hot,
-              (
-                SELECT count(DISTINCT l.cve_id)::int FROM cve_bdu_link l WHERE l.bdu_id = b.bdu_id
-              ) AS linked_count
+      `SELECT b.bdu_id, b.name, b.publication_date, b.cvss_score, b.has_exploit, b.cve_ids
          FROM bdu_vuln b
         WHERE ${sqlBduFstecAttentionWithinHours("b", windowHours)}
-          AND (
-            b.has_exploit = true
-            OR (b.cvss_score IS NOT NULL AND b.cvss_score >= $2)
-            OR EXISTS (
-              SELECT 1 FROM cve c_u
-         LEFT JOIN epss_score es_u ON es_u.cve_id = c_u.cve_id
-         LEFT JOIN kev k_u ON k_u.cve_id = c_u.cve_id
-             WHERE (k_u.cve_id IS NOT NULL OR es_u.score >= $1 OR c_u.cvss_base >= $2)
-               AND (
-                 c_u.cve_id = ANY(b.cve_ids)
-                 OR EXISTS (SELECT 1 FROM cve_bdu_link l_u WHERE l_u.bdu_id = b.bdu_id AND l_u.cve_id = c_u.cve_id)
-               )
-            )
-          )
         ORDER BY b.cvss_score DESC NULLS LAST, b.has_exploit DESC, b.publication_date DESC NULLS LAST
-        LIMIT $3`,
-      [minEpss, minCvss, limit]
+        LIMIT $1`,
+      [Math.max(limit * 4, 500)]
     );
 
-    return r.rows.map((row) => {
+    if (candidates.rows.length === 0) return [];
+
+    const bduIds = candidates.rows.map((row) => row.bdu_id);
+    const linkRows = await this.db.query<{ bdu_id: string; cve_id: string }>(
+      `SELECT bdu_id, cve_id
+         FROM cve_bdu_link
+        WHERE bdu_id = ANY($1::text[])`,
+      [bduIds]
+    );
+
+    const linkedByBdu = new Map<string, Set<string>>();
+    const allCveIds = new Set<string>();
+    for (const row of candidates.rows) {
+      const linked = new Set((row.cve_ids ?? []).map((id) => id.trim().toUpperCase()).filter(Boolean));
+      linkedByBdu.set(row.bdu_id, linked);
+      for (const cveId of linked) allCveIds.add(cveId);
+    }
+
+    const linkCountByBdu = new Map<string, number>();
+    for (const row of linkRows.rows) {
+      const cveId = row.cve_id.trim().toUpperCase();
+      if (!cveId) continue;
+      let linked = linkedByBdu.get(row.bdu_id);
+      if (!linked) {
+        linked = new Set<string>();
+        linkedByBdu.set(row.bdu_id, linked);
+      }
+      linked.add(cveId);
+      allCveIds.add(cveId);
+      linkCountByBdu.set(row.bdu_id, (linkCountByBdu.get(row.bdu_id) ?? 0) + 1);
+    }
+
+    const hotCves = new Set<string>();
+    if (allCveIds.size > 0) {
+      const hotRows = await this.db.query<{ cve_id: string }>(
+        `SELECT c.cve_id
+           FROM cve c
+      LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+      LEFT JOIN kev k ON k.cve_id = c.cve_id
+          WHERE c.cve_id = ANY($1::text[])
+            AND (k.cve_id IS NOT NULL OR es.score >= $2 OR c.cvss_base >= $3)`,
+        [[...allCveIds], minEpss, minCvss]
+      );
+      for (const row of hotRows.rows) hotCves.add(row.cve_id.toUpperCase());
+    }
+
+    return candidates.rows.flatMap((row) => {
+      const linked = linkedByBdu.get(row.bdu_id) ?? new Set<string>();
+      const linkedHot = [...linked].some((cveId) => hotCves.has(cveId));
+      const linkedCount = linkCountByBdu.get(row.bdu_id) ?? 0;
+      if (!row.has_exploit && (row.cvss_score == null || row.cvss_score < minCvss) && !linkedHot) {
+        return [];
+      }
       const scored = scoreBduForVoc({
         bduId: row.bdu_id,
         hasExploit: row.has_exploit,
         cvssScore: row.cvss_score,
-        linkedCveCount: row.linked_count,
-        hasHotLinkedCve: row.linked_hot
+        linkedCveCount: linkedCount,
+        hasHotLinkedCve: linkedHot
       });
       const boosted = applyWatchlistBoost(
         scored,
@@ -620,12 +650,12 @@ export class VocService {
           name: row.name,
           cvss_score: row.cvss_score,
           has_exploit: row.has_exploit,
-          linked_hot: row.linked_hot,
-          linked_count: row.linked_count,
+          linked_hot: linkedHot,
+          linked_count: linkedCount,
           publication_date: row.publication_date
         }
       };
-    });
+    }).slice(0, limit);
   }
 
   private buildCveWatchlistWhere(
@@ -808,9 +838,8 @@ export class VocService {
       `SELECT b.bdu_id, b.name, b.publication_date, b.cvss_score, b.has_exploit,
               false AS linked_hot,
               (SELECT count(DISTINCT l.cve_id)::int FROM cve_bdu_link l WHERE l.bdu_id = b.bdu_id) AS linked_count
-         FROM bdu_vuln b
-        WHERE b.publication_date IS NOT NULL
-          AND b.publication_date >= now() - interval '${windowHours} hours'
+        FROM bdu_vuln b
+        WHERE ${sqlBduFstecAttentionWithinHours("b", windowHours)}
           AND ${match.clause}
         ORDER BY b.cvss_score DESC NULLS LAST, b.publication_date DESC NULLS LAST
         LIMIT $${limitIdx}`,

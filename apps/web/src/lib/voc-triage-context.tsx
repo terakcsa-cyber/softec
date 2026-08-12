@@ -18,6 +18,7 @@ import {
 } from "./voc-api";
 import { clearLegacyProcessedStorage, loadLegacyProcessedRefKeys } from "./voc-triage-migrate";
 import { parseVocRefKey } from "./voc-ref-keys";
+import { useAuth } from "@/contexts/auth-context";
 
 type TriageMap = Map<string, VocTriageStatus>;
 
@@ -43,7 +44,9 @@ function rowsToMap(rows: { refKey: string; status: VocTriageStatus }[]): TriageM
 
 export function VocTriageProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const migratedRef = useRef(false);
+  const canWrite = user?.role !== "viewer";
 
   const triageQuery = useQuery({
     queryKey: ["voc", "triage", "all"],
@@ -66,7 +69,7 @@ export function VocTriageProvider({ children }: { children: ReactNode }) {
       for (const refKey of legacy) {
         if (statusMap.get(refKey) === "done" || statusMap.get(refKey) === "dismissed") continue;
         const parsed = parseVocRefKey(refKey);
-        if (!parsed) continue;
+        if (!parsed || !canWrite) continue;
         try {
           await patchVocTriage({
             refKey,
@@ -83,7 +86,7 @@ export function VocTriageProvider({ children }: { children: ReactNode }) {
       void queryClient.invalidateQueries({ queryKey: ["voc", "triage"] });
       void queryClient.invalidateQueries({ queryKey: ["voc", "queue"] });
     })();
-  }, [triageQuery.isSuccess, statusMap, queryClient]);
+  }, [canWrite, triageQuery.isSuccess, statusMap, queryClient]);
 
   const patchMutation = useMutation({
     mutationFn: patchVocTriage,
@@ -125,6 +128,7 @@ export function VocTriageProvider({ children }: { children: ReactNode }) {
 
   const patchForKey = useCallback(
     (refKey: string, status: VocTriageStatus, opts?: { title?: string }) => {
+      if (!canWrite) return;
       const parsed = parseVocRefKey(refKey);
       if (!parsed) return;
       patchMutation.mutate({
@@ -135,7 +139,7 @@ export function VocTriageProvider({ children }: { children: ReactNode }) {
         title: opts?.title ?? refKey
       });
     },
-    [patchMutation]
+    [canWrite, patchMutation]
   );
 
   const value = useMemo<VocTriageContextValue>(

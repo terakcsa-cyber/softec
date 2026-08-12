@@ -98,6 +98,19 @@ export class VocController {
     });
   }
 
+  @Get("cases/by-ref")
+  async listCasesByRef(
+    @Query("source") source?: string,
+    @Query("refId") refId?: string,
+    @Query("limit") limitRaw?: string
+  ) {
+    return this.vocCases.listCasesByRef({
+      source: (source ?? "cve") as VocSource,
+      refId: String(refId ?? ""),
+      limit: limitRaw ? Number(limitRaw) : undefined
+    });
+  }
+
   @Post("cases/from-ref")
   async createCaseFromRef(
     @CurrentUser() user: AuthUser,

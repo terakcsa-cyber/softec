@@ -25,7 +25,7 @@ export function isAdminUser(opts: {
   const role = parseUserRole(opts.role, UserRole.Analyst);
   if (role === UserRole.Admin) return true;
   const raw = opts.adminEmailsEnv?.trim();
-  if (!raw) return true; // backward-compatible dev: unset ADMIN_EMAILS → all JWT users admin
+  if (!raw) return false;
   const allow = raw
     .split(",")
     .map((s) => s.trim().toLowerCase())

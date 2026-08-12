@@ -3,11 +3,12 @@ import {
   CVE_HOT_WINDOW_HOURS,
   enrichFailureOutputJson,
   isBduPublicationInLast24h,
-  isLlmEnrichFailureRow,
-  isLlmNotConfiguredEnrichment,
+  isMatureEnrichmentForTextEngine,
   runBduContextLlm,
+  runBduTextEngine,
   sha256Hex,
-  stableJsonStringify
+  stableJsonStringify,
+  type VulnContextLlmResult
 } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
 import { RedisEnrichCacheService } from "./redis-enrich-cache.service.js";
@@ -16,6 +17,8 @@ import { IntegrationSettingsService } from "./integration-settings.service.js";
 type EnrichmentBduRow = {
   output_text: string | null;
   output_json: unknown;
+  model?: string | null;
+  prompt_version?: string | null;
 };
 
 function normalizeEnrichmentRow(row: EnrichmentBduRow): EnrichmentBduRow {
@@ -117,7 +120,11 @@ export class BduEnrichRunnerService {
     });
   }
 
-  private async run(bduId: string, force: boolean, allowOutsideHotWindow = false): Promise<void> {
+  async enrichNow(bduId: string, opts?: { force?: boolean; allowOutsideHotWindow?: boolean }): Promise<VulnContextLlmResult | null> {
+    return this.run(bduId, Boolean(opts?.force), Boolean(opts?.allowOutsideHotWindow));
+  }
+
+  private async run(bduId: string, force: boolean, allowOutsideHotWindow = false): Promise<VulnContextLlmResult | null> {
     const cfg = await this.integration.getEffectiveLlmConfig();
     const logApi = process.env.LLM_LOG_REQUESTS !== "false";
     if (logApi) {
@@ -154,7 +161,7 @@ export class BduEnrichRunnerService {
            FROM bdu_vuln WHERE bdu_id = $1 LIMIT 1`,
         [bduId]
       );
-      if ((r.rowCount ?? 0) === 0) return;
+      if ((r.rowCount ?? 0) === 0) return null;
       const row = r.rows[0]!;
 
       const inHotWindow = isBduPublicationInLast24h(row.publication_date);
@@ -163,19 +170,28 @@ export class BduEnrichRunnerService {
         console.log(
           `[api:enrich:bdu] skip (publication outside ${CVE_HOT_WINDOW_HOURS}h) bdu=${bduId} publication=${row.publication_date ?? "none"}`
         );
-        return;
+        return null;
       }
 
       if (!force) {
+        const textEngine = await this.integration.getTextEngineSettings();
         const latestAi = await this.db.query<EnrichmentBduRow>(
-          `SELECT output_text, output_json FROM enrichment_bdu
+          `SELECT output_text, output_json, model, prompt_version FROM enrichment_bdu
             WHERE bdu_id = $1 ORDER BY created_at DESC LIMIT 20`,
           [bduId]
         );
         const hit = latestAi.rows
-          .map(normalizeEnrichmentRow)
-          .find((x) => !isLlmNotConfiguredEnrichment(x) && !isLlmEnrichFailureRow(x));
-        if (hit) return;
+          .map((r) => {
+            const n = normalizeEnrichmentRow(r);
+            return {
+              output_text: n.output_text,
+              output_json: n.output_json,
+              model: r.model,
+              prompt_version: r.prompt_version
+            };
+          })
+          .find((x) => isMatureEnrichmentForTextEngine(x, textEngine.textEngine));
+        if (hit) return null;
       }
 
       const linked = await this.db.query<{
@@ -184,8 +200,9 @@ export class BduEnrichRunnerService {
         epss: number | null;
         exploit_known: boolean;
         risk_score: number | null;
+        raw: unknown;
       }>(
-        `SELECT c.cve_id, c.cvss_base, es.score AS epss, (k.cve_id IS NOT NULL) AS exploit_known, rs.score AS risk_score
+        `SELECT c.cve_id, c.cvss_base, es.score AS epss, (k.cve_id IS NOT NULL) AS exploit_known, rs.score AS risk_score, c.raw
            FROM cve_bdu_link l
            JOIN cve c ON c.cve_id = l.cve_id
            LEFT JOIN epss_score es ON es.cve_id = c.cve_id
@@ -235,8 +252,50 @@ export class BduEnrichRunnerService {
         raw.mpvmContext = mpvmContext;
       }
 
-      const res = await runBduContextLlm(bduId, raw, cfg);
-      await this.enrichCache?.invalidateForBdu(bduId, cfg.promptVersion);
+      const textEngine = await this.integration.getTextEngineSettings();
+      const linkedCveRaw = linked.rows.find((c) => c.raw != null)?.raw;
+      const bduInput = {
+        name: row.name,
+        description: row.description,
+        solution: row.solution,
+        software_names: row.software_names,
+        severity: row.severity,
+        exploit_status: row.exploit_status,
+        has_exploit: row.has_exploit
+      };
+      let res: VulnContextLlmResult;
+      if (textEngine.textEngine === "llm") {
+        res = await runBduContextLlm(bduId, raw, cfg);
+      } else if (textEngine.textEngine === "translate") {
+        const quick = await runBduTextEngine(bduId, bduInput, linkedCveRaw, textEngine, {
+          skipTranslate: true
+        });
+        await this.db.query(
+          `INSERT INTO enrichment_bdu(bdu_id, model, prompt_version, input_hash, output_json, output_text, tokens_input, tokens_output, cost_usd)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+           ON CONFLICT (bdu_id, model, prompt_version, input_hash) DO UPDATE SET
+             output_json = EXCLUDED.output_json,
+             output_text = EXCLUDED.output_text,
+             tokens_input = EXCLUDED.tokens_input,
+             tokens_output = EXCLUDED.tokens_output,
+             cost_usd = EXCLUDED.cost_usd`,
+          [
+            bduId,
+            quick.model,
+            quick.promptVersion,
+            quick.inputHash,
+            JSON.stringify(quick.outputJson),
+            quick.outputText ?? null,
+            quick.tokensInput ?? null,
+            quick.tokensOutput ?? null,
+            quick.costUsd ?? null
+          ]
+        );
+        res = await runBduTextEngine(bduId, bduInput, linkedCveRaw, textEngine);
+      } else {
+        res = await runBduTextEngine(bduId, bduInput, linkedCveRaw, textEngine);
+      }
+      await this.enrichCache?.invalidateForBdu(bduId, res.promptVersion);
 
       await this.db.query(
         `INSERT INTO enrichment_bdu(bdu_id, model, prompt_version, input_hash, output_json, output_text, tokens_input, tokens_output, cost_usd)
@@ -261,6 +320,7 @@ export class BduEnrichRunnerService {
       );
       // eslint-disable-next-line no-console
       console.log(`[api:enrich:bdu] ok ${bduId}`);
+      return res;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(`[api:enrich:bdu] failed ${bduId}`, err);
@@ -282,6 +342,7 @@ export class BduEnrichRunnerService {
         // eslint-disable-next-line no-console
         console.error(`[api:enrich:bdu] could not persist failure ${bduId}`, dbErr);
       }
+      return null;
     }
   }
 }

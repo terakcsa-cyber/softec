@@ -10,7 +10,8 @@ export class BduIngestJob implements OnModuleInit {
   async onModuleInit() {
     if (process.env.BDU_INGEST_ENABLED === "false") return;
     const intervalMs = Number(process.env.BDU_POLL_INTERVAL_MS ?? 30 * 60 * 1000);
-    const initialDelayMs = Number(process.env.BDU_INITIAL_DELAY_MS ?? 10_000);
+    // Stagger after EPSS boot / before heavy NVD overlap on long-AFK restarts.
+    const initialDelayMs = Number(process.env.BDU_INITIAL_DELAY_MS ?? 35_000);
     setTimeout(() => {
       void this.runForever(intervalMs);
     }, initialDelayMs);
@@ -75,6 +76,8 @@ export class BduIngestJob implements OnModuleInit {
     );
     await this.db.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_year_idx ON bdu_vuln (identify_year DESC NULLS LAST)`);
     await this.db.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_cvss_idx ON bdu_vuln (cvss_score DESC NULLS LAST)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_publication_date_idx ON bdu_vuln (publication_date)`);
+    await this.db.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_last_upd_date_idx ON bdu_vuln (last_upd_date)`);
     await this.db.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_cve_ids_gin ON bdu_vuln USING gin (cve_ids)`);
     await this.db.query(
       `CREATE TABLE IF NOT EXISTS cve_bdu_link (

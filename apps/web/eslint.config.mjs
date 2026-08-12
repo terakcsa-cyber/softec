@@ -17,12 +17,6 @@ export default [
       "no-extra-boolean-cast": "warn",
       "no-misleading-character-class": "warn"
     }
-  },
-  {
-    files: ["src/components/dashboard/asv-scanner-panel.tsx"],
-    rules: {
-      "@typescript-eslint/no-explicit-any": "off"
-    }
   }
 ];
 

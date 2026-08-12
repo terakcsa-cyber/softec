@@ -3,15 +3,16 @@
 import { useCallback, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api-fetch";
-import { parseAiOutputJson } from "@/lib/cve-enrich-ui";
+import { parseAiOutputJson } from "@/lib/bdu-enrich-ui";
 import { computeBduPriority, bduRiskScore } from "@/lib/bdu-priority";
 import { cn } from "../ui/cn";
 import { ExternalLink, FileDown, X } from "lucide-react";
 import { TelegramPostButton } from "./telegram-post-button";
 import { AiSummaryPanel } from "./ai-summary-panel";
+import { VulnTicketHistory } from "./vuln-ticket-history";
 import type { BduListItem } from "./bdu-card";
 
-type DetailTab = "general" | "products" | "fixes" | "sources";
+type DetailTab = "general" | "products" | "fixes" | "history" | "sources";
 
 export type BduDetail = BduListItem & {
   description?: string | null;
@@ -91,6 +92,8 @@ export type BduDetailsPayload = {
   bdu?: BduDetail | null;
   ai?: { output_json?: unknown; output_text?: unknown } | null;
   links?: { fstec?: string | null };
+  /** Optional linked CVE NVD raw for client baseline maturity. */
+  linkedCveRaw?: unknown;
 };
 
 export function BduDetailPanel({
@@ -129,7 +132,15 @@ export function BduDetailPanel({
   const payload = dataProp ?? q.data ?? null;
   const d = payload?.found ? payload.bdu ?? null : null;
   const loading = loadingProp ?? (q.isLoading && !dataProp);
-  const aiOut = useMemo(() => parseAiOutputJson(payload?.ai?.output_json ?? null), [payload?.ai]);
+  const aiOut = useMemo(
+    () =>
+      parseAiOutputJson(payload?.ai?.output_json ?? null, {
+        bduId,
+        bdu: d ?? payload?.bdu,
+        linkedCveRaw: payload?.linkedCveRaw
+      }),
+    [payload?.ai, payload?.bdu, payload?.linkedCveRaw, bduId, d]
+  );
   const hasAiSummary = Boolean(aiOut?.summary || payload?.ai?.output_text);
   const pr = useMemo(() => (d ? computeBduPriority(d) : null), [d]);
   const risk = useMemo(() => (d ? bduRiskScore(d) : null), [d]);
@@ -352,6 +363,7 @@ export function BduDetailPanel({
               ["general", "Общая"],
               ["products", "Уязвимые продукты"],
               ["fixes", "Исправления"],
+              ["history", "История"],
               ["sources", "Источники"]
             ].map(([k, label]) => (
               <button
@@ -498,6 +510,16 @@ export function BduDetailPanel({
                 <div className="text-sm text-muted">Рекомендации не указаны.</div>
               )}
             </div>
+          ) : null}
+
+          {tab === "history" ? (
+            <VulnTicketHistory
+              cveId={primaryCve}
+              bduId={bduId}
+              publishedAt={d.publicationDate ?? null}
+              modifiedAt={d.lastUpdDate ?? d.updatedAt ?? null}
+              onOpenTask={onOpenTask}
+            />
           ) : null}
 
           {tab === "sources" ? (

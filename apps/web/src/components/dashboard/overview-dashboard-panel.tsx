@@ -1,19 +1,38 @@
 "use client";
 
-import { useId, useMemo } from "react";
+import { useMemo, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { Activity, Clock, Database, Landmark, Loader2, RefreshCw, Shield, Sparkles, TrendingUp } from "lucide-react";
+import {
+  Activity,
+  ArrowRight,
+  ChevronRight,
+  Clock,
+  Inbox,
+  Loader2,
+  Radar,
+  RefreshCw,
+  ShieldAlert
+} from "lucide-react";
 import { cn } from "../ui/cn";
 import { LiveNumber } from "../ui/live-number";
 import type { HotCveRow } from "./critical-24h-board";
-import { VocHomePanel } from "./voc-home-panel";
-import { ExploitRadarWidget } from "./exploit-radar-widget";
-import { VendorLandscape } from "./vendor-landscape";
 import { computeCvePriority } from "@/lib/cve-priority";
 import { VocTriageCheckpoint, processedCardClass } from "./voc-triage-checkpoint";
 import { ExploitIntelBadges } from "./exploit-intel-badges";
 import { cveRefKey } from "@/lib/voc-ref-keys";
 import { useVocTriage } from "@/lib/voc-triage-context";
+import { VendorLandscape } from "./vendor-landscape";
+import { ReadinessBar, type ReadinessPayload } from "./readiness-bar";
+import { apiFetch } from "@/lib/api-fetch";
+import { useLiveQueryOptions } from "@/lib/live-refresh";
+import {
+  EXPLOIT_RADAR_FILTER_LABELS,
+  type ExploitRadarFilter,
+  type ExploitRadarStats
+} from "@/lib/exploit-intel-client";
+import { fetchVocKpis } from "@/lib/voc-shift-api";
+import { fetchVocQueue } from "@/lib/voc-api";
 
 export type SummaryStats = {
   totalCves: number;
@@ -29,6 +48,12 @@ export type SummaryStats = {
   cvssCount: number;
   scoredCount: number;
   aiEnrichedCount?: number;
+  /** Hot-window (published last 24h) coverage — preferred “актуальность” denominator. */
+  hot24CveCount?: number;
+  hot24AiEnrichedCount?: number;
+  hot24ScoredCount?: number;
+  hot24EpssCount?: number;
+  hot24CvssCount?: number;
   freshness?: {
     nvdWatermarkTs?: string | null;
     epssIngestTs?: string | null;
@@ -50,198 +75,37 @@ function fmtTs(iso: string | null | undefined) {
   return d.toLocaleString();
 }
 
+function fmtRel(iso: string | null | undefined) {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "—";
+  const h = (Date.now() - t) / 3_600_000;
+  if (h < 0) return "сейчас";
+  if (h < 1) return `${Math.max(1, Math.round(h * 60))}м`;
+  if (h < 48) return `${h.toFixed(1)}ч`;
+  return `${(h / 24).toFixed(1)}д`;
+}
+
+function freshnessTone(iso: string | null | undefined): string {
+  if (!iso) return "text-muted";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "text-muted";
+  const h = (Date.now() - t) / 3_600_000;
+  if (h <= 24) return "text-ok";
+  if (h <= 72) return "text-warn";
+  return "text-danger";
+}
+
+function intelHealthScore(p: { risk: number; epss: number; cvss: number; ai: number }): number {
+  const w = { risk: 0.32, epss: 0.26, cvss: 0.22, ai: 0.2 };
+  return Math.round((p.risk * w.risk + p.epss * w.epss + p.cvss * w.cvss + p.ai * w.ai) * 10) / 10;
+}
+
 function healthLabel(score: number): { label: string; cls: string } {
   if (score >= 85) return { label: "Отлично", cls: "text-ok" };
   if (score >= 65) return { label: "Хорошо", cls: "text-accent" };
   if (score >= 40) return { label: "Средне", cls: "text-warn" };
   return { label: "Слабо", cls: "text-danger" };
-}
-
-/** Weighted blend: risk & intel coverage matter most for this product. */
-function intelHealthScore(p: {
-  risk: number;
-  epss: number;
-  cvss: number;
-  ai: number;
-}): number {
-  const w = { risk: 0.32, epss: 0.26, cvss: 0.22, ai: 0.2 };
-  const raw =
-    p.risk * w.risk + p.epss * w.epss + p.cvss * w.cvss + p.ai * w.ai;
-  return Math.round(raw * 10) / 10;
-}
-
-function AnimatedMetricBar({
-  label,
-  value,
-  total,
-  gradientClass,
-  delay = 0
-}: {
-  label: string;
-  value: number;
-  total: number;
-  gradientClass: string;
-  delay?: number;
-}) {
-  const p = pct(value, total);
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between gap-2 text-[11px]">
-        <span className="text-muted">{label}</span>
-        <span className="tabular-nums text-fg/85">
-          <LiveNumber value={value} />
-          <span className="text-muted">
-            {" / "}
-            <LiveNumber value={total} />
-          </span>
-          <span className="ml-1.5 font-medium text-fg/95">
-            <LiveNumber value={p} suffix="%" />
-          </span>
-        </span>
-      </div>
-      <div className="relative h-2.5 overflow-hidden rounded-full bg-white/[0.06] ring-1 ring-white/[0.06]">
-        <motion.div
-          className={cn("h-full rounded-full bg-gradient-to-r shadow-[0_0_12px_rgba(99,102,241,0.25)]", gradientClass)}
-          initial={{ width: "0%" }}
-          animate={{ width: `${p}%` }}
-          transition={{ type: "spring", stiffness: 70, damping: 22, delay }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function HealthRing({ score }: { score: number }) {
-  const uid = useId();
-  const gradId = `health-grad-${uid}`;
-  const glowId = `health-glow-${uid}`;
-  const r = 54;
-  const stroke = 9;
-  const c = 2 * Math.PI * r;
-  const clamped = Math.min(100, Math.max(0, score));
-  const offset = c * (1 - clamped / 100);
-
-  const hl = healthLabel(clamped);
-
-  return (
-    <div className="relative flex flex-col items-center justify-center">
-      <svg width="140" height="140" viewBox="0 0 140 140" className="drop-shadow-[0_0_20px_rgba(99,102,241,0.15)]">
-        <defs>
-          <linearGradient id={gradId} x1="0%" y1="0%" x2="100%" y2="100%">
-            <stop offset="0%" stopColor="rgb(34, 197, 94)" stopOpacity="0.95" />
-            <stop offset="45%" stopColor="rgb(99, 102, 241)" stopOpacity="0.95" />
-            <stop offset="100%" stopColor="rgb(236, 72, 153)" stopOpacity="0.85" />
-          </linearGradient>
-          <filter id={glowId} x="-40%" y="-40%" width="180%" height="180%">
-            <feGaussianBlur stdDeviation="3" result="b" />
-            <feMerge>
-              <feMergeNode in="b" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
-        <circle
-          cx="70"
-          cy="70"
-          r={r}
-          fill="none"
-          stroke="rgba(255,255,255,0.08)"
-          strokeWidth={stroke}
-        />
-        <motion.circle
-          cx="70"
-          cy="70"
-          r={r}
-          fill="none"
-          stroke={`url(#${gradId})`}
-          strokeWidth={stroke}
-          strokeLinecap="round"
-          strokeDasharray={c}
-          filter={`url(#${glowId})`}
-          transform="rotate(-90 70 70)"
-          initial={{ strokeDashoffset: c }}
-          animate={{ strokeDashoffset: offset }}
-          transition={{ type: "spring", stiffness: 60, damping: 18, mass: 0.8 }}
-        />
-      </svg>
-      <div className="absolute inset-0 flex flex-col items-center justify-center pt-1">
-        <motion.div
-          className="text-3xl font-semibold tabular-nums tracking-tight text-fg/95"
-          initial={{ opacity: 0, scale: 0.92 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ delay: 0.15 }}
-        >
-          <LiveNumber value={clamped} />
-        </motion.div>
-        <div className={cn("text-[10px] font-medium uppercase tracking-wider", hl.cls)}>{hl.label}</div>
-      </div>
-    </div>
-  );
-}
-
-type BarDatum = { key: string; pct: number; color: string };
-
-function CoverageBarsChart({ data }: { data: BarDatum[] }) {
-  const w = 320;
-  const h = 120;
-  const pad = 14;
-  const slot = (w - pad * 2) / data.length;
-  const barW = Math.max(18, slot - 10);
-  const baseY = h - 26;
-  const maxBarH = h - 50;
-
-  return (
-    <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} className="overflow-visible" preserveAspectRatio="xMidYMid meet">
-      {data.map((d, i) => {
-        const x = pad + i * slot + (slot - barW) / 2;
-        const barH = (maxBarH * d.pct) / 100;
-        const y = baseY - barH;
-        const hFill = Math.max(barH, 3);
-        return (
-          <g key={d.key}>
-            <rect
-              x={x}
-              y={baseY - maxBarH}
-              width={barW}
-              height={maxBarH}
-              rx={6}
-              fill="rgba(255,255,255,0.05)"
-              stroke="rgba(255,255,255,0.06)"
-              strokeWidth={1}
-            />
-            <motion.rect
-              x={x}
-              width={barW}
-              rx={6}
-              fill={d.color}
-              initial={{ y: baseY - 3, height: 3 }}
-              animate={{ y: baseY - hFill, height: hFill }}
-              transition={{ type: "spring", stiffness: 85, damping: 18, delay: 0.06 * i }}
-            />
-            <text
-              x={x + barW / 2}
-              y={h - 8}
-              textAnchor="middle"
-              fill="rgba(255,255,255,0.5)"
-              style={{ fontSize: 10 }}
-            >
-              {d.key}
-            </text>
-            <text
-              x={x + barW / 2}
-              y={y - 4}
-              textAnchor="middle"
-              fill="rgba(255,255,255,0.65)"
-              style={{ fontSize: 9 }}
-              className="tabular-nums"
-            >
-              {d.pct.toFixed(1)}%
-            </text>
-          </g>
-        );
-      })}
-    </svg>
-  );
 }
 
 function computePerimeterScore(it: HotCveRow): { score: number; reasons: string[] } {
@@ -251,20 +115,97 @@ function computePerimeterScore(it: HotCveRow): { score: number; reasons: string[
     s += n;
     reasons.push(r);
   };
-
   if (it.perimeter_product) add(22, "edge/web/VPN продукт (CPE)");
   if (it.cvss_av_network) add(25, "CVSS AV:N (network)");
   if (it.cvss_av_network && it.cvss_pr_none) add(18, "CVSS PR:N (без привилегий)");
   if (it.cvss_av_network && it.cvss_ui_none) add(12, "CVSS UI:N (без пользователя)");
   if (it.cvss_av_network && it.cvss_ac_low) add(8, "CVSS AC:L (низкая сложность)");
-
   if (it.exploit_known) add(15, "KEV (известная эксплуатация)");
   if (typeof it.epss === "number" && it.epss >= 0.6) add(10, "EPSS ≥ 0.60");
   else if (typeof it.epss === "number" && it.epss >= 0.3) add(6, "EPSS ≥ 0.30");
+  return { score: Math.max(0, Math.min(100, Math.round(s))), reasons };
+}
 
-  // Clamp to [0..100]
-  const score = Math.max(0, Math.min(100, Math.round(s)));
-  return { score, reasons };
+function CoverageTrack({
+  label,
+  value,
+  total,
+  tone,
+  hint
+}: {
+  label: string;
+  value: number;
+  total: number;
+  tone: string;
+  hint?: string;
+}) {
+  const p = pct(value, total);
+  return (
+    <div className="min-w-0" title={hint}>
+      <div className="mb-1 flex items-baseline justify-between gap-2 text-[11px]">
+        <span className="text-muted">{label}</span>
+        <span className="tabular-nums text-fg/85">
+          <LiveNumber value={p} fractionDigits={1} suffix="%" />
+          <span className="mx-1.5 text-border" aria-hidden>
+            ·
+          </span>
+          <span className="text-muted">
+            <LiveNumber value={value} />
+            <span className="mx-0.5 opacity-70">/</span>
+            <LiveNumber value={total} />
+          </span>
+        </span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-slate-200/80 dark:bg-white/[0.06]">
+        <motion.div
+          className={cn("h-full rounded-full", tone)}
+          initial={{ width: "0%" }}
+          animate={{ width: `${p}%` }}
+          transition={{ type: "spring", stiffness: 90, damping: 22 }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function SectionHead({
+  title,
+  hint,
+  action
+}: {
+  title: string;
+  hint?: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+      <div className="min-w-0">
+        <div className="text-[13px] font-semibold tracking-tight text-fg/95">{title}</div>
+        {hint ? <p className="mt-0.5 text-[11px] leading-relaxed text-muted">{hint}</p> : null}
+      </div>
+      {action ? <div className="shrink-0">{action}</div> : null}
+    </div>
+  );
+}
+
+function LinkChip({
+  label,
+  onClick
+}: {
+  label: string;
+  onClick?: () => void;
+}) {
+  if (!onClick) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
+    >
+      {label}
+      <ChevronRight className="h-3 w-3" />
+    </button>
+  );
 }
 
 export function OverviewDashboardPanel({
@@ -276,8 +217,9 @@ export function OverviewDashboardPanel({
   onProductSelect,
   onOpenSystemHealth,
   onOpenCve,
-  onOpenBdu,
-  onOpenTgLink,
+  onOpenVoc,
+  onOpenVulns,
+  onOpenThreat,
   topPriorityCves,
   topPriorityLoading,
   onTopPriorityCveClick,
@@ -307,46 +249,115 @@ export function OverviewDashboardPanel({
   onProductSelect?: (vendor: string, product: string) => void;
   onOpenSystemHealth?: () => void;
   onOpenCve?: (cveId: string) => void;
-  onOpenBdu?: (bduId: string) => void;
-  onOpenTgLink?: (link: string) => void;
+  onOpenVoc?: () => void;
+  onOpenVulns?: () => void;
+  onOpenThreat?: () => void;
   topPriorityCves?: HotCveRow[];
   topPriorityLoading?: boolean;
   onTopPriorityCveClick?: (cveId: string) => void;
   vendorsLoading?: boolean;
-  /** Подсветка карточек, для которых открыто модальное окно. */
   dashboardHighlightCveIds?: ReadonlySet<string> | null;
   onRefresh?: () => void;
   refreshing?: boolean;
-  onExploitFilter?: (filter: import("@/lib/exploit-intel-client").ExploitRadarFilter) => void;
-  exploitFilter?: import("@/lib/exploit-intel-client").ExploitRadarFilter | null;
+  onExploitFilter?: (filter: ExploitRadarFilter) => void;
+  exploitFilter?: ExploitRadarFilter | null;
 }) {
   const { isDone } = useVocTriage();
+  const live = useLiveQueryOptions();
+
+  const readinessQ = useQuery({
+    queryKey: ["stats", "readiness", "overview"],
+    queryFn: async () => {
+      const res = await apiFetch("/api/stats/readiness", { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+      return (await res.json()) as ReadinessPayload;
+    },
+    ...live
+  });
+
+  const exploitQ = useQuery({
+    queryKey: ["stats", "exploit-radar", "overview"],
+    queryFn: async () => {
+      const res = await apiFetch("/api/stats/exploit-radar", { cache: "no-store" });
+      if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
+      return (await res.json()) as ExploitRadarStats;
+    },
+    ...live
+  });
+
+  const vocKpiQ = useQuery({
+    queryKey: ["voc", "kpis", "overview", 8],
+    queryFn: () => fetchVocKpis(8),
+    ...live
+  });
+
+  const vocQueueQ = useQuery({
+    queryKey: ["voc", "queue", "overview", "open", 8],
+    queryFn: () => fetchVocQueue({ status: "open", limit: 8 }),
+    ...live
+  });
+
   const metrics = useMemo(() => {
     if (!data) return null;
     const total = data.totalCves;
     const ai = data.aiEnrichedCount ?? 0;
-    const pRisk = pct(data.scoredCount, total);
-    const pEpss = pct(data.epssCount, total);
-    const pCvss = pct(data.cvssCount, total);
-    const pAi = pct(ai, total);
-    const health = intelHealthScore({
-      risk: pRisk,
-      epss: pEpss,
-      cvss: pCvss,
-      ai: pAi
-    });
-    const bars: BarDatum[] = [
-      { key: "Риск", pct: pRisk, color: "rgba(99, 102, 241, 0.85)" },
-      { key: "EPSS", pct: pEpss, color: "rgba(245, 158, 11, 0.9)" },
-      { key: "CVSS", pct: pCvss, color: "rgba(34, 197, 94, 0.85)" },
-      { key: "ИИ", pct: pAi, color: "rgba(236, 72, 153, 0.75)" }
-    ];
-    return { total, ai, pRisk, pEpss, pCvss, pAi, health, bars };
+    const hotTotal = data.hot24CveCount ?? data.cvesPublishedLast24hCount ?? 0;
+    const hotAi = data.hot24AiEnrichedCount ?? 0;
+    const hotScored = data.hot24ScoredCount ?? 0;
+    const hotEpss = data.hot24EpssCount ?? 0;
+    const hotCvss = data.hot24CvssCount ?? 0;
+    const useHot = hotTotal > 0;
+    const pRisk = pct(useHot ? hotScored : data.scoredCount, useHot ? hotTotal : total);
+    const pEpss = pct(useHot ? hotEpss : data.epssCount, useHot ? hotTotal : total);
+    const pCvss = pct(useHot ? hotCvss : data.cvssCount, useHot ? hotTotal : total);
+    const pAi = pct(useHot ? hotAi : ai, useHot ? hotTotal : total);
+    const health = intelHealthScore({ risk: pRisk, epss: pEpss, cvss: pCvss, ai: pAi });
+    const corpusAiPct = pct(ai, total);
+    return {
+      total,
+      ai,
+      hotTotal,
+      hotAi,
+      hotScored,
+      hotEpss,
+      hotCvss,
+      useHot,
+      pRisk,
+      pEpss,
+      pCvss,
+      pAi,
+      health,
+      corpusAiPct
+    };
   }, [data]);
+
+  const priorityRows = useMemo(() => {
+    return (topPriorityCves ?? []).slice(0, 14).map((it) => {
+      const p = computeCvePriority(it);
+      const per = computePerimeterScore(it);
+      return { it, p, per };
+    });
+  }, [topPriorityCves]);
+
+  const severityPulse = useMemo(() => {
+    const rows = topPriorityCves ?? [];
+    let critical = 0;
+    let high = 0;
+    let kev = 0;
+    let perimeter = 0;
+    for (const it of rows) {
+      const p = computeCvePriority(it);
+      if (p.level === "critical") critical += 1;
+      else if (p.level === "high") high += 1;
+      if (it.exploit_known) kev += 1;
+      if (computePerimeterScore(it).score >= 55) perimeter += 1;
+    }
+    return { critical, high, kev, perimeter, n: rows.length };
+  }, [topPriorityCves]);
 
   if (error) {
     return (
-      <div className="glass rounded-2xl border border-danger/30 bg-danger/10 p-6 text-sm text-danger">
+      <div className="rounded-xl border border-danger/30 bg-danger/10 p-5 text-sm text-danger">
         <div className="font-medium">Дашборд недоступен</div>
         <div className="mt-1 opacity-90">{error.message}</div>
       </div>
@@ -355,344 +366,544 @@ export function OverviewDashboardPanel({
 
   if (loading || !data || !metrics) {
     return (
-      <div className="glass rounded-2xl p-4">
-        <div className="space-y-3">
-          <div className="h-4 w-40 animate-pulse rounded bg-white/10" />
-          <div className="h-36 animate-pulse rounded-xl bg-white/5" />
-          <div className="h-32 animate-pulse rounded-xl bg-white/5" />
+      <div className="space-y-4">
+        <div className="h-5 w-48 animate-pulse rounded bg-slate-200/80 dark:bg-white/10" />
+        <div className="h-24 animate-pulse rounded-xl bg-slate-200/50 dark:bg-white/[0.05]" />
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+          <div className="h-72 animate-pulse rounded-xl bg-slate-200/50 dark:bg-white/[0.05]" />
+          <div className="h-72 animate-pulse rounded-xl bg-slate-200/50 dark:bg-white/[0.05]" />
         </div>
       </div>
     );
   }
 
-  const { total, ai, health, bars } = metrics;
+  const { total, ai, health, hotTotal, hotAi, hotScored, hotEpss, hotCvss, useHot, corpusAiPct } = metrics;
+  const hl = healthLabel(health);
+  const exploit = exploitQ.data;
+  const vocKpi = vocKpiQ.data;
+  const vocItems = vocQueueQ.data?.items ?? [];
+
+  const exploitTiles: { filter: ExploitRadarFilter; value: number }[] = [
+    { filter: "vckev_only", value: exploit?.vckevOnly ?? 0 },
+    { filter: "epss_spike", value: exploit?.epssSpikes ?? 0 },
+    { filter: "new_vckev_7d", value: exploit?.newVckev7d ?? 0 },
+    { filter: "has_poc", value: exploit?.withPoc ?? 0 },
+    { filter: "has_public_exploit", value: exploit?.withPublicExploit ?? 0 }
+  ];
 
   return (
-    <div className="space-y-8">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <div className="text-sm font-semibold tracking-tight">VOC · обзор смены</div>
-          <div className="mt-1 text-xs text-muted">
-            Операционный центр: единая очередь NVD / БДУ / Telegram, метрики корпуса и ландшафт вендоров.
+    <div className="space-y-5">
+      {/* Header + readiness — first viewport anchor */}
+      <div className="space-y-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h1 className="text-base font-semibold tracking-tight">Обзор</h1>
+              <span className={cn("text-[11px] font-medium tabular-nums", hl.cls)}>
+                {useHot
+                  ? `зрелость 24ч ${pct(hotAi, hotTotal).toFixed(0)}% · ${hl.label}`
+                  : `покрытие ${health.toFixed(0)} · ${hl.label}`}
+              </span>
+            </div>
+            <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-muted">
+              Оперативная картина: что требует внимания, сигналы эксплуатации, очередь VOC и свежесть источников.
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <nav className="hidden items-center gap-1 sm:flex" aria-label="Быстрый переход">
+              {[
+                { label: "VOC", onClick: onOpenVoc },
+                { label: "Уязвимости", onClick: onOpenVulns },
+                { label: "Threat", onClick: onOpenThreat },
+                { label: "Здоровье", onClick: onOpenSystemHealth }
+              ]
+                .filter((x) => x.onClick)
+                .map((x) => (
+                  <button
+                    key={x.label}
+                    type="button"
+                    onClick={x.onClick}
+                    className="rounded-md px-2 py-1 text-[11px] text-muted transition hover:bg-slate-100 hover:text-fg dark:hover:bg-white/[0.06]"
+                  >
+                    {x.label}
+                  </button>
+                ))}
+            </nav>
+            {onRefresh ? (
+              <button
+                type="button"
+                title="Обновить сводку и приоритеты"
+                onClick={() => onRefresh()}
+                disabled={refreshing}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-lg border border-border bg-white px-2.5 py-1.5 text-[11px] text-fg/90",
+                  "hover:bg-slate-50 dark:bg-black/20 dark:hover:bg-black/35",
+                  refreshing && "cursor-wait opacity-80"
+                )}
+              >
+                {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                Обновить
+              </button>
+            ) : null}
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          {onRefresh ? (
-            <button
-              type="button"
-              title="Обновить сводку и горячие CVE"
-              onClick={() => onRefresh()}
-              disabled={refreshing}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-fg/90",
-                "hover:bg-slate-100 dark:border-border dark:bg-black/20 dark:hover:bg-black/35",
-                refreshing && "cursor-wait opacity-80"
-              )}
-            >
-              {refreshing ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              ) : (
-                <RefreshCw className="h-3.5 w-3.5" />
-              )}
-              Обновить
-            </button>
+
+        <button
+          type="button"
+          onClick={onOpenSystemHealth}
+          disabled={!onOpenSystemHealth}
+          className={cn(
+            "block w-full text-left",
+            onOpenSystemHealth && "cursor-pointer transition hover:opacity-95"
+          )}
+        >
+          <ReadinessBar data={readinessQ.data} loading={readinessQ.isLoading} compact />
+        </button>
+
+        {/* Compact corpus pulse — not a card grid */}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-border/70 pb-3 text-[11px] text-muted">
+          <span>
+            CVE{" "}
+            <span className="font-semibold tabular-nums text-fg/90">
+              <LiveNumber value={total} />
+            </span>
+            {typeof data.cvesPublishedLast24hCount === "number" ? (
+              <span className="ml-1 tabular-nums">(+{data.cvesPublishedLast24hCount.toLocaleString()} /24ч)</span>
+            ) : null}
+          </span>
+          <span className="text-border">·</span>
+          <span>
+            БДУ{" "}
+            <span className="font-semibold tabular-nums text-fg/90">
+              <LiveNumber value={data.totalBduCount ?? 0} />
+            </span>
+            {typeof data.bduPublishedLast24hCount === "number" ? (
+              <span className="ml-1 tabular-nums">(+{data.bduPublishedLast24hCount.toLocaleString()} /24ч)</span>
+            ) : null}
+          </span>
+          <span className="text-border">·</span>
+          <span>
+            KEV{" "}
+            <span className="font-semibold tabular-nums text-fg/90">
+              <LiveNumber value={data.kevCount} />
+            </span>
+          </span>
+          <span className="text-border">·</span>
+          <span>
+            ИИ{" "}
+            <span className="font-semibold tabular-nums text-fg/90">
+              <LiveNumber value={useHot ? hotAi : ai} />
+            </span>
+            {useHot ? (
+              <span className="ml-1 tabular-nums">
+                / {hotTotal.toLocaleString()} за 24ч ({pct(hotAi, hotTotal)}%)
+              </span>
+            ) : null}
+          </span>
+          <span className="text-border">·</span>
+          <span>
+            Risk scored{" "}
+            <span className="font-semibold tabular-nums text-fg/90">
+              <LiveNumber value={data.scoredCount} />
+            </span>
+          </span>
+          {severityPulse.n > 0 ? (
+            <>
+              <span className="text-border">·</span>
+              <span className="inline-flex flex-wrap items-center gap-2">
+                <span className="text-danger tabular-nums">crit {severityPulse.critical}</span>
+                <span className="text-warn tabular-nums">high {severityPulse.high}</span>
+                <span className="tabular-nums">KEV {severityPulse.kev}</span>
+                <span className="tabular-nums">периметр {severityPulse.perimeter}</span>
+              </span>
+            </>
           ) : null}
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-        {[
-          { icon: Database, label: "CVE", value: total, sub: "в базе" },
-          {
-            icon: Landmark,
-            label: "БДУ",
-            value: data.totalBduCount ?? 0,
-            sub:
-              typeof data.bduPublishedLast24hCount === "number"
-                ? `${data.bduPublishedLast24hCount.toLocaleString()} за 24ч`
-                : "ФСТЭК"
-          },
-          { icon: Shield, label: "KEV", value: data.kevCount, sub: "строк каталога" },
-          { icon: Sparkles, label: "ИИ", value: ai, sub: "обогащено" },
-          { icon: Activity, label: "Scoring", value: data.scoredCount, sub: "модель риска" }
-        ].map((c, i) => (
-          <motion.div
-            key={c.label}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.04 * i }}
-            className="rounded-xl border border-slate-200/90 bg-gradient-to-br from-white to-slate-50 p-3 ring-1 ring-slate-200/60 dark:border-border dark:from-white/[0.07] dark:to-white/[0.02] dark:ring-white/[0.05]"
-          >
-            <div className="flex items-center gap-2 text-[11px] text-muted">
-              <c.icon className="h-3.5 w-3.5 opacity-90" />
-              {c.label}
+      {/* Main composition: attention + signals */}
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.95fr)] lg:items-start">
+        <section className="min-w-0">
+          <SectionHead
+            title="Очередь приоритетов"
+            hint="Топ по bank-priority + периметр (KEV / EPSS / CVSS AV:N). Клик открывает карточку CVE."
+            action={<LinkChip label="Все уязвимости" onClick={onOpenVulns} />}
+          />
+
+          {topPriorityLoading ? (
+            <div className="space-y-2">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <div key={i} className="h-9 animate-pulse rounded-md bg-slate-200/60 dark:bg-white/[0.04]" />
+              ))}
             </div>
-            <div className="mt-1.5 text-xl font-semibold tracking-tight text-fg/95">
-              <LiveNumber value={c.value} />
-            </div>
-            <div className="mt-0.5 text-[10px] text-muted/90">{c.sub}</div>
-          </motion.div>
-        ))}
-      </div>
-
-      <ExploitRadarWidget
-        onFilterSelect={onExploitFilter}
-        onOpenCve={onOpenCve}
-        activeFilter={exploitFilter}
-      />
-
-      <VocHomePanel onOpenCve={onOpenCve} onOpenBdu={onOpenBdu} onOpenTgLink={onOpenTgLink} />
-
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-5 ring-1 ring-slate-200/60 dark:border-border dark:bg-black/15 dark:ring-white/[0.05]">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="text-sm font-medium">ТОП‑20 по приоритету (банк / наружу / 443‑класс)</div>
-            <div className="mt-1 text-[11px] leading-relaxed text-muted">
-              Подборка для triage: bank‑priority + небольшой буст за периметр‑сигналы (KEV/EPSS/CVSS). В первую очередь —
-              уязвимости, которые чаще всего реально эксплуатируются “снаружи”.
-            </div>
-          </div>
-          <div className="shrink-0 text-[11px] text-muted">
-            {topPriorityLoading ? (
-              "Загрузка…"
-            ) : topPriorityCves?.length ? (
-              <LiveNumber value={topPriorityCves.length} />
-            ) : (
-              "—"
-            )}
-          </div>
-        </div>
-
-        {topPriorityLoading ? (
-          <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <div
-                key={i}
-                className="h-16 animate-pulse rounded-xl border border-slate-200/80 bg-slate-50 dark:border-white/[0.06] dark:bg-white/[0.03]"
-              />
-            ))}
-          </div>
-        ) : topPriorityCves?.length ? (
-          <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
-            {topPriorityCves.slice(0, 20).map((it) => {
-              const p = computeCvePriority(it);
-              const per = computePerimeterScore(it);
-              const pillCls =
-                p.level === "critical"
-                  ? "border-danger/30 bg-danger/15 text-danger"
-                  : p.level === "high"
-                    ? "border-warn/30 bg-warn/15 text-warn"
-                    : p.level === "medium"
-                      ? "border-accent/30 bg-accent/10 text-fg/80"
-                      : "border-ok/30 bg-ok/10 text-ok";
-              const perCls =
-                per.score >= 80
-                  ? "border-danger/30 bg-danger/10 text-danger"
-                  : per.score >= 55
-                    ? "border-warn/30 bg-warn/10 text-warn"
-                    : per.score >= 30
-                      ? "border-accent/30 bg-accent/10 text-fg/80"
-                      : "border-slate-200 bg-slate-50 text-fg/75 dark:border-white/10 dark:bg-white/5";
-              const epss =
-                typeof it.epss === "number" && Number.isFinite(it.epss)
-                  ? `${(it.epss * 100).toFixed(2)}%`
-                  : "—";
-              const cvss =
-                typeof it.cvss_base === "number" && Number.isFinite(it.cvss_base)
-                  ? it.cvss_base.toFixed(1)
-                  : "—";
-              const cveId = String(it.cve_id);
-              const processedKey = cveRefKey(cveId);
-              const done = isDone(processedKey);
-              return (
-                <button
-                  key={cveId}
-                  onClick={() => onTopPriorityCveClick?.(cveId)}
-                  className={cn(
-                    "w-full rounded-xl border border-slate-200 bg-gradient-to-br from-white to-slate-50 p-3 text-left shadow-sm transition hover:from-slate-50 hover:to-slate-100/60",
-                    "dark:border-white/[0.06] dark:from-white/[0.04] dark:to-white/[0.01] dark:shadow-none dark:hover:from-white/[0.06] dark:hover:to-white/[0.02]",
-                    done && "border-ok/25",
-                    processedCardClass(done)
-                  )}
-                  title={p.reasons.join(" • ")}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <VocTriageCheckpoint refKey={processedKey} title={cveId} compact />
-                        <div className="truncate text-sm font-semibold tracking-tight">{cveId}</div>
-                      </div>
-                      <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-fg/80">
-                        {[
-                          it.vp_vendor ?? null,
-                          it.vp_product ?? null
-                        ].filter(Boolean).join(" / ") || "—"}{" "}
-                        {it.short_ru
-                          ? `— ${String(it.short_ru)}`
-                          : it.short_description
-                            ? `— ${String(it.short_description)}`
-                            : ""}
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-muted">
-                        <span className={cn("rounded-full border px-2 py-0.5 tabular-nums", pillCls)}>
-                          Приоритет {p.score}
-                        </span>
-                        <span
-                          className={cn("rounded-full border px-2 py-0.5 tabular-nums", perCls)}
+          ) : priorityRows.length ? (
+            <div className="overflow-hidden rounded-lg border border-border/80">
+              <div className="grid grid-cols-[minmax(0,1.15fr)_64px_64px_72px_56px] gap-2 border-b border-border/70 bg-slate-50/80 px-3 py-1.5 text-[10px] uppercase tracking-wide text-muted dark:bg-white/[0.03] sm:grid-cols-[minmax(0,1.4fr)_72px_72px_80px_64px_72px]">
+                <div>CVE</div>
+                <div className="text-right">Prio</div>
+                <div className="hidden text-right sm:block">Перим.</div>
+                <div className="text-right">EPSS</div>
+                <div className="text-right">CVSS</div>
+                <div className="text-right">Risk</div>
+              </div>
+              <ul className="divide-y divide-border/60">
+                {priorityRows.map(({ it, p, per }) => {
+                  const cveId = String(it.cve_id);
+                  const done = isDone(cveRefKey(cveId));
+                  const epss =
+                    typeof it.epss === "number" && Number.isFinite(it.epss)
+                      ? `${(it.epss * 100).toFixed(1)}%`
+                      : "—";
+                  const cvss =
+                    typeof it.cvss_base === "number" && Number.isFinite(it.cvss_base)
+                      ? it.cvss_base.toFixed(1)
+                      : "—";
+                  const prioCls =
+                    p.level === "critical"
+                      ? "text-danger"
+                      : p.level === "high"
+                        ? "text-warn"
+                        : "text-fg/80";
+                  const vendorLine = [it.vp_vendor, it.vp_product].filter(Boolean).join(" / ") || "—";
+                  const short = it.short_ru || it.short_description || "";
+                  return (
+                    <li key={cveId}>
+                      <button
+                        type="button"
+                        onClick={() => onTopPriorityCveClick?.(cveId)}
+                        title={p.reasons.join(" • ")}
+                        className={cn(
+                          "grid w-full grid-cols-[minmax(0,1.15fr)_64px_64px_72px_56px] items-center gap-2 px-3 py-2 text-left transition",
+                          "hover:bg-slate-50 dark:hover:bg-white/[0.03]",
+                          "sm:grid-cols-[minmax(0,1.4fr)_72px_72px_80px_64px_72px]",
+                          done && "opacity-70",
+                          processedCardClass(done)
+                        )}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <VocTriageCheckpoint refKey={cveRefKey(cveId)} title={cveId} compact />
+                            <span className="truncate text-[12px] font-semibold tracking-tight">{cveId}</span>
+                            {it.exploit_known ? (
+                              <span className="shrink-0 text-[9px] font-medium uppercase tracking-wide text-danger">
+                                KEV
+                              </span>
+                            ) : null}
+                            <ExploitIntelBadges item={it} compact />
+                          </div>
+                          <div className="mt-0.5 truncate text-[10px] text-muted">
+                            {vendorLine}
+                            {short ? ` — ${short}` : ""}
+                          </div>
+                        </div>
+                        <div className={cn("text-right text-[12px] font-semibold tabular-nums", prioCls)}>
+                          {p.score}
+                        </div>
+                        <div
+                          className="hidden text-right text-[12px] tabular-nums text-fg/80 sm:block"
                           title={per.reasons.join(" • ")}
                         >
-                          Периметр {per.score}
-                        </span>
-                        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 tabular-nums dark:border-white/10 dark:bg-white/5">
-                          EPSS <span className="text-fg/80">{epss}</span>
-                        </span>
-                        <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 tabular-nums dark:border-white/10 dark:bg-white/5">
-                          CVSS <span className="text-fg/80">{cvss}</span>
-                        </span>
-                        {it.exploit_known ? (
-                          <span className="rounded-full border border-danger/30 bg-danger/15 px-2 py-0.5 text-danger">
-                            KEV
-                          </span>
-                        ) : null}
-                        <ExploitIntelBadges item={it} compact />
+                          {per.score}
+                        </div>
+                        <div className="text-right text-[11px] tabular-nums text-fg/80">{epss}</div>
+                        <div className="text-right text-[11px] tabular-nums text-fg/80">{cvss}</div>
+                        <div className="text-right text-[11px] font-medium tabular-nums text-fg/85">
+                          {it.risk_score ?? "—"}
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-muted">
+              Пока нет данных по приоритетам.
+            </div>
+          )}
+        </section>
+
+        <aside className="space-y-5">
+          {/* Exploit signals */}
+          <section>
+            <SectionHead
+              title="Радар эксплуатации"
+              hint="Сигналы «в дикой природе»: VCK-only, EPSS spike, PoC."
+              action={
+                onOpenThreat ? (
+                  <LinkChip label="Threat feed" onClick={onOpenThreat} />
+                ) : exploit?.lastVckevIngestAt ? (
+                  <span className="text-[10px] text-muted" title={fmtTs(exploit.lastVckevIngestAt)}>
+                    sync {fmtRel(exploit.lastVckevIngestAt)}
+                  </span>
+                ) : null
+              }
+            />
+            {exploitQ.isError ? (
+              <p className="text-xs text-danger">Не удалось загрузить радар</p>
+            ) : (
+              <>
+                <div className="grid grid-cols-5 gap-px overflow-hidden rounded-lg border border-border/80 bg-border/80">
+                  {exploitTiles.map((t) => {
+                    const meta = EXPLOIT_RADAR_FILTER_LABELS[t.filter];
+                    const active = exploitFilter === t.filter;
+                    return (
+                      <button
+                        key={t.filter}
+                        type="button"
+                        title={meta.hint}
+                        onClick={() => onExploitFilter?.(t.filter)}
+                        className={cn(
+                          "bg-white px-1.5 py-2 text-center transition dark:bg-black/25",
+                          "hover:bg-accent/5",
+                          active && "bg-accent/10 ring-1 ring-inset ring-accent/30"
+                        )}
+                      >
+                        <div className="text-[9px] uppercase tracking-wide text-muted">{meta.title}</div>
+                        <div className="mt-0.5 text-base font-semibold tabular-nums">
+                          {exploitQ.isLoading ? "…" : <LiveNumber value={t.value} />}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+                {(exploit?.highlights?.length ?? 0) > 0 ? (
+                  <ul className="mt-2 divide-y divide-border/50 rounded-lg border border-border/70">
+                    {exploit!.highlights!.slice(0, 6).map((row) => (
+                      <li key={row.cve_id}>
+                        <button
+                          type="button"
+                          onClick={() => onOpenCve?.(row.cve_id)}
+                          className="flex w-full items-center justify-between gap-2 px-2.5 py-1.5 text-left hover:bg-slate-50 dark:hover:bg-white/[0.03]"
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate text-[12px] font-semibold">{row.cve_id}</div>
+                            <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
+                              <ExploitIntelBadges item={row} compact />
+                              <span className="text-[10px] tabular-nums text-muted">
+                                EPSS{" "}
+                                {typeof row.epss === "number" ? `${(row.epss * 100).toFixed(1)}%` : "—"}
+                              </span>
+                            </div>
+                          </div>
+                          <Radar className="h-3.5 w-3.5 shrink-0 text-muted" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
+            )}
+          </section>
+
+          {/* VOC pulse */}
+          <section>
+            <SectionHead
+              title="VOC / Inbox"
+              hint="Пульс очереди смены за 8ч и открытые элементы."
+              action={<LinkChip label="Открыть VOC" onClick={onOpenVoc} />}
+            />
+            {vocKpiQ.isError && vocQueueQ.isError ? (
+              <p className="text-xs text-muted">VOC пока недоступен</p>
+            ) : (
+              <div className="space-y-2">
+                <div className="grid grid-cols-4 gap-2 text-center">
+                  {[
+                    {
+                      label: "Open",
+                      value: vocKpi?.triage.open ?? vocQueueQ.data?.stats?.open ?? 0,
+                      cls: "text-warn"
+                    },
+                    {
+                      label: "P1",
+                      value: vocKpi?.queue.p1Open ?? 0,
+                      cls: "text-danger"
+                    },
+                    {
+                      label: "Claimed",
+                      value: vocKpi?.triage.claimed ?? 0,
+                      cls: "text-accent"
+                    },
+                    {
+                      label: "Done",
+                      value: vocKpi?.triage.done ?? 0,
+                      cls: "text-ok"
+                    }
+                  ].map((c) => (
+                    <div
+                      key={c.label}
+                      className="rounded-md border border-border/70 bg-slate-50/60 px-1.5 py-2 dark:bg-white/[0.03]"
+                    >
+                      <div className="text-[9px] uppercase tracking-wide text-muted">{c.label}</div>
+                      <div className={cn("mt-0.5 text-sm font-semibold tabular-nums", c.cls)}>
+                        {vocKpiQ.isLoading ? "…" : <LiveNumber value={c.value} />}
                       </div>
                     </div>
-                    <div className="shrink-0 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] font-medium tabular-nums text-fg/80 dark:border-white/10 dark:bg-white/5">
-                      {(it.risk_score ?? "—")}
-                    </div>
+                  ))}
+                </div>
+                {(vocKpi?.cases.slaBreached ?? 0) > 0 || (vocKpi?.queue.watchlistHits ?? 0) > 0 ? (
+                  <div className="flex flex-wrap gap-3 text-[11px] text-muted">
+                    {(vocKpi?.cases.slaBreached ?? 0) > 0 ? (
+                      <span className="inline-flex items-center gap-1 text-danger">
+                        <ShieldAlert className="h-3 w-3" />
+                        SLA breach {vocKpi!.cases.slaBreached}
+                      </span>
+                    ) : null}
+                    {(vocKpi?.queue.watchlistHits ?? 0) > 0 ? (
+                      <span>Watchlist hits {vocKpi!.queue.watchlistHits}</span>
+                    ) : null}
+                    {typeof vocKpi?.tg.total24h === "number" ? (
+                      <span>TG /24ч {vocKpi.tg.total24h}</span>
+                    ) : null}
                   </div>
-                </button>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="mt-4 text-sm text-muted">Пока нет данных.</div>
-        )}
-      </section>
-
-      <div className="relative overflow-hidden rounded-2xl border border-slate-200/90 bg-gradient-to-br from-white via-slate-50 to-indigo-100/40 p-4 ring-1 ring-slate-200/70 dark:border-border dark:from-black/40 dark:via-black/25 dark:to-indigo-950/20 dark:ring-white/[0.06]">
-        <div
-          className="pointer-events-none absolute inset-0 opacity-[0.35] dark:hidden"
-          style={{
-            backgroundImage: `radial-gradient(circle at 1px 1px, rgba(15,23,42,0.06) 1px, transparent 0)`,
-            backgroundSize: "18px 18px"
-          }}
-        />
-        <div
-          className="pointer-events-none absolute inset-0 hidden opacity-[0.35] dark:block"
-          style={{
-            backgroundImage: `radial-gradient(circle at 1px 1px, rgba(255,255,255,0.07) 1px, transparent 0)`,
-            backgroundSize: "18px 18px"
-          }}
-        />
-        <div className="relative grid gap-4 lg:grid-cols-[minmax(0,1fr)_200px] lg:items-center">
-          <div>
-            <div className="mb-1 flex items-center gap-2 text-xs font-medium text-fg/90">
-              <TrendingUp className="h-3.5 w-3.5 text-accent" />
-              Покрытие интеллектом
-            </div>
-            <p className="mb-4 text-[11px] leading-relaxed text-muted">
-              Сводный индекс по заполнению risk score, EPSS, CVSS и ИИ. Столбцы — доля CVE, где поле есть, относительно
-              всей базы.
-            </p>
-            <div className="rounded-xl border border-slate-200 bg-white p-3 shadow-sm backdrop-blur-sm dark:border-white/[0.06] dark:bg-black/25 dark:shadow-none">
-              <CoverageBarsChart data={bars} />
-            </div>
-          </div>
-          <div className="flex flex-col items-center justify-center border-t border-slate-200/90 pt-4 lg:border-l lg:border-t-0 lg:pt-0 lg:pl-4 dark:border-white/[0.06]">
-            <div className="text-[10px] font-medium uppercase tracking-wider text-muted">Индекс покрытия</div>
-            <HealthRing score={health} />
-            <div className="mt-1 text-center text-[10px] text-muted">
-              Взвешенный балл{" "}
-              <span className="font-mono text-fg/80">
-                <LiveNumber value={health} />
-              </span>{" "}
-              / 100
-            </div>
-          </div>
-        </div>
-
-        <div className="relative mt-4 space-y-3.5 border-t border-slate-200/90 pt-4 dark:border-white/[0.06]">
-          <AnimatedMetricBar
-            label="Risk score посчитан"
-            value={data.scoredCount}
-            total={total}
-            gradientClass="from-indigo-500/90 via-indigo-400/70 to-violet-400/50"
-            delay={0}
-          />
-          <AnimatedMetricBar
-            label="EPSS есть"
-            value={data.epssCount}
-            total={total}
-            gradientClass="from-amber-500/90 via-amber-400/60 to-orange-400/45"
-            delay={0.06}
-          />
-          <AnimatedMetricBar
-            label="CVSS base есть"
-            value={data.cvssCount}
-            total={total}
-            gradientClass="from-emerald-500/85 via-emerald-400/55 to-teal-400/45"
-            delay={0.12}
-          />
-          <AnimatedMetricBar
-            label="ИИ‑обогащение"
-            value={ai}
-            total={total}
-            gradientClass="from-fuchsia-500/75 via-pink-400/55 to-rose-400/40"
-            delay={0.18}
-          />
-        </div>
+                ) : null}
+                {vocQueueQ.isLoading ? (
+                  <div className="space-y-1.5">
+                    {Array.from({ length: 4 }).map((_, i) => (
+                      <div key={i} className="h-8 animate-pulse rounded-md bg-slate-200/50 dark:bg-white/[0.04]" />
+                    ))}
+                  </div>
+                ) : vocItems.length ? (
+                  <ul className="divide-y divide-border/50 rounded-lg border border-border/70">
+                    {vocItems.slice(0, 6).map((item) => (
+                      <li key={item.refKey}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (item.source === "cve") onOpenCve?.(item.refId);
+                            else onOpenVoc?.();
+                          }}
+                          className="flex w-full items-start justify-between gap-2 px-2.5 py-1.5 text-left hover:bg-slate-50 dark:hover:bg-white/[0.03]"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <span
+                                className={cn(
+                                  "rounded px-1 py-0.5 text-[9px] font-medium uppercase",
+                                  item.vocPriority === "p1"
+                                    ? "bg-danger/15 text-danger"
+                                    : item.vocPriority === "p2"
+                                      ? "bg-warn/15 text-warn"
+                                      : "bg-slate-200/70 text-muted dark:bg-white/10"
+                                )}
+                              >
+                                {item.vocPriority}
+                              </span>
+                              <span className="truncate text-[12px] font-medium">{item.refId}</span>
+                            </div>
+                            <div className="mt-0.5 truncate text-[10px] text-muted">{item.title || item.subtitle}</div>
+                          </div>
+                          <Inbox className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted" />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-[11px] text-muted">
+                    Открытых элементов в очереди нет
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
+        </aside>
       </div>
 
-      <div className="rounded-2xl border border-border bg-white p-4 shadow-sm dark:bg-black/15 dark:shadow-none">
-        <div className="mb-3 flex items-center gap-2 text-xs font-medium text-fg/90">
-          <Clock className="h-3.5 w-3.5 text-muted" />
-          Актуальность данных
+      {/* Coverage + freshness — supporting detail */}
+      <section className="rounded-lg border border-border/80 px-4 py-3.5">
+        <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <div className="text-[13px] font-semibold tracking-tight">Покрытие интеллектом</div>
+            <p className="mt-0.5 text-[11px] text-muted">
+              {useHot
+                ? `Доля зрелых карточек среди CVE, опубликованных за 24ч (знаменатель ${hotTotal.toLocaleString()}). Индекс = Risk / EPSS / CVSS / ИИ.`
+                : "Доля CVE с risk score / EPSS / CVSS / ИИ относительно всей базы."}
+            </p>
+          </div>
+          <div className={cn("text-[12px] font-medium tabular-nums", hl.cls)}>
+            индекс <LiveNumber value={health} /> / 100 · {hl.label}
+          </div>
         </div>
-        <dl className="grid gap-2 text-[11px] sm:grid-cols-2">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <CoverageTrack
+            label={useHot ? "Risk score · 24ч" : "Risk score"}
+            value={useHot ? hotScored : data.scoredCount}
+            total={useHot ? hotTotal : total}
+            tone="bg-accent"
+            hint="CVE с risk_score / знаменатель окна"
+          />
+          <CoverageTrack
+            label={useHot ? "EPSS · 24ч" : "EPSS"}
+            value={useHot ? hotEpss : data.epssCount}
+            total={useHot ? hotTotal : total}
+            tone="bg-warn"
+            hint="CVE с EPSS / знаменатель окна"
+          />
+          <CoverageTrack
+            label={useHot ? "CVSS · 24ч" : "CVSS"}
+            value={useHot ? hotCvss : data.cvssCount}
+            total={useHot ? hotTotal : total}
+            tone="bg-ok"
+            hint="CVE с CVSS / знаменатель окна"
+          />
+          <CoverageTrack
+            label={useHot ? "ИИ‑зрелость · 24ч" : "ИИ‑обогащение"}
+            value={useHot ? hotAi : ai}
+            total={useHot ? hotTotal : total}
+            tone="bg-fg/40"
+            hint="CVE с зрелым enrichment_ai / знаменатель окна"
+          />
+        </div>
+        {useHot && total > 0 ? (
+          <p className="mt-2 text-[10px] text-muted">
+            Вся база (вторично): ИИ{" "}
+            <span className="tabular-nums text-fg/75">
+              {corpusAiPct}% · {ai.toLocaleString()} / {total.toLocaleString()}
+            </span>{" "}
+            CVE — полный корпус, не «актуальность за 24ч».
+          </p>
+        ) : null}
+
+        <div className="mt-4 flex flex-wrap items-center gap-x-1 gap-y-2 border-t border-border/60 pt-3 text-[11px]">
+          <span className="mr-2 inline-flex items-center gap-1 text-muted">
+            <Clock className="h-3.5 w-3.5" />
+            Актуальность
+          </span>
           {(
             [
-              ["NVD ingest", data.freshness?.nvdWatermarkTs],
-              ["БДУ ФСТЭК ingest", data.freshness?.bduIngestTs],
-              ["Лента EPSS", data.freshness?.epssIngestTs],
-              ["Каталог KEV", data.freshness?.kevIngestTs],
-              ["Последний risk score", data.freshness?.riskScoreComputedAt]
+              ["NVD", data.freshness?.nvdWatermarkTs],
+              ["БДУ", data.freshness?.bduIngestTs],
+              ["EPSS", data.freshness?.epssIngestTs],
+              ["KEV", data.freshness?.kevIngestTs],
+              ["Risk", data.freshness?.riskScoreComputedAt]
             ] as const
-          ).map(([k, v]) => (
-            <div
-              key={k}
-              className="flex justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-2 dark:border-white/[0.04] dark:bg-black/25"
-            >
-              <dt className="text-muted">{k}</dt>
-              <dd className="text-right font-mono text-[10px] text-fg/85">{fmtTs(v)}</dd>
-            </div>
-          ))}
-        </dl>
-      </div>
-
-      {onOpenSystemHealth ? (
-        <button
-          type="button"
-          onClick={onOpenSystemHealth}
-          className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-left text-xs text-fg/90 shadow-sm hover:bg-slate-100 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
-        >
-          <span className="flex items-center gap-2">
-            <Activity className="h-4 w-4 text-accent" />
-            <span>
-              <span className="font-medium">Здоровье системы</span>
-              <span className="mt-0.5 block text-[10px] text-muted">
-                Очереди, DLQ, LLM, конвейеры и управление
+          ).map(([k, v], i) => (
+            <span key={k} className="inline-flex items-center gap-1">
+              {i > 0 ? <span className="mx-1.5 text-border">·</span> : null}
+              <span className="text-muted">{k}</span>
+              <span className={cn("font-medium tabular-nums", freshnessTone(v))} title={fmtTs(v)}>
+                {fmtRel(v)}
               </span>
             </span>
-          </span>
-          <span className="text-muted">→</span>
-        </button>
-      ) : null}
+          ))}
+          {onOpenSystemHealth ? (
+            <button
+              type="button"
+              onClick={onOpenSystemHealth}
+              className="ml-auto inline-flex items-center gap-1 text-accent hover:underline"
+            >
+              <Activity className="h-3.5 w-3.5" />
+              Здоровье системы
+              <ArrowRight className="h-3 w-3" />
+            </button>
+          ) : null}
+        </div>
+      </section>
 
       {vendorsLoading ? (
         <div className="space-y-3">
           <div className="h-5 w-48 animate-pulse rounded bg-slate-200/80 dark:bg-white/10" />
-          <div className="h-64 animate-pulse rounded-2xl bg-slate-200/50 dark:bg-white/[0.05]" />
+          <div className="h-56 animate-pulse rounded-xl bg-slate-200/50 dark:bg-white/[0.05]" />
         </div>
       ) : (
         <VendorLandscape
@@ -710,11 +921,6 @@ export function OverviewDashboardPanel({
           onProductSelect={onProductSelect}
         />
       )}
-
-      <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-4 text-xs text-muted dark:border-white/10 dark:bg-black/10">
-        <span className="font-medium text-fg/80">Подсказка:</span> клик по CVE открывает плавающее окно; клик по БДУ — модуль «Уязвимости» с карточкой
-        ФСТЭК. Мониторинг очередей и DLQ — в модуле «Здоровье системы» (иконка пульса внизу слева).
-      </div>
     </div>
   );
 }

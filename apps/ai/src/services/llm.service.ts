@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { runVulnContextLlm } from "@vuln-intel/shared";
+import { runCveTextEngine, runVulnContextLlm } from "@vuln-intel/shared";
 import { IntegrationSettingsService } from "./integration-settings.service.js";
 
 @Injectable()
@@ -14,7 +14,19 @@ export class LlmService {
     return this.integration.getEffectiveLlmConfig();
   }
 
-  async generateVulnContext(input: { cveId: string; raw: Record<string, unknown> }) {
+  async getTextEngineSettings() {
+    return this.integration.getTextEngineSettings();
+  }
+
+  async generateVulnContext(input: {
+    cveId: string;
+    raw: Record<string, unknown>;
+    skipTranslate?: boolean;
+  }) {
+    const text = await this.integration.getTextEngineSettings();
+    if (text.textEngine !== "llm") {
+      return runCveTextEngine(input.cveId, input.raw, text, { skipTranslate: input.skipTranslate });
+    }
     const cfg = await this.integration.getEffectiveLlmConfig();
     return runVulnContextLlm(input.cveId, input.raw, cfg);
   }

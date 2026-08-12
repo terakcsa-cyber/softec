@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from "@nestjs/common";
 import {
+  buildVocTaskBriefFallback,
   runVocTaskBriefLlm,
   type VocPriority,
   type VocSource,
@@ -569,7 +570,6 @@ export class VulnTaskService {
       source: "voc.case"
     });
 
-    const llmCfg = await this.integration.getEffectiveLlmConfig();
     const briefInput: VocTaskBriefInput = {
       caseId: input.caseId,
       refKey: input.refKey,
@@ -585,7 +585,11 @@ export class VulnTaskService {
       bduName: input.bduName,
       tgChannel: input.tgChannel
     };
-    const brief = await runVocTaskBriefLlm(briefInput, llmCfg);
+    const textEngine = await this.integration.getTextEngineSettings();
+    const brief =
+      textEngine.textEngine === "llm"
+        ? await runVocTaskBriefLlm(briefInput, await this.integration.getEffectiveLlmConfig())
+        : buildVocTaskBriefFallback(briefInput);
     const taskTitle = brief.taskTitle?.trim() || `VOC: ${input.title}`;
 
     const r = await this.db.query<{ id: string }>(
@@ -638,21 +642,32 @@ export class VulnTaskService {
     return { ok: true, id, aiGenerated: brief.aiGenerated };
   }
 
-  async patch(taskId: string, input: Partial<{
-    title: string;
-    status: VulnTaskStatus | string;
-    priorityLocal: VulnTaskPriorityLocal;
-    owner: string | null;
-    dueDate: string | null;
-    reviewDate: string | null;
-    notesMd: string;
-    decision: string | null;
-    decisionNotes: string | null;
-    evidence: string | null;
-  }>) {
+  async patch(
+    taskId: string,
+    input: Partial<{
+      title: string;
+      status: VulnTaskStatus | string;
+      priorityLocal: VulnTaskPriorityLocal;
+      owner: string | null;
+      dueDate: string | null;
+      reviewDate: string | null;
+      notesMd: string;
+      decision: string | null;
+      decisionNotes: string | null;
+      evidence: string | null;
+    }>,
+    actor?: { email?: string | null } | null
+  ) {
     const patch = this.validatePatch(input);
-    const before = await this.db.query(`SELECT * FROM vuln_task WHERE id = $1 LIMIT 1`, [taskId]);
+    const before = await this.db.query<{ status: string; owner: string | null }>(
+      `SELECT * FROM vuln_task WHERE id = $1 LIMIT 1`,
+      [taskId]
+    );
     if ((before.rowCount ?? 0) === 0) throw new NotFoundException("Task not found");
+    const prev = before.rows[0]!;
+    const prevStatus = normalizeTaskStatus(prev.status, "new");
+    const nextStatus = patch.status !== undefined ? patch.status : prevStatus;
+    const actorEmail = typeof actor?.email === "string" ? actor.email.trim() : "";
 
     const upd: Record<string, any> = {};
     const set = (k: string, v: any) => {
@@ -663,6 +678,18 @@ export class VulnTaskService {
     set("status", patch.status);
     set("priority_local", patch.priorityLocal);
     set("owner", patch.owner === undefined ? undefined : patch.owner?.trim() || null);
+    // Taking a task into work → current user becomes исполнитель (unless owner explicitly set).
+    if (patch.status !== undefined && nextStatus === "in_progress" && prevStatus !== "in_progress") {
+      if (patch.owner === undefined && actorEmail) {
+        upd.owner = actorEmail;
+      }
+    }
+    // Back to backlog → clear assignee unless owner explicitly provided.
+    if (patch.status !== undefined && nextStatus === "new" && prevStatus !== "new") {
+      if (patch.owner === undefined) {
+        upd.owner = null;
+      }
+    }
     set("due_date", patch.dueDate === undefined ? undefined : patch.dueDate ? new Date(patch.dueDate) : null);
     set("review_date", patch.reviewDate === undefined ? undefined : patch.reviewDate ? new Date(patch.reviewDate) : null);
     set("notes_md", patch.notesMd);
@@ -765,11 +792,12 @@ export class VulnTaskService {
     const id = String(cveId ?? "").trim().toUpperCase();
     if (!/^CVE-\d{4}-\d{4,}$/.test(id)) throw new BadRequestException("Bad CVE id");
     const r = await this.db.query(
-      `SELECT t.id, t.title, t.status, t.priority_local, t.vendor_display, t.product_display, t.score_final, t.updated_at
+      `SELECT t.id, t.title, t.status, t.priority_local, t.vendor_display, t.product_display,
+              t.score_final, t.created_at, t.updated_at, l.added_at
          FROM vuln_task_cve l
          JOIN vuln_task t ON t.id = l.task_id
         WHERE l.cve_id = $1
-     ORDER BY t.score_final DESC, t.updated_at DESC
+     ORDER BY l.added_at DESC NULLS LAST, t.updated_at DESC
         LIMIT 50`,
       [id]
     );

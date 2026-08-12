@@ -134,9 +134,8 @@ export class ThreatFeedService {
       filters.push(cond.replace(/\$(\d+)/g, () => `$${params.length}`));
     };
 
-    if (q.windowHours != null) add(`s.last_seen_at >= now() - ($1::text || ' hours')::interval`, String(q.windowHours));
+    // Window is applied after CVE aggregation (see getFeed) so we keep the best signal score.
     if (q.signalType) add(`s.signal_type = $1`, q.signalType);
-    if (q.newOnly) filters.push(`s.first_seen_at >= now() - interval '24 hours'`);
     // `since` используется только для summary.sinceCount, не сужает ленту.
 
     if (q.vendorKeys.length > 0) {
@@ -177,63 +176,134 @@ export class ThreatFeedService {
     return { whereSql, params };
   }
 
+  /** CVE-level activity window on aggregated first/last seen (not sync heartbeats). */
+  private appendCveWindowFilter(
+    q: FeedQuery,
+    params: unknown[]
+  ): { sql: string; params: unknown[] } {
+    const out = [...params];
+    const parts: string[] = [];
+    if (q.windowHours != null) {
+      out.push(String(q.windowHours));
+      parts.push(
+        `(
+          cve_newest_first_seen >= now() - ($${out.length}::text || ' hours')::interval
+          OR (
+            cve_last_seen >= now() - interval '24 hours'
+            AND cve_radar_first_seen < now() - interval '24 hours'
+            AND cve_last_seen > cve_radar_first_seen + interval '1 hour'
+          )
+        )`
+      );
+    }
+    if (q.newOnly) {
+      parts.push(`cve_newest_first_seen >= now() - interval '24 hours'`);
+    }
+    return { sql: parts.length ? parts.join(" AND ") : "true", params: out };
+  }
+
   async getFeed(q: FeedQuery) {
-    const { whereSql, params } = await this.buildFilters(q);
-    const orderBy =
+    const { whereSql, params: baseParams } = await this.buildFilters(q);
+    const { sql: cveWindowSql, params } = this.appendCveWindowFilter(q, baseParams);
+    // Prefer real discovery time (first_seen). last_seen is only for genuine payload updates.
+    const orderByInner =
       q.sort === "recent"
-        ? `s.last_seen_at DESC NULLS LAST, ${THREAT_SCORE_SQL} DESC, s.cve_id ASC`
-        : `${THREAT_SCORE_SQL} DESC, s.last_seen_at DESC NULLS LAST, s.cve_id ASC`;
+        ? `cve_newest_first_seen DESC NULLS LAST, threat_score DESC, cve_id ASC`
+        : `threat_score DESC, cve_newest_first_seen DESC NULLS LAST, cve_id ASC`;
 
     const summaryR = await this.db.query<{
       total: string;
       signals24h: string;
       signals7d: string;
       new_signals24h: string;
+      updated_signals24h: string;
       hot_cves: string;
+      bucket_new_24h: string;
+      bucket_new_7d: string;
+      bucket_updated_24h: string;
+      bucket_older: string;
     }>(
-      `SELECT
-         (SELECT count(*)::text FROM cve_exploit_signal s JOIN cve c ON c.cve_id = s.cve_id ${whereSql}) AS total,
-         (SELECT count(*)::text FROM cve_exploit_signal s WHERE s.last_seen_at >= now() - interval '24 hours') AS signals24h,
-         (SELECT count(*)::text FROM cve_exploit_signal s WHERE s.last_seen_at >= now() - interval '7 days') AS signals7d,
+      `WITH scored AS (
+         SELECT s.cve_id,
+                max(s.first_seen_at) AS cve_newest_first_seen,
+                min(s.first_seen_at) AS cve_radar_first_seen,
+                max(s.last_seen_at) AS cve_last_seen,
+                max(${THREAT_SCORE_SQL}) AS threat_score
+           FROM cve_exploit_signal s
+           JOIN cve c ON c.cve_id = s.cve_id
+      LEFT JOIN cve_exploit_intel ei ON ei.cve_id = c.cve_id
+      LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+      LEFT JOIN kev k ON k.cve_id = c.cve_id
+      LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
+           ${whereSql}
+       GROUP BY s.cve_id
+       ),
+       scoped AS (
+         SELECT * FROM scored WHERE ${cveWindowSql}
+       ),
+       bucketed AS (
+         SELECT *,
+                CASE
+                  WHEN cve_newest_first_seen >= now() - interval '24 hours' THEN 'new_24h'
+                  WHEN cve_newest_first_seen >= now() - interval '7 days' THEN 'new_7d'
+                  WHEN cve_last_seen >= now() - interval '24 hours'
+                       AND cve_radar_first_seen < now() - interval '24 hours'
+                       AND cve_last_seen > cve_radar_first_seen + interval '1 hour'
+                    THEN 'updated_24h'
+                  ELSE 'older'
+                END AS time_bucket
+           FROM scoped
+       )
+       SELECT
+         (SELECT count(*)::text FROM bucketed) AS total,
+         (SELECT count(*)::text FROM cve_exploit_signal s WHERE s.first_seen_at >= now() - interval '24 hours') AS signals24h,
+         (SELECT count(*)::text FROM cve_exploit_signal s WHERE s.first_seen_at >= now() - interval '7 days') AS signals7d,
          (SELECT count(*)::text FROM cve_exploit_signal s WHERE s.first_seen_at >= now() - interval '24 hours') AS new_signals24h,
-         (SELECT count(*)::text FROM (
-            SELECT s.cve_id FROM cve_exploit_signal s
-              JOIN cve c ON c.cve_id = s.cve_id
-         LEFT JOIN cve_exploit_intel ei ON ei.cve_id = c.cve_id
-         LEFT JOIN epss_score es ON es.cve_id = c.cve_id
-         LEFT JOIN kev k ON k.cve_id = c.cve_id
-         LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
-             WHERE s.last_seen_at >= now() - interval '7 days'
-          GROUP BY s.cve_id HAVING max(${THREAT_SCORE_SQL}) >= 55
-          ) hot) AS hot_cves`,
+         (SELECT count(*)::text FROM cve_exploit_signal s
+           WHERE s.last_seen_at >= now() - interval '24 hours'
+             AND s.first_seen_at < now() - interval '24 hours'
+             AND s.last_seen_at > s.first_seen_at + interval '1 hour') AS updated_signals24h,
+         (SELECT count(*)::text FROM bucketed WHERE threat_score >= 55) AS hot_cves,
+         (SELECT count(*)::text FROM bucketed WHERE time_bucket = 'new_24h') AS bucket_new_24h,
+         (SELECT count(*)::text FROM bucketed WHERE time_bucket = 'new_7d') AS bucket_new_7d,
+         (SELECT count(*)::text FROM bucketed WHERE time_bucket = 'updated_24h') AS bucket_updated_24h,
+         (SELECT count(*)::text FROM bucketed WHERE time_bucket = 'older') AS bucket_older`,
       params
     );
 
     let sinceCount = 0;
     if (q.since) {
       const sinceOnlyR = await this.db.query<{ n: string }>(
-        `SELECT count(*)::text AS n
+        `SELECT count(DISTINCT s.cve_id)::text AS n
            FROM cve_exploit_signal s
            JOIN cve c ON c.cve_id = s.cve_id
-          WHERE s.last_seen_at >= $1::timestamptz`,
+          WHERE s.first_seen_at >= $1::timestamptz`,
         [q.since.toISOString()]
       );
       sinceCount = Number(sinceOnlyR.rows[0]?.n ?? 0);
     }
 
     const byTypeR = await this.db.query<{ signal_type: string; count: string }>(
-      `SELECT s.signal_type, count(*)::text AS count
-         FROM cve_exploit_signal s JOIN cve c ON c.cve_id = s.cve_id
-         ${whereSql}
-     GROUP BY s.signal_type ORDER BY count(*) DESC LIMIT 12`,
+      `WITH scored AS (
+         SELECT s.cve_id, s.signal_type,
+                max(s.first_seen_at) OVER (PARTITION BY s.cve_id) AS cve_newest_first_seen,
+                min(s.first_seen_at) OVER (PARTITION BY s.cve_id) AS cve_radar_first_seen,
+                max(s.last_seen_at) OVER (PARTITION BY s.cve_id) AS cve_last_seen
+           FROM cve_exploit_signal s JOIN cve c ON c.cve_id = s.cve_id
+           ${whereSql}
+       )
+       SELECT signal_type, count(DISTINCT cve_id)::text AS count
+         FROM scored
+        WHERE ${cveWindowSql}
+     GROUP BY signal_type ORDER BY count(DISTINCT cve_id) DESC LIMIT 12`,
       params
     );
 
     const timelineR = await this.db.query<{ day: string; count: string }>(
-      `SELECT to_char(date_trunc('day', s.last_seen_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
-              count(*)::text AS count
+      `SELECT to_char(date_trunc('day', s.first_seen_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+              count(DISTINCT s.cve_id)::text AS count
          FROM cve_exploit_signal s JOIN cve c ON c.cve_id = s.cve_id
-        WHERE s.last_seen_at >= now() - interval '7 days'
+        WHERE s.first_seen_at >= now() - interval '7 days'
      GROUP BY 1 ORDER BY 1 ASC`
     );
 
@@ -253,7 +323,7 @@ export class ThreatFeedService {
          JOIN cve c ON c.cve_id = s.cve_id
          JOIN cve_vendor_product vp ON vp.cve_id = c.cve_id
     LEFT JOIN cve_exploit_intel ei ON ei.cve_id = c.cve_id
-        WHERE s.last_seen_at >= now() - interval '7 days'
+        WHERE s.first_seen_at >= now() - interval '7 days'
      GROUP BY vp.vendor_key
      ORDER BY signal_count DESC
         LIMIT 18`,
@@ -261,7 +331,24 @@ export class ThreatFeedService {
     );
 
     const hotR = await this.db.query(
-      `SELECT agg.cve_id, agg.threat_score, agg.signal_count,
+      `WITH scored AS (
+         SELECT s.cve_id, max(${THREAT_SCORE_SQL}) AS threat_score,
+                count(*)::int AS signal_count,
+                max(s.first_seen_at) AS cve_newest_first_seen,
+                min(s.first_seen_at) AS cve_radar_first_seen,
+                max(s.last_seen_at) AS cve_last_seen
+           FROM cve_exploit_signal s JOIN cve c ON c.cve_id = s.cve_id
+      LEFT JOIN cve_exploit_intel ei ON ei.cve_id = c.cve_id
+      LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+      LEFT JOIN kev k ON k.cve_id = c.cve_id
+      LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
+           ${whereSql}
+       GROUP BY s.cve_id
+       ),
+       scoped AS (
+         SELECT * FROM scored WHERE ${cveWindowSql}
+       )
+       SELECT agg.cve_id, agg.threat_score, agg.signal_count,
               es.score AS epss, c.cvss_base, rs.score AS risk_score,
               COALESCE(ei.vckev_only, false) AS vckev_only,
               COALESCE(ei.epss_spike, false) AS epss_spike,
@@ -269,18 +356,11 @@ export class ThreatFeedService {
               COALESCE(ei.has_public_exploit, false) AS has_public_exploit,
               (k.cve_id IS NOT NULL) AS cisa_kev,
               vp.vendor, vp.product,
-              to_char(agg.latest_signal_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS latest_signal_at
+              to_char(agg.cve_newest_first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS latest_signal_at
          FROM (
-           SELECT s.cve_id, max(${THREAT_SCORE_SQL}) AS threat_score,
-                  count(*)::int AS signal_count, max(s.last_seen_at) AS latest_signal_at
-             FROM cve_exploit_signal s JOIN cve c ON c.cve_id = s.cve_id
-        LEFT JOIN cve_exploit_intel ei ON ei.cve_id = c.cve_id
-        LEFT JOIN epss_score es ON es.cve_id = c.cve_id
-        LEFT JOIN kev k ON k.cve_id = c.cve_id
-        LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
-             ${whereSql}
-         GROUP BY s.cve_id
-         ORDER BY max(${THREAT_SCORE_SQL}) DESC, max(s.last_seen_at) DESC LIMIT 8
+           SELECT * FROM scoped
+            ORDER BY threat_score DESC, cve_newest_first_seen DESC
+            LIMIT 8
          ) agg
          JOIN cve c ON c.cve_id = agg.cve_id
     LEFT JOIN cve_exploit_intel ei ON ei.cve_id = agg.cve_id
@@ -299,32 +379,82 @@ export class ThreatFeedService {
     const limitIdx = itemParams.length - 1;
     const offsetIdx = itemParams.length;
 
+    // One card per CVE: best signal by threat score; bucket by newest first_seen (real discovery).
     const rowsR = await this.db.query(
-      `SELECT s.cve_id, s.signal_type, s.source, s.url, s.title, s.confidence,
-              to_char(s.first_seen_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS first_seen_at,
-              to_char(s.last_seen_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_seen_at,
-              c.cvss_base, es.score AS epss, rs.score AS risk_score,
-              COALESCE(ei.vckev_only, false) AS vckev_only,
-              COALESCE(ei.epss_spike, false) AS epss_spike,
-              COALESCE(ei.has_poc, false) AS has_poc,
-              COALESCE(ei.has_public_exploit, false) AS has_public_exploit,
-              (k.cve_id IS NOT NULL) AS cisa_kev,
-              ei.epss_delta_7d,
-              ${THREAT_SCORE_SQL} AS threat_score,
-              (s.first_seen_at >= now() - interval '24 hours') AS is_new,
-              (s.last_seen_at >= now() - interval '24 hours' AND s.first_seen_at < now() - interval '24 hours') AS is_updated,
-              vp.vendor, vp.product, vp.vendor_key
-         FROM cve_exploit_signal s JOIN cve c ON c.cve_id = s.cve_id
-    LEFT JOIN cve_exploit_intel ei ON ei.cve_id = c.cve_id
-    LEFT JOIN epss_score es ON es.cve_id = c.cve_id
-    LEFT JOIN kev k ON k.cve_id = c.cve_id
-    LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
-    LEFT JOIN LATERAL (
-          SELECT vp.vendor, vp.product, vp.vendor_key FROM cve_vendor_product vp
-           WHERE vp.cve_id = c.cve_id ORDER BY vp.vendor_key ASC LIMIT 1
-         ) vp ON true
-         ${whereSql}
-        ORDER BY ${orderBy}
+      `WITH scored AS (
+         SELECT s.id, s.cve_id, s.signal_type, s.source, s.url, s.title, s.confidence,
+                s.first_seen_at, s.last_seen_at,
+                c.cvss_base, es.score AS epss, rs.score AS risk_score,
+                COALESCE(ei.vckev_only, false) AS vckev_only,
+                COALESCE(ei.epss_spike, false) AS epss_spike,
+                COALESCE(ei.has_poc, false) AS has_poc,
+                COALESCE(ei.has_public_exploit, false) AS has_public_exploit,
+                (k.cve_id IS NOT NULL) AS cisa_kev,
+                ei.epss_delta_7d,
+                ${THREAT_SCORE_SQL} AS threat_score,
+                vp.vendor, vp.product, vp.vendor_key,
+                max(s.first_seen_at) OVER (PARTITION BY s.cve_id) AS cve_newest_first_seen,
+                min(s.first_seen_at) OVER (PARTITION BY s.cve_id) AS cve_radar_first_seen,
+                max(s.last_seen_at) OVER (PARTITION BY s.cve_id) AS cve_last_seen,
+                count(*) OVER (PARTITION BY s.cve_id) AS signal_count,
+                row_number() OVER (
+                  PARTITION BY s.cve_id
+                  ORDER BY ${THREAT_SCORE_SQL} DESC, s.first_seen_at DESC, s.id DESC
+                ) AS rn
+           FROM cve_exploit_signal s
+           JOIN cve c ON c.cve_id = s.cve_id
+      LEFT JOIN cve_exploit_intel ei ON ei.cve_id = c.cve_id
+      LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+      LEFT JOIN kev k ON k.cve_id = c.cve_id
+      LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
+      LEFT JOIN LATERAL (
+            SELECT vp.vendor, vp.product, vp.vendor_key FROM cve_vendor_product vp
+             WHERE vp.cve_id = c.cve_id ORDER BY vp.vendor_key ASC LIMIT 1
+           ) vp ON true
+           ${whereSql}
+       ),
+       best AS (
+         SELECT *
+           FROM scored
+          WHERE rn = 1
+            AND ${cveWindowSql}
+       ),
+       labeled AS (
+         SELECT *,
+                CASE
+                  WHEN cve_newest_first_seen >= now() - interval '24 hours' THEN 'new_24h'
+                  WHEN cve_newest_first_seen >= now() - interval '7 days' THEN 'new_7d'
+                  WHEN cve_last_seen >= now() - interval '24 hours'
+                       AND cve_radar_first_seen < now() - interval '24 hours'
+                       AND cve_last_seen > cve_radar_first_seen + interval '1 hour'
+                    THEN 'updated_24h'
+                  ELSE 'older'
+                END AS time_bucket,
+                (cve_newest_first_seen >= now() - interval '24 hours') AS is_new,
+                (
+                  cve_newest_first_seen < now() - interval '24 hours'
+                  AND cve_last_seen >= now() - interval '24 hours'
+                  AND cve_radar_first_seen < now() - interval '24 hours'
+                  AND cve_last_seen > cve_radar_first_seen + interval '1 hour'
+                ) AS is_updated
+           FROM best
+       )
+       SELECT cve_id, signal_type, source, url, title, confidence,
+              to_char(cve_radar_first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS first_seen_at,
+              to_char(cve_newest_first_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS newest_signal_at,
+              to_char(cve_last_seen AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_seen_at,
+              cvss_base, epss, risk_score, vckev_only, epss_spike, has_poc, has_public_exploit,
+              cisa_kev, epss_delta_7d, threat_score, is_new, is_updated, time_bucket,
+              signal_count, vendor, product, vendor_key
+         FROM labeled
+        ORDER BY
+          CASE time_bucket
+            WHEN 'new_24h' THEN 0
+            WHEN 'updated_24h' THEN 1
+            WHEN 'new_7d' THEN 2
+            ELSE 3
+          END,
+          ${orderByInner}
         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
       itemParams
     );
@@ -348,6 +478,29 @@ export class ThreatFeedService {
     }
 
     const summaryRow = summaryR.rows[0];
+    const items = rowsR.rows.map((row: Record<string, unknown>) => ({
+      ...row,
+      epss_sparkline: sparkMap[String(row.cve_id)] ?? []
+    }));
+
+    const groupKeys = ["new_24h", "updated_24h", "new_7d", "older"] as const;
+    const groups = Object.fromEntries(
+      groupKeys.map((key) => [
+        key,
+        {
+          total:
+            key === "new_24h"
+              ? Number(summaryRow?.bucket_new_24h ?? 0)
+              : key === "new_7d"
+                ? Number(summaryRow?.bucket_new_7d ?? 0)
+                : key === "updated_24h"
+                  ? Number(summaryRow?.bucket_updated_24h ?? 0)
+                  : Number(summaryRow?.bucket_older ?? 0),
+          items: items.filter((it) => String((it as { time_bucket?: string }).time_bucket) === key)
+        }
+      ])
+    );
+
     return {
       summary: {
         total: Number(summaryRow?.total ?? 0),
@@ -355,20 +508,25 @@ export class ThreatFeedService {
         signals24h: Number(summaryRow?.signals24h ?? 0),
         signals7d: Number(summaryRow?.signals7d ?? 0),
         newSignals24h: Number(summaryRow?.new_signals24h ?? 0),
+        updatedSignals24h: Number(summaryRow?.updated_signals24h ?? 0),
         hotCves: Number(summaryRow?.hot_cves ?? 0),
         sinceCount,
-        byType: byTypeR.rows.map((r) => ({ signal_type: r.signal_type, count: Number(r.count) }))
+        byType: byTypeR.rows.map((r) => ({ signal_type: r.signal_type, count: Number(r.count) })),
+        buckets: {
+          new_24h: Number(summaryRow?.bucket_new_24h ?? 0),
+          new_7d: Number(summaryRow?.bucket_new_7d ?? 0),
+          updated_24h: Number(summaryRow?.bucket_updated_24h ?? 0),
+          older: Number(summaryRow?.bucket_older ?? 0)
+        }
       },
       timeline: timelineR.rows.map((r) => ({ day: r.day, count: Number(r.count) })),
       vendorHeatmap: vendorMapR.rows,
       hotCves: hotR.rows,
+      groups,
       total: Number(summaryRow?.total ?? 0),
       limit: q.limit,
       offset: q.offset,
-      items: rowsR.rows.map((row: Record<string, unknown>) => ({
-        ...row,
-        epss_sparkline: sparkMap[String(row.cve_id)] ?? []
-      }))
+      items
     };
   }
 

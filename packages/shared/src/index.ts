@@ -1,4 +1,5 @@
 export * from "./ai/enrichment-placeholder.js";
+export * from "./ai/enrichment-maturity.js";
 export * from "./ai/enrichment-display.js";
 export * from "./bdu/id.js";
 export * from "./bdu/vendor-product-parse.js";

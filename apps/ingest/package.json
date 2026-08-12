@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "pnpm run build && concurrently -k -n tsc,node -c yellow,cyan \"tsc -p tsconfig.json -w --preserveWatchOutput\" \"nodemon --watch dist --delay 250ms --exec 'node --enable-source-maps dist/main.js'\"",
+    "dev": "pnpm run build && concurrently -k -n tsc,node -c yellow,cyan \"tsc -p tsconfig.json -w --preserveWatchOutput\" \"nodemon --watch dist --delay 250ms --exec 'node --enable-source-maps --max-old-space-size=8192 dist/main.js'\"",
     "build": "tsc -p tsconfig.json",
-    "start": "node --enable-source-maps dist/main.js",
+    "start": "node --enable-source-maps --max-old-space-size=8192 dist/main.js",
     "lint": "echo \"(lint placeholder)\"",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

@@ -2,12 +2,11 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import dynamic from "next/dynamic";
-import { AppearanceSettings } from "@/components/auth/appearance-settings";
-import { SecuritySettings } from "@/components/auth/security-settings";
-import { IntegrationSettingsPanel } from "@/components/dashboard/integration-settings-panel";
+import { useAuth } from "@/contexts/auth-context";
 import { apiFetch } from "@/lib/api-fetch";
-import { needsOnDemandBduEnrich, shouldAutoEnrichBduOnOpen } from "@/lib/bdu-enrich-ui";
+import { needsOnDemandBduEnrich, parseAiOutputJson as parseBduAiOutputJson, shouldAutoEnrichBduOnOpen } from "@/lib/bdu-enrich-ui";
 import { needsOnDemandEnrich, parseAiOutputJson, shouldAutoEnrichOnOpen } from "@/lib/cve-enrich-ui";
+import { defaultAttackFlowSteps, isUsableAttackGraph } from "@/lib/baseline-enrichment";
 import { CVE_POLL_BACKGROUND_ONLY_MS, CVE_POLL_WHILE_ENRICH_MS, ENRICH_UI_WAIT_MS } from "@/lib/enrich-ui-wait";
 import { useLivePollInterval } from "@/lib/live-refresh";
 import { EXPLOIT_RADAR_FILTER_LABELS, type ExploitRadarFilter } from "@/lib/exploit-intel-client";
@@ -17,10 +16,10 @@ import {
   BarChart3,
   ClipboardList,
   HeartPulse,
+  Inbox,
   Loader2,
   Pin,
   PinOff,
-  Radar,
   RefreshCw,
   Settings,
   ShieldAlert,
@@ -33,8 +32,10 @@ import { cn } from "../ui/cn";
 import { CveCard } from "./cve-card";
 import { AiSummaryPanel } from "./ai-summary-panel";
 import { OverviewDashboardPanel } from "./overview-dashboard-panel";
+import { SettingsPanel } from "./settings-panel";
 import { SystemHealthPanel } from "./system-health-panel";
 import { ThreatFeedPanel } from "./threat-feed-panel";
+import { VocHomePanel } from "./voc-home-panel";
 import { computeCvePriority } from "@/lib/cve-priority";
 import { computeBduPriority } from "@/lib/bdu-priority";
 import { cveRefKey } from "@/lib/voc-ref-keys";
@@ -63,7 +64,6 @@ import {
 } from "./draggable-bdu-modals";
 import { FstecModulePanel } from "../fstec/fstec-module-panel";
 import { PatchManagementPanel } from "./patch-management-panel";
-import { AsvScannerPanel } from ".";
 import { VulnSearchBar } from "./vuln-search-bar";
 import { VulnTaskPanel } from "./vuln-task-panel";
 import { VulnClassFilter } from "./vuln-class-filter";
@@ -132,7 +132,16 @@ type SavedView = {
   };
 };
 
-type ModuleKey = "dashboard" | "vulns" | "threat" | "tasks" | "fstec" | "patches" | "asv" | "systemHealth" | "settings";
+type ModuleKey =
+  | "dashboard"
+  | "voc"
+  | "vulns"
+  | "threat"
+  | "tasks"
+  | "fstec"
+  | "patches"
+  | "systemHealth"
+  | "settings";
 type VulnPreviewRef = { kind: "cve" | "bdu"; id: string };
 
 function vulnPreviewKey(ref: VulnPreviewRef): string {
@@ -156,6 +165,8 @@ function findVulnPreviewIndex(
 
 export function Dashboard() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const canWrite = user?.role !== "viewer";
   const [moduleKey, setModuleKey] = useState<ModuleKey>("dashboard");
   const [tasksSelectedId, setTasksSelectedId] = useState<string | null>(null);
   const [q, setQ] = useState("");
@@ -246,6 +257,11 @@ export function Dashboard() {
         cvssCount: number;
         scoredCount: number;
         aiEnrichedCount?: number;
+        hot24CveCount?: number;
+        hot24AiEnrichedCount?: number;
+        hot24ScoredCount?: number;
+        hot24EpssCount?: number;
+        hot24CvssCount?: number;
         aiEnrichPerMinute?: number;
         aiLastEnrichAt?: string | null;
         manualEnrichAllowed?: boolean;
@@ -264,7 +280,7 @@ export function Dashboard() {
   });
 
   /** Как на API: по умолчанию разрешено, только `false` отключает. Пока summary грузится — не блокируем кнопки (`=== true` ломало ручной enrich). */
-  const manualEnrichAllowed = summaryQuery.data?.manualEnrichAllowed !== false;
+  const manualEnrichAllowed = summaryQuery.data?.manualEnrichAllowed !== false && canWrite;
 
   const vendorsQuery = useQuery({
     queryKey: ["stats", "vendors", 24, 50],
@@ -832,7 +848,7 @@ export function Dashboard() {
     }
   }, [queryClient]);
 
-  /** При открытии карточки — авто enrich только для CVE за 24ч; старше — только кнопка в панели ИИ. */
+  /** Auto-enrich on open: baseline/translate sync to mature RU; LLM stays manual-only. */
   useEffect(() => {
     if (!selected || moduleKey !== "vulns" || !manualEnrichAllowed) return;
     if (detailsQuery.isLoading) return;
@@ -863,19 +879,54 @@ export function Dashboard() {
   );
 
   const bduGraph = useMemo(() => {
+    if (!selectedBdu) return null;
     const ai = selectedBduDetails?.ai as { output_json?: unknown } | null | undefined;
-    const parsed = parseAiOutputJson(ai?.output_json ?? null);
+    const linkedCveRaw = (selectedBduDetails as { linkedCveRaw?: unknown } | null)?.linkedCveRaw;
+    const parsed = parseBduAiOutputJson(ai?.output_json ?? null, {
+      bduId: selectedBdu,
+      bdu: selectedBduDetails?.bdu,
+      linkedCveRaw
+    });
     const out = parsed?.graph;
-    if (out && typeof out === "object") return out;
-    return null;
-  }, [selectedBduDetails]);
+    return isUsableAttackGraph(out) ? out : null;
+  }, [selectedBduDetails, selectedBdu]);
 
   const bduAttackFlowSteps = useMemo(() => {
+    if (!selectedBdu) return defaultAttackFlowSteps();
     const ai = selectedBduDetails?.ai as { output_json?: unknown } | null | undefined;
-    const parsed = parseAiOutputJson(ai?.output_json ?? null);
+    const linkedCveRaw = (selectedBduDetails as { linkedCveRaw?: unknown } | null)?.linkedCveRaw;
+    const parsed = parseBduAiOutputJson(ai?.output_json ?? null, {
+      bduId: selectedBdu,
+      bdu: selectedBduDetails?.bdu,
+      linkedCveRaw
+    });
     const af = parsed?.attackFlow;
-    return Array.isArray(af) ? af.map(String).filter(Boolean) : [];
-  }, [selectedBduDetails]);
+    if (Array.isArray(af) && af.length > 0) return af.map(String).filter(Boolean);
+    return defaultAttackFlowSteps(linkedCveRaw);
+  }, [selectedBduDetails, selectedBdu]);
+
+  const cveGraph = useMemo(() => {
+    if (!selected || !selectedDetails) return null;
+    const ai = selectedDetails.ai as { output_json?: unknown } | null | undefined;
+    const cve = selectedDetails.cve as { raw?: unknown } | null | undefined;
+    const nvdRaw =
+      cve?.raw != null && typeof cve.raw === "object" && !Array.isArray(cve.raw) ? cve.raw : undefined;
+    const parsed = parseAiOutputJson(ai?.output_json ?? null, { cveId: selected, nvdRaw });
+    const out = parsed?.graph;
+    return isUsableAttackGraph(out) ? out : null;
+  }, [selectedDetails, selected]);
+
+  const cveAttackFlowSteps = useMemo(() => {
+    if (!selected || !selectedDetails) return [];
+    const ai = selectedDetails.ai as { output_json?: unknown } | null | undefined;
+    const cve = selectedDetails.cve as { raw?: unknown } | null | undefined;
+    const nvdRaw =
+      cve?.raw != null && typeof cve.raw === "object" && !Array.isArray(cve.raw) ? cve.raw : undefined;
+    const parsed = parseAiOutputJson(ai?.output_json ?? null, { cveId: selected, nvdRaw });
+    const af = parsed?.attackFlow;
+    if (Array.isArray(af) && af.length > 0) return af.map(String).filter(Boolean);
+    return defaultAttackFlowSteps(nvdRaw);
+  }, [selectedDetails, selected]);
 
   const dashboardHighlightSet = useMemo(
     () => new Set(dashboardModals.map((m) => m.cveId)),
@@ -1025,6 +1076,19 @@ export function Dashboard() {
             <BarChart3 className="h-5 w-5" />
           </button>
           <button
+            onClick={() => switchModule("voc")}
+            className={cn(
+              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+              "hover:bg-slate-100 dark:hover:bg-black/25",
+              moduleKey === "voc"
+                ? "border-accent/30 bg-accent/10"
+                : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
+            )}
+            title="VOC — очередь смены"
+          >
+            <Inbox className="h-5 w-5" />
+          </button>
+          <button
             onClick={() => switchModule("vulns")}
             className={cn(
               "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
@@ -1088,19 +1152,6 @@ export function Dashboard() {
           >
             <Bandage className="h-5 w-5" />
           </button>
-          <button
-            onClick={() => switchModule("asv")}
-            className={cn(
-              "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
-              "hover:bg-slate-100 dark:hover:bg-black/25",
-              moduleKey === "asv"
-                ? "border-accent/30 bg-accent/10"
-                : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
-            )}
-            title="ASV Scanner"
-          >
-            <Radar className="h-5 w-5" />
-          </button>
           <div className="mt-auto flex flex-col items-center gap-2">
             <button
               onClick={() => switchModule("systemHealth")}
@@ -1141,10 +1192,6 @@ export function Dashboard() {
                 vendors={vendorsQuery.data}
                 vendorsLoading={vendorsQuery.isLoading}
                 onOpenCve={openDashboardModal}
-                onOpenBdu={openDashboardBduModal}
-                onOpenTgLink={(link) => {
-                  if (link) window.open(link, "_blank", "noopener,noreferrer");
-                }}
                 topPriorityCves={topPriorityItems}
                 topPriorityLoading={topPriorityQuery.isLoading}
                 onTopPriorityCveClick={openDashboardModal}
@@ -1164,10 +1211,24 @@ export function Dashboard() {
                   setQ("");
                 }}
                 onOpenSystemHealth={() => switchModule("systemHealth")}
+                onOpenVoc={() => switchModule("voc")}
+                onOpenVulns={() => switchModule("vulns")}
+                onOpenThreat={() => switchModule("threat")}
                 onRefresh={() => void refreshOverview()}
                 refreshing={overviewRefreshing}
                 onExploitFilter={openExploitFilter}
                 exploitFilter={exploitFilter}
+              />
+            </div>
+          ) : moduleKey === "voc" ? (
+            <div className="glass rounded-2xl p-5 sm:p-6">
+              <VocHomePanel
+                variant="page"
+                onOpenCve={openDashboardModal}
+                onOpenBdu={openDashboardBduModal}
+                onOpenTgLink={(link) => {
+                  if (link) window.open(link, "_blank", "noopener,noreferrer");
+                }}
               />
             </div>
           ) : moduleKey === "vulns" ? (
@@ -1194,11 +1255,15 @@ export function Dashboard() {
                       }}
                     />
                   </div>
-                  <AttackGraphPanel graph={bduGraph} attackFlow={bduAttackFlowSteps} />
+                  <AttackGraphPanel
+                    graph={bduGraph}
+                    attackFlow={bduAttackFlowSteps}
+                    entityId={selectedBdu}
+                  />
                 </section>
               ) : null}
               {selected ? (
-                <section className="col-span-12">
+                <section className="col-span-12 space-y-4">
                   <div className="glass rounded-2xl p-3 sm:p-4">
                     <CveDetailPanel
                       data={selectedDetails}
@@ -1214,6 +1279,11 @@ export function Dashboard() {
                       }}
                     />
                   </div>
+                  <AttackGraphPanel
+                    graph={cveGraph}
+                    attackFlow={cveAttackFlowSteps}
+                    entityId={selected}
+                  />
                 </section>
               ) : null}
 
@@ -1633,7 +1703,7 @@ export function Dashboard() {
               <ThreatFeedPanel onOpenCve={openDashboardModal} onFilter={openExploitFilter} />
             </div>
           ) : moduleKey === "tasks" ? (
-            <div className="glass rounded-2xl p-5 sm:p-6">
+            <div className="glass rounded-2xl p-3 sm:p-4">
               <VulnTaskPanel
                 vendorsHint={
                   vendorsQuery.data
@@ -1654,23 +1724,12 @@ export function Dashboard() {
             <div className="glass rounded-2xl p-5 sm:p-6">
               <PatchManagementPanel onOpenCve={openDashboardModal} />
             </div>
-          ) : moduleKey === "asv" ? (
-            <div className="glass rounded-2xl p-5 sm:p-6">
-              <AsvScannerPanel />
-            </div>
           ) : moduleKey === "systemHealth" ? (
             <div className="glass rounded-2xl p-5 sm:p-6">
               <SystemHealthPanel onOpenSettings={() => switchModule("settings")} />
             </div>
           ) : (
-            <div className="glass rounded-2xl p-6">
-              <div className="text-sm font-medium">Настройки</div>
-              <div className="mt-4 space-y-8">
-                <IntegrationSettingsPanel />
-                <AppearanceSettings />
-                <SecuritySettings />
-              </div>
-            </div>
+            <SettingsPanel />
           )}
         </main>
       </div>

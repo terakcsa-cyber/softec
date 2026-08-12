@@ -4,7 +4,9 @@ import {
   defaultNvdCatalogDoc,
   fingerprintNvdApiKey,
   getVulnContextLlmConfigFromEnv,
+  getTextEngineSettingsFromEnv,
   mergeVulnContextLlmConfig,
+  mergeTextEngineSettings,
   MPVM_DEFAULT_PDQL,
   MPVM_DEFAULT_INVENTORY_PDQL,
   NVD_CATALOG_SCAN_MODE,
@@ -17,6 +19,7 @@ import {
   verifyMpvmConnection,
   type MpvmClientConfig,
   type NvdCatalogDoc,
+  type TextEngineSettings,
   type VulnContextLlmConfig
 } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
@@ -31,6 +34,7 @@ type LlmProfileRow = {
 };
 
 type LlmDoc = { profiles: LlmProfileRow[]; activeId: string | null };
+type TextEngineDoc = Partial<TextEngineSettings>;
 type NvdDoc = { apiKey?: string };
 type VulncheckDoc = { apiToken?: string };
 type MpvmDoc = {
@@ -142,6 +146,12 @@ export class IntegrationSettingsService {
     };
     if (pick.apiKey !== undefined) patch.apiKey = pick.apiKey;
     return mergeVulnContextLlmConfig(base, patch);
+  }
+
+  async getTextEngineSettings(): Promise<TextEngineSettings> {
+    const base = getTextEngineSettingsFromEnv();
+    const doc = (await this.readJson("textEngine")) as unknown as TextEngineDoc;
+    return mergeTextEngineSettings(base, doc);
   }
 
   async resolveNvdApiKey(): Promise<string | undefined> {
@@ -500,8 +510,10 @@ export class IntegrationSettingsService {
     const mpvm = await this.getMpvmUiState();
     const telegram = await this.getTelegramUiState();
     const vulncheck = await this.getVulncheckUiState();
+    const textEngine = await this.getTextEngineSettings();
 
     return {
+      textEngine,
       llm: {
         profiles,
         activeId: doc.activeId ? String(doc.activeId) : null,
@@ -746,6 +758,22 @@ export class IntegrationSettingsService {
 
         const doc: LlmDoc = { profiles: nextProfiles, activeId };
         await this.writeJson("llm", doc as object);
+      }
+    }
+
+    if ("textEngine" in body) {
+      const textIn = body.textEngine;
+      if (textIn != null && !isRecord(textIn)) throw new BadRequestException("textEngine must be an object");
+      if (isRecord(textIn)) {
+        const current = await this.getTextEngineSettings();
+        const next: TextEngineSettings = mergeTextEngineSettings(current, {
+          textEngine: textIn.textEngine as TextEngineSettings["textEngine"],
+          translateEndpoint:
+            typeof textIn.translateEndpoint === "string"
+              ? textIn.translateEndpoint.trim()
+              : current.translateEndpoint
+        });
+        await this.writeJson("textEngine", next);
       }
     }
 

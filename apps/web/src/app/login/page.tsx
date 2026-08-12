@@ -9,7 +9,7 @@ export default function LoginPage() {
   const router = useRouter();
   const [setupRequired, setSetupRequired] = useState(false);
   const [setupChecked, setSetupChecked] = useState(false);
-  const [email, setEmail] = useState("admin@example.com");
+  const [email, setEmail] = useState("admin@vuln-intel.local");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
@@ -18,7 +18,7 @@ export default function LoginPage() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!loading && user) router.replace("/");
+    if (!loading && user) router.replace(user.mustChangePassword ? "/change-password" : "/");
   }, [loading, user, router]);
 
   useEffect(() => {
@@ -61,7 +61,7 @@ export default function LoginPage() {
           setError(r.error ?? "Неверный код");
           return;
         }
-        router.replace("/");
+        router.replace(r.mustChangePassword ? "/change-password" : "/");
         return;
       }
       const r = await login(email, password);
@@ -74,7 +74,7 @@ export default function LoginPage() {
         setTotpCode("");
         return;
       }
-      router.replace("/");
+      router.replace(r.mustChangePassword ? "/change-password" : "/");
     } finally {
       setBusy(false);
     }

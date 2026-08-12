@@ -10,18 +10,19 @@
 |------------|--------------|-----------------|
 | `HealthController` | `/health` | GET (public) |
 | `CveController` | `/cves` | GET list, GET `:id`, POST `lookup`, POST `bdu-links`, POST `:id/enrich` |
-| `StatsController` | `/stats` | GET summary/vendors/queue, GET/POST dlq/* |
+| `StatsController` | `/stats` | GET summary/vendors/queue/readiness/reconciliation, GET/POST dlq/*, POST ops/{epss,bdu,nvd,hot24}/* (admin) |
 | `VendorAdvisoryController` | `/vendor-advisories` | GET list, GET `:id`, GET vendors |
 | `VulnTaskController` | `/vuln-tasks` | CRUD + CVE links + by-cve |
-| `AsvController` | `/asv` | assets, scan-runs, findings, msf, issues, nuclei, observations, inventory |
 | `IntegrationSettingsController` | `/settings/integrations` | GET, PUT |
-| `AuthController` | `/auth` | login, refresh, register (условно), 2fa, me |
+| `WebTlsController` | `/settings/tls` | GET status; POST generate / letsencrypt / letsencrypt/renew (admin) |
+| `PlatformUpdateController` | `/settings/updates` | GET status, POST check/apply (admin; apply opt-in) |
+| `AuthController` | `/auth` | login, refresh, register (условно), 2fa, me, users CRUD (admin) |
 
 ## Next.js BFF (`apps/web/src/app/api/**`)
 
 Прокси на upstream (`getUpstreamApiBase()` + `forwardAuthHeaders` или server-only internal bearer для fstec sync).
 
-Список маршрутов: см. `apps/web/src/app/api/**/route.ts` (auth, cves, stats, vendor-advisories, vuln-tasks, asv/*, fstec/feed, patch/feed, health, settings/integrations).
+Список маршрутов: см. `apps/web/src/app/api/**/route.ts` (auth, cves, stats/ops/*, stats/readiness, vendor-advisories, vuln-tasks, voc, fstec/feed, patch/feed, health, settings/integrations, settings/tls[+letsencrypt], settings/updates).
 
 ## Внешние HTTP (SSRF‑риск)
 
@@ -37,7 +38,7 @@
 
 ## Динамический SQL
 
-Основные места: `apps/api/src/routes/cve.controller.ts`, `vendor-advisory.controller.ts`, `asv.controller.ts`, `vuln-task.service.ts` (список задач — `escapePgLikePattern` + `LIKE … ESCAPE` в `apps/api/src/pg-like.util.ts`).
+Основные места: `apps/api/src/routes/cve.controller.ts`, `vendor-advisory.controller.ts`, `vuln-task.service.ts` (список задач — `escapePgLikePattern` + `LIKE … ESCAPE` в `apps/api/src/pg-like.util.ts`).
 
 ## Секреты / сервисный доступ
 

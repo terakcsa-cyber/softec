@@ -37,8 +37,8 @@ cd vuln-intel-platform
 - Linux-хост с Docker Engine и Docker Compose v2. Если их нет, `./deploy.sh` попробует поставить их автоматически через `apt-get`, `dnf` или `yum`.
 - Доступ к Git-репозиторию.
 - Node.js/pnpm не обязательны для `./deploy.sh`: если Node.js нет на хосте, скрипт запустит генератор env в одноразовом Docker-контейнере `node:20-alpine`.
-- 4+ CPU, 16+ GB RAM для комфортного старта; больше, если включены ASV/Nuclei, Metasploit или локальная LLM.
-- Открытый наружу порт только для web (`WEB_PUBLISHED_PORT`, по умолчанию `3000`) или reverse proxy перед ним.
+- 4+ CPU, 16+ GB RAM для комфортного старта; больше, если включена локальная LLM.
+- Открытый наружу: `WEB_PUBLISHED_PORT` (web HTTP, часто 3000) и `WEB_TLS_PUBLISHED_PORT` / `WEB_TLS_HTTP_PORT` (tls-proxy HTTPS + ACME :80).
 
 Если автоматическая установка Compose v2 не прошла, установите compose plugin вручную:
 
@@ -50,7 +50,7 @@ docker compose version
 
 Скрипт также поддерживает standalone `docker-compose`, но только версии v2.
 
-Важно: контейнер `web` внутри Docker слушает HTTP. Указывайте `https://` origin, если TLS завершается на reverse proxy/load balancer/хосте перед приложением. Сам `deploy.sh` выбирает и публикует порт, но не выпускает TLS-сертификаты.
+Важно: контейнер `web` внутри Docker слушает HTTP. HTTPS обеспечивает сервис `tls-proxy` (Caddy) на `WEB_TLS_PUBLISHED_PORT` (prod 443) + HTTP `:80` для ACME. Сертификат: **Настройки → Веб / TLS** → Let's Encrypt (публичный DNS + порт 80) или самоподписанный. `deploy.sh` проставляет `PLATFORM_GIT_SHA`, EPSS boot/poll и TLS-порты в env. Указывайте `https://` в `PUBLIC_WEB_ORIGIN` после выпуска сертификата.
 
 ## Подготовка
 
@@ -107,17 +107,20 @@ curl -fsS http://127.0.0.1:${WEB_PUBLISHED_PORT:-3000}/api/health
 
 ## Первый пользователь
 
-При первом запуске, если таблица `auth_user` пустая, откройте web UI и перейдите на `/login`. Вместо обычной формы входа появится первичная настройка:
+При первом запуске, если таблица `auth_user` пустая, API автоматически создаёт bootstrap-администратора:
 
-- email администратора;
-- пароль администратора;
-- повтор пароля.
+- email: `admin@vuln-intel.local`
+- пароль: `ChangeMe!Admin1`
+- при первом входе обязательна смена пароля.
 
-Пароль должен быть не короче 12 символов. После создания администратора настройка автоматически закрывается: повторно открыть её нельзя, пока в БД есть хотя бы один пользователь.
+Чтобы задать свои начальные реквизиты, укажите переменные в `.env.production` до первого старта API:
 
-Для headless-развёртывания остаётся fallback: можно заранее задать `AUTH_BOOTSTRAP_EMAIL` и `AUTH_BOOTSTRAP_PASSWORD` в `.env.production`. Тогда API создаст первого пользователя автоматически, если `auth_user` пустая. После первого успешного входа уберите bootstrap-переменные и перезапустите `api`.
+```env
+AUTH_BOOTSTRAP_EMAIL=sec@example.com
+AUTH_BOOTSTRAP_PASSWORD=UseYourOwnLongPassword1
+```
 
-`deploy.sh` умеет задать bootstrap-пользователя автоматически: в режиме **Чистая установка** он спросит email/пароль администратора и запишет их в `.env.production` как `AUTH_BOOTSTRAP_EMAIL` / `AUTH_BOOTSTRAP_PASSWORD`.
+`AUTH_BOOTSTRAP_PASSWORD` должен быть не короче 12 символов. После первого входа смените пароль и дальше управляйте пользователями в **Settings → Пользователи**: создавать аккаунты может пользователь с ролью `admin`.
 
 ```bash
 docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d api
@@ -129,11 +132,11 @@ docker compose --env-file .env.production -f infra/docker-compose.prod.yml up -d
 - `AUTH_ALLOW_REGISTER=false` для production.
 - Даже если `AUTH_ALLOW_REGISTER=true`, production-регистрация дополнительно требует `AUTH_ALLOW_REGISTER_IN_PRODUCTION=true`; держите его `false`.
 - `ALLOW_INTERNAL_API_BEARER=false`; включать только для доверенного service-to-service контура.
-- **`ADMIN_EMAILS`** — список email администраторов (через запятую) для DLQ, digest prepare/send. В production задайте явно.
+- Роли RBAC хранятся в `auth_user.role`: `viewer` — чтение, `analyst` — рабочие изменения, `admin` — ops и пользователи.
+- **`ADMIN_EMAILS`** — legacy allowlist для admin-only API по email; пустое значение не делает всех пользователей admin.
 - **`DLQ_BOOT_RETRY=false`** в production (ручной retry через API после диагностики).
-- Наружу публикуется только `web`; `api`, `postgres`, `redis`, `rabbitmq` доступны только внутри Docker network.
-- Используйте reverse proxy с TLS перед `web` для реального production-доступа.
-- ASV/Nuclei и Metasploit по умолчанию выключены. Включайте только для разрешённых целей и после оценки риска активного сканирования.
+- Наружу: `web` (`WEB_PUBLISHED_PORT`) и `tls-proxy` (`WEB_TLS_PUBLISHED_PORT` / `:80` для ACME). `api`, `postgres`, `redis`, `rabbitmq` — только Docker network.
+- HTTPS: встроенный **tls-proxy** + **Настройки → Веб / TLS** (Let's Encrypt или self-signed). Внешний reverse proxy опционален.
 
 Подробнее: [ADMIN_GUIDE.md](./ADMIN_GUIDE.md), [MATURITY.md](./MATURITY.md).
 
@@ -163,17 +166,29 @@ Volumes:
 
 ## Обновление версии
 
+### Из UI
+
+**Настройки → Обновления** (admin): «Проверить обновления», затем при необходимости «Применить обновление».
+
+Для one-click apply в Docker см. `infra/docker-compose.update-helper.yml` и раздел в [ADMIN_GUIDE.md](./ADMIN_GUIDE.md#13-обновление-и-откат).
+
+### Из CLI (всегда data-safe)
+
 ```bash
+bash scripts/platform-update.sh
+# или:
 git pull
-./deploy.sh --yes
+./deploy.sh --yes --update
 ```
 
-Схема БД поддерживается API при старте через `SchemaService`; отдельной команды миграции сейчас нет.
+Схема БД поддерживается API при старте через `SchemaService` / `MigrationService`.
 
-Важно: по умолчанию `deploy.sh` делает **чистую установку** и удаляет Docker volumes (Postgres/Redis/RabbitMQ), чтобы не ловить ошибки от “старых” паролей/схемы.  
-Если нужно сохранить данные, используйте:
+Важно: по умолчанию `deploy.sh` без `--update` / `--keep-data` в неинтерактивном режиме делает **чистую установку** и удаляет Docker volumes.  
+Для сохранения данных всегда используйте:
 
 ```bash
+./deploy.sh --yes --update
+# или
 ./deploy.sh --yes --keep-data
 ```
 

@@ -22,6 +22,7 @@ export type ThreatIntelRefreshResult = {
 export class ThreatIntelRefreshService {
   private readonly logger = new Logger(ThreatIntelRefreshService.name);
   private running = false;
+  private startedAt: string | null = null;
   private lastCompletedAt: string | null = null;
 
   constructor(
@@ -30,7 +31,7 @@ export class ThreatIntelRefreshService {
   ) {}
 
   getStatus() {
-    return { running: this.running, lastCompletedAt: this.lastCompletedAt };
+    return { running: this.running, startedAt: this.startedAt, lastCompletedAt: this.lastCompletedAt };
   }
 
   async refresh(opts?: { reason?: string; force?: boolean }): Promise<ThreatIntelRefreshResult> {
@@ -62,10 +63,12 @@ export class ThreatIntelRefreshService {
     }
 
     this.running = true;
-    const refreshedAt = new Date().toISOString();
+    this.startedAt = new Date().toISOString();
+    const refreshedAt = this.startedAt;
     try {
       await ensureVulncheckKevSchema(this.db);
       await ensureExploitIntelSchema(this.db);
+      await this.normalizePollutedLastSeenOnce();
 
       const vulncheck = await ingestVulncheckKev(this.db, {
         auditMeta: { reason: opts?.reason ?? "api", via: "api" }
@@ -81,6 +84,31 @@ export class ThreatIntelRefreshService {
       return { ok: true, vulncheck, exploitIntel, scored, refreshedAt };
     } finally {
       this.running = false;
+      this.startedAt = null;
+    }
+  }
+
+  /** Old TI upserts bumped last_seen_at on every sync; reset once so “updated” buckets stay real. */
+  private async normalizePollutedLastSeenOnce() {
+    try {
+      const done = await this.db.query<{ n: string }>(
+        `SELECT count(*)::text AS n FROM audit_log WHERE action = 'threat.normalize_last_seen' LIMIT 1`
+      );
+      if (Number(done.rows[0]?.n ?? 0) > 0) return;
+
+      const upd = await this.db.query(
+        `UPDATE cve_exploit_signal
+            SET last_seen_at = first_seen_at
+          WHERE signal_type IN ('vulncheck_kev', 'nvd_exploit_tag')
+            AND last_seen_at > first_seen_at + interval '1 minute'`
+      );
+      await this.db.query(
+        `INSERT INTO audit_log(actor_type, action, metadata) VALUES ('system', 'threat.normalize_last_seen', $1)`,
+        [JSON.stringify({ resetRows: upd.rowCount ?? 0 })]
+      );
+      this.logger.log(`normalized polluted last_seen_at rows=${upd.rowCount ?? 0}`);
+    } catch (e) {
+      this.logger.warn(`normalize last_seen skipped: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

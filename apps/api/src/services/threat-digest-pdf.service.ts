@@ -3,7 +3,7 @@ import path from "node:path";
 import { Injectable } from "@nestjs/common";
 import PDFDocument from "pdfkit";
 import type { ThreatDigestPayload } from "@vuln-intel/shared";
-import { THREAT_SIGNAL_LABEL } from "@vuln-intel/shared";
+import { buildThreatDigestFallbackSummaryRu, THREAT_SIGNAL_LABEL } from "@vuln-intel/shared";
 
 type PdfDoc = PDFKit.PDFDocument;
 
@@ -341,7 +341,7 @@ export class ThreatDigestPdfService {
 
       doc.fillColor(COLORS.muted).font("sans").fontSize(8).text(it.why, 62, y + 24, { width: 470 });
 
-      const summary = String(it.summary_ru ?? "").trim();
+      const summary = buildThreatDigestFallbackSummaryRu(it);
       if (summary) {
         doc.fillColor(COLORS.ink).font("sans").fontSize(9).text(summary, 62, y + 38, {
           width: doc.page.width - 120,
@@ -496,7 +496,7 @@ export class ThreatDigestPdfService {
       if (row.vendor) {
         doc.fillColor("#475569").text(`${row.vendor}${row.product ? ` / ${row.product}` : ""}`, 62, y + 48, { width: 460 });
       }
-      const sum = String(row.summary_ru ?? "").trim();
+      const sum = buildThreatDigestFallbackSummaryRu(row);
       if (sum) {
         doc.fillColor(COLORS.muted).font("sans").fontSize(8).text(sum, 62, y + 56, {
           width: doc.page.width - 124,
@@ -552,7 +552,7 @@ export class ThreatDigestPdfService {
         .join(" · ");
       doc.fillColor(COLORS.muted).font("sans").fontSize(8).text(v, 60, headY + 30, { width: doc.page.width - 140 });
 
-      const sum = String(row.summary_ru ?? row.description ?? "").trim();
+      const sum = buildThreatDigestFallbackSummaryRu(row);
       if (sum) {
         doc.fillColor(COLORS.ink).font("sans").fontSize(9).text(sum, 60, headY + 46, {
           width: doc.page.width - 120,

@@ -4,7 +4,7 @@ import { getUpstreamApiBase } from "../../../../lib/upstream-api";
 
 export const dynamic = "force-dynamic";
 
-const ALLOW = new Set(["GET", "POST", "HEAD"]);
+const ALLOW = new Set(["GET", "POST", "PATCH", "HEAD"]);
 
 export async function GET(
   req: Request,
@@ -15,6 +15,14 @@ export async function GET(
 }
 
 export async function POST(
+  req: Request,
+  ctx: { params: Promise<{ path: string[] }> }
+) {
+  const { path } = await ctx.params;
+  return proxyAuth(req, path);
+}
+
+export async function PATCH(
   req: Request,
   ctx: { params: Promise<{ path: string[] }> }
 ) {
@@ -55,7 +63,7 @@ async function proxyAuth(req: Request, path: string[]) {
     cache: "no-store"
   };
 
-  if (method === "POST") {
+  if (method === "POST" || method === "PATCH") {
     const ct = req.headers.get("content-type");
     if (ct) headers["content-type"] = ct;
     init.body = await req.arrayBuffer();

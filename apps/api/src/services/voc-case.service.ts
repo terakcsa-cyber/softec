@@ -4,6 +4,7 @@ import {
   VOC_OUTCOMES,
   vocDedupKey,
   vocPriorityToTaskPriority,
+  buildVocPlaybookFromContext,
   runVocPlaybookLlm,
   type VocCaseStatus,
   type VocOutcome,
@@ -111,10 +112,108 @@ export class VocCaseService {
       params
     );
 
-    const ids = r.rows.map((row) => row.id);
+    return this.mapCaseRows(r.rows);
+  }
+
+  /**
+   * Cases where this CVE/BDU/TG ref participated — via voc_case_ref and/or a linked vuln_task.
+   * Includes closed/cancelled (history), unlike the default active list.
+   */
+  async listCasesByRef(opts: {
+    source: VocSource;
+    refId: string;
+    limit?: number;
+  }): Promise<VocCaseRow[]> {
+    const source = opts.source;
+    const refId = String(opts.refId ?? "").trim();
+    if (!refId) throw new BadRequestException("refId required");
+    if (source !== "cve" && source !== "bdu" && source !== "tg") {
+      throw new BadRequestException("source must be cve|bdu|tg");
+    }
+
+    const limit = Math.max(1, Math.min(100, opts.limit ?? 50));
+    const refKey =
+      source === "cve"
+        ? refId.toUpperCase().startsWith("CVE:")
+          ? refId.toUpperCase()
+          : `CVE:${refId.toUpperCase()}`
+        : source === "bdu"
+          ? refId.toUpperCase().startsWith("BDU:")
+            ? refId.toUpperCase()
+            : `BDU:${refId}`
+          : refId.toUpperCase().startsWith("TG:")
+            ? refId
+            : `TG:${refId}`;
+    const bareId =
+      source === "cve"
+        ? refId.replace(/^CVE:/i, "").toUpperCase()
+        : source === "bdu"
+          ? refId.replace(/^BDU:/i, "")
+          : refId.replace(/^TG:/i, "");
+
+    const r = await this.db.query<{
+      id: string;
+      title: string;
+      status: VocCaseStatus;
+      dedup_key: string;
+      primary_ref_key: string;
+      assignee_user_id: string | null;
+      assignee_email: string | null;
+      sla_due_at: Date | null;
+      voc_priority: VocPriority;
+      task_id: string | null;
+      created_by_email: string | null;
+      created_at: Date;
+      updated_at: Date;
+      ref_count: string;
+    }>(
+      `SELECT c.*,
+              (SELECT count(*)::text FROM voc_case_ref r0 WHERE r0.case_id = c.id) AS ref_count
+         FROM voc_case c
+        WHERE c.id IN (
+                SELECT r.case_id
+                  FROM voc_case_ref r
+                 WHERE (r.source = $1 AND upper(r.ref_id) = upper($2))
+                    OR upper(r.ref_key) = upper($3)
+              )
+           OR (
+                $1 = 'cve'
+                AND c.task_id IS NOT NULL
+                AND EXISTS (
+                  SELECT 1 FROM vuln_task_cve l
+                   WHERE l.task_id = c.task_id AND l.cve_id = $2
+                )
+              )
+        ORDER BY c.updated_at DESC
+        LIMIT ${limit}`,
+      [source, bareId, refKey]
+    );
+
+    return this.mapCaseRows(r.rows);
+  }
+
+  private async mapCaseRows(
+    rows: Array<{
+      id: string;
+      title: string;
+      status: VocCaseStatus;
+      dedup_key: string;
+      primary_ref_key: string;
+      assignee_user_id: string | null;
+      assignee_email: string | null;
+      sla_due_at: Date | null;
+      voc_priority: VocPriority;
+      task_id: string | null;
+      created_by_email: string | null;
+      created_at: Date;
+      updated_at: Date;
+      ref_count: string;
+    }>
+  ): Promise<VocCaseRow[]> {
+    const ids = rows.map((row) => row.id);
     const refsByCase = await this.loadRefsForCases(ids);
 
-    return r.rows.map((row) => ({
+    return rows.map((row) => ({
       id: row.id,
       title: row.title,
       status: row.status,
@@ -568,8 +667,11 @@ export class VocCaseService {
     ctx: VocPlaybookContextInput,
     preserveFrom?: VocPlaybook | null
   ): Promise<VocPlaybook> {
-    const llmCfg = await this.integration.getEffectiveLlmConfig();
-    let playbook = await runVocPlaybookLlm(ctx, llmCfg);
+    const textEngine = await this.integration.getTextEngineSettings();
+    let playbook =
+      textEngine.textEngine === "llm"
+        ? await runVocPlaybookLlm(ctx, await this.integration.getEffectiveLlmConfig())
+        : buildVocPlaybookFromContext(ctx);
     if (preserveFrom) playbook = this.mergePlaybookProgress(preserveFrom, playbook);
     await this.db.query(`UPDATE voc_case SET playbook = $2::jsonb, updated_at = now() WHERE id = $1`, [
       caseId,

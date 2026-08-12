@@ -63,6 +63,20 @@ export async function fetchVocCases(params?: { status?: string; limit?: number }
   return (await res.json()) as VocCaseRow[];
 }
 
+export async function fetchVocCasesByRef(params: {
+  source: VocSource;
+  refId: string;
+  limit?: number;
+}): Promise<VocCaseRow[]> {
+  const url = new URL("/api/voc/cases/by-ref", window.location.origin);
+  url.searchParams.set("source", params.source);
+  url.searchParams.set("refId", params.refId);
+  if (params.limit) url.searchParams.set("limit", String(params.limit));
+  const res = await apiFetch(url.toString(), { cache: "no-store" });
+  if (!res.ok) throw new Error(await readApiError(res, "Не удалось загрузить кейсы"));
+  return (await res.json()) as VocCaseRow[];
+}
+
 export async function createVocCaseFromRef(body: {
   refKey: string;
   source: VocSource;

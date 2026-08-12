@@ -7,17 +7,20 @@ import {
   llmEndpointRequiresApiKey,
   parseBduVendorProductPairs,
   parseUserRole,
-  QueueEventType
+  QueueEventType,
+  SQL_EFFECTIVE_PUBLISHED_AT,
+  sqlBduFstecAttentionWithinHours
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
-import { sqlBduFstecAttentionWithinHours } from "@vuln-intel/shared";
 import { IntegrationSettingsService } from "../services/integration-settings.service.js";
 import { ThreatFeedService } from "../services/threat-feed.service.js";
 import { ThreatDigestPdfService } from "../services/threat-digest-pdf.service.js";
 import { ThreatIntelRefreshService } from "../services/threat-intel-refresh.service.js";
 import { ReconciliationService } from "../services/reconciliation.service.js";
+import { OpsRepairService } from "../services/ops-repair.service.js";
 import { TelegramPostService } from "../services/telegram-post.service.js";
+import { CveEnrichRunnerService } from "../services/cve-enrich-runner.service.js";
 import { CurrentUser } from "../auth/current-user.decorator.js";
 import { Roles } from "../auth/roles.decorator.js";
 import type { AuthUser } from "../auth/jwt.strategy.js";
@@ -151,7 +154,9 @@ export class StatsController {
     private readonly threatDigestPdf: ThreatDigestPdfService,
     private readonly threatIntelRefresh: ThreatIntelRefreshService,
     private readonly reconciliation: ReconciliationService,
-    private readonly telegram: TelegramPostService
+    private readonly opsRepair: OpsRepairService,
+    private readonly telegram: TelegramPostService,
+    private readonly cveEnrichRunner: CveEnrichRunnerService
   ) {}
 
   private isAdmin(user: AuthUser): boolean {
@@ -192,6 +197,37 @@ export class StatsController {
     const aiEnriched = await this.db.query<{ n: string }>(
       `SELECT COUNT(DISTINCT cve_id)::text AS n FROM enrichment_ai`
     );
+    /** Hot 24h “актуальные”: denominator = published last 24h; AI = has non-placeholder enrichment. */
+    const hot24Coverage = await this.db.query<{
+      hot_total: string;
+      hot_ai: string;
+      hot_scored: string;
+      hot_epss: string;
+      hot_cvss: string;
+    }>(
+      `SELECT
+         COUNT(*)::text AS hot_total,
+         COUNT(*) FILTER (
+           WHERE EXISTS (
+             SELECT 1
+               FROM enrichment_ai e
+              WHERE e.cve_id = c.cve_id
+                AND e.output_text IS DISTINCT FROM 'LLM not configured.'
+                AND COALESCE(e.output_json->>'summary', '') NOT LIKE 'LLM not configured%'
+                AND NOT (e.output_json @> '{"_enrich_error": true}'::jsonb)
+           )
+         )::text AS hot_ai,
+         COUNT(*) FILTER (
+           WHERE EXISTS (SELECT 1 FROM risk_score rs WHERE rs.cve_id = c.cve_id)
+         )::text AS hot_scored,
+         COUNT(*) FILTER (
+           WHERE EXISTS (SELECT 1 FROM epss_score es WHERE es.cve_id = c.cve_id)
+         )::text AS hot_epss,
+         COUNT(*) FILTER (WHERE c.cvss_base IS NOT NULL)::text AS hot_cvss
+         FROM cve c
+        WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} IS NOT NULL
+          AND ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '24 hours'`
+    );
     const lastAi = await this.db.query<{ ts: string | null }>(
       `SELECT to_char(MAX(created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts
          FROM enrichment_ai`
@@ -204,17 +240,20 @@ export class StatsController {
     const lastNvd = await this.db.query<{ ts: string | null }>(
       `SELECT to_char(MAX(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts
          FROM audit_log
-        WHERE action IN ('nvd.watermark', 'nvd.pub_sync', 'nvd.pub_catchup')`
+        WHERE action IN (
+          'nvd.watermark', 'nvd.pub_sync', 'nvd.pub_catchup',
+          'nvd.catalog_backfill', 'nvd.catalog_complete'
+        )`
     );
     const lastEpss = await this.db.query<{ ts: string | null }>(
       `SELECT to_char(MAX(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts
          FROM audit_log
-        WHERE action = 'epss.ingest'`
+        WHERE action IN ('epss.ingest', 'epss.watermark')`
     );
     const lastKev = await this.db.query<{ ts: string | null }>(
       `SELECT to_char(MAX(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts
          FROM audit_log
-        WHERE action = 'kev.ingest'`
+        WHERE action IN ('kev.ingest', 'vulncheck.kev.ingest')`
     );
     const lastScore = await this.db.query<{ ts: string | null }>(
       `SELECT to_char(MAX(computed_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts
@@ -258,6 +297,12 @@ export class StatsController {
       cvssCount: Number(cvss.rows[0]?.n ?? 0),
       scoredCount: Number(scored.rows[0]?.n ?? 0),
       aiEnrichedCount: Number(aiEnriched.rows[0]?.n ?? 0),
+      /** Primary “актуальность”: CVE published in last 24h. */
+      hot24CveCount: Number(hot24Coverage.rows[0]?.hot_total ?? 0),
+      hot24AiEnrichedCount: Number(hot24Coverage.rows[0]?.hot_ai ?? 0),
+      hot24ScoredCount: Number(hot24Coverage.rows[0]?.hot_scored ?? 0),
+      hot24EpssCount: Number(hot24Coverage.rows[0]?.hot_epss ?? 0),
+      hot24CvssCount: Number(hot24Coverage.rows[0]?.hot_cvss ?? 0),
       aiLastEnrichAt: lastAi.rows[0]?.ts ?? null,
       aiEnrichPerMinute: Number(aiLastMinute.rows[0]?.n ?? 0),
       maxPublishedAt: maxPublished.rows[0]?.ts ?? null,
@@ -477,9 +522,40 @@ export class StatsController {
     const jobId = randomUUID();
     const cveIds = (payload.hotCves ?? []).map((c) => c.cve_id).filter(Boolean);
     const nowIso = new Date().toISOString();
+    const textEngine = await this.integration.getTextEngineSettings();
 
     if (!cveIds.length) {
       return { ok: true, jobId, hotLimit, total: 0, enqueued: 0 };
+    }
+
+    if (textEngine.textEngine !== "llm") {
+      let ready = 0;
+      for (const cveId of cveIds) {
+        const res = await this.cveEnrichRunner.enrichNow(cveId, { force: false, allowOutsideHotWindow: true });
+        if (res) ready += 1;
+      }
+      try {
+        await this.db.query(
+          `INSERT INTO audit_log (actor_type, action, metadata) VALUES ('user', 'threat_digest.prepare', $1::jsonb)`,
+          [
+            JSON.stringify({
+              actorUserId: user.userId,
+              actorEmail: user.email,
+              jobId,
+              hotLimit,
+              total: cveIds.length,
+              enqueued: 0,
+              ready,
+              cveIds,
+              textEngine: textEngine.textEngine,
+              ts: nowIso
+            })
+          ]
+        );
+      } catch {
+        // ignore audit failures
+      }
+      return { ok: true, jobId, hotLimit, total: cveIds.length, enqueued: 0, ready };
     }
 
     // Determine which CVEs already have a successful enrichment.
@@ -576,6 +652,10 @@ export class StatsController {
     }
     const cveIds = Array.isArray(meta?.cveIds) ? (meta.cveIds as string[]).map(String) : [];
     const total = Number(meta?.total ?? cveIds.length ?? 0);
+    const textEngine = typeof meta?.textEngine === "string" ? meta.textEngine : (await this.integration.getTextEngineSettings()).textEngine;
+    if (textEngine !== "llm") {
+      return { ok: true, jobId, total, done: total, pending: 0, completed: true, textEngine };
+    }
     if (!cveIds.length) return { ok: true, jobId, total, done: 0, pending: 0, completed: true };
 
     const doneR = await this.db.query<{ n: string }>(
@@ -710,6 +790,98 @@ export class StatsController {
   @Get("reconciliation")
   async reconciliationStatus() {
     return this.reconciliation.reconcile();
+  }
+
+  @Get("readiness")
+  async readinessStatus() {
+    let queueDepths:
+      | { enrich?: number; score?: number; dlqEnrich?: number; dlqScore?: number }
+      | undefined;
+    try {
+      // DLQ only — ai.enrich backlog must not block product readiness
+      const [dlqEnrich, dlqScore] = await Promise.all([
+        this.queue.getQueueDepth("dlq.ai.enrich"),
+        this.queue.getQueueDepth("dlq.ai.score")
+      ]);
+      queueDepths = {
+        dlqEnrich: dlqEnrich.messages,
+        dlqScore: dlqScore.messages
+      };
+    } catch {
+      queueDepths = undefined;
+    }
+    const ops = this.opsRepair.getStatus();
+    const ti = this.threatIntelRefresh.getStatus();
+    const runningJobs: Array<{ kind: string; startedAt: string | null; expectedSeconds?: number }> = [];
+    const expectedByKind: Record<string, number> = {
+      epss: 180,
+      bdu: 420,
+      nvd_hot: 120,
+      hot24_score: 90,
+      threat_intel: 150
+    };
+    for (const [kind, job] of Object.entries(ops.jobs ?? {})) {
+      const j = job as { running?: boolean; startedAt?: string | null };
+      if (j?.running) {
+        runningJobs.push({
+          kind,
+          startedAt: j.startedAt ?? null,
+          expectedSeconds: expectedByKind[kind] ?? 180
+        });
+      }
+    }
+    if (ti.running) {
+      runningJobs.push({
+        kind: "threat_intel",
+        startedAt: ti.startedAt ?? new Date().toISOString(),
+        expectedSeconds: expectedByKind.threat_intel
+      });
+    }
+    return this.reconciliation.readiness({
+      queueDepths,
+      jobsRunning: ops.anyRunning || ti.running,
+      runningJobs
+    });
+  }
+
+  @Get("ops/status")
+  opsStatus() {
+    return {
+      ...this.opsRepair.getStatus(),
+      threatIntel: this.threatIntelRefresh.getStatus()
+    };
+  }
+
+  @Roles(UserRole.Admin)
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Post("ops/epss/sync")
+  async opsEpssSync(@CurrentUser() user: AuthUser) {
+    this.requireAdmin(user);
+    return this.opsRepair.runEpss(user.email);
+  }
+
+  @Roles(UserRole.Admin)
+  @Throttle({ default: { limit: 2, ttl: 120_000 } })
+  @Post("ops/bdu/sync")
+  async opsBduSync(@CurrentUser() user: AuthUser) {
+    this.requireAdmin(user);
+    return this.opsRepair.runBdu(user.email);
+  }
+
+  @Roles(UserRole.Admin)
+  @Throttle({ default: { limit: 3, ttl: 120_000 } })
+  @Post("ops/nvd/hot-sync")
+  async opsNvdHotSync(@CurrentUser() user: AuthUser) {
+    this.requireAdmin(user);
+    return this.opsRepair.runNvdHot(user.email);
+  }
+
+  @Roles(UserRole.Admin)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @Post("ops/hot24/rescore")
+  async opsHot24Rescore(@CurrentUser() user: AuthUser) {
+    this.requireAdmin(user);
+    return this.opsRepair.runHot24(user.email);
   }
 
   @Get("queue")

@@ -14,8 +14,10 @@ import {
   fmtRelativeTs,
   threatScoreTone,
   type ExploitRadarFilter,
+  type ThreatFeedItem,
   type ThreatFeedResponse,
   type ThreatFeedSort,
+  type ThreatFeedTimeBucket,
   type ThreatFeedVendorHeat
 } from "@/lib/exploit-intel-client";
 import {
@@ -35,6 +37,31 @@ import { ExploitIntelBadges } from "./exploit-intel-badges";
 type WindowPreset = "24" | "168" | "720" | "all";
 
 type WatchlistRow = { id: string; kind: string; value: string; label: string; active: boolean };
+
+const TIME_BUCKET_META: Array<{
+  key: ThreatFeedTimeBucket;
+  label: string;
+  hint: string;
+}> = [
+  { key: "new_24h", label: "Новые · 24 часа", hint: "Первый exploit-сигнал (или новый тип сигнала) за сутки" },
+  { key: "updated_24h", label: "Обновлённые · 24 часа", hint: "Реальное изменение сигнала, не sync heartbeat" },
+  { key: "new_7d", label: "Новые · 7 дней", hint: "Первый сигнал 1–7 дней назад (без пересечения с сутками)" },
+  { key: "older", label: "Раньше в окне", hint: "В выбранном периоде, но старше 7 дней" }
+];
+
+function signalDisplayTime(it: ThreatFeedItem): { primary: string | null; label: string; secondary?: string | null } {
+  if (it.is_updated) {
+    return {
+      primary: it.last_seen_at,
+      label: "обновлён",
+      secondary: it.first_seen_at
+    };
+  }
+  return {
+    primary: it.newest_signal_at || it.first_seen_at,
+    label: "впервые"
+  };
+}
 
 function PulseStat({
   label,
@@ -209,7 +236,7 @@ export function ThreatFeedPanel({
   }>({ phase: "idle", total: 0, done: 0 });
   const [casePending, setCasePending] = useState<string | null>(null);
   const [caseMsg, setCaseMsg] = useState<string | null>(null);
-  const limit = 40;
+  const limit = 60;
 
   useEffect(() => {
     writeThreatVendorFilter(vendorFilter);
@@ -386,7 +413,21 @@ export function ThreatFeedPanel({
 
   const activeWatchlist = (watchlistQuery.data ?? []).filter((w) => w.active);
 
-  const itemKey = useCallback((it: ThreatFeedResponse["items"][number]) => `${it.cve_id}:${it.signal_type}:${it.source}`, []);
+  const itemKey = useCallback((it: ThreatFeedResponse["items"][number], index = 0) => {
+    return [it.cve_id, it.time_bucket || "", it.signal_type, String(index)].join(":");
+  }, []);
+
+  const groupedSections = useMemo(() => {
+    const buckets = data?.summary.buckets;
+    return TIME_BUCKET_META.map((meta) => {
+      const fromGroups = data?.groups?.[meta.key];
+      const list =
+        fromGroups?.items ??
+        items.filter((it) => (it.time_bucket || "older") === meta.key);
+      const total = fromGroups?.total ?? buckets?.[meta.key] ?? list.length;
+      return { ...meta, items: list, total };
+    }).filter((sec) => sec.total > 0 || sec.items.length > 0);
+  }, [data?.groups, data?.summary.buckets, items]);
 
   // Smooth live-updates: highlight newly appeared rows for a few seconds.
   const prevKeysRef = useRef<Set<string>>(new Set());
@@ -394,7 +435,7 @@ export function ThreatFeedPanel({
   const prevSeenRef = useRef<Map<string, string>>(new Map());
   const [bumpKeys, setBumpKeys] = useState<Set<string>>(new Set());
   useEffect(() => {
-    const next = new Set(items.map((it) => itemKey(it)));
+    const next = new Set(items.map((it, i) => itemKey(it, i)));
     const prev = prevKeysRef.current;
     const appeared: string[] = [];
     for (const k of next) if (!prev.has(k)) appeared.push(k);
@@ -415,8 +456,9 @@ export function ThreatFeedPanel({
   useEffect(() => {
     const prevSeen = prevSeenRef.current;
     const changed: string[] = [];
-    for (const it of items) {
-      const k = itemKey(it);
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i]!;
+      const k = itemKey(it, i);
       const seen = String(it.last_seen_at ?? "");
       const prevVal = prevSeen.get(k);
       if (prevVal != null && prevVal !== seen) changed.push(k);
@@ -444,7 +486,8 @@ export function ThreatFeedPanel({
               Threat Intelligence
             </div>
             <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted">
-              Exploit-сигналы с threat score, watchlist VOC, diff с прошлого визита, heatmap вендоров и EPSS sparkline.
+              Оперативная доска сигналов: группы по реальному first_seen (24ч / 7д), без «каши» от TI sync.
+              Одна карточка на CVE, время — момент появления сигнала.
             </p>
             {feedQuery.dataUpdatedAt ? (
               <div className="mt-1 text-[10px] text-muted">
@@ -540,11 +583,25 @@ export function ThreatFeedPanel({
         {data?.summary ? (
           <>
             <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-5">
-              <PulseStat label="24 ч" value={data.summary.signals24h} tone="new" />
-              <PulseStat label="7 дней" value={data.summary.signals7d} />
-              <PulseStat label="Новые 24ч" value={data.summary.newSignals24h} tone="new" />
+              <PulseStat
+                label="Новые 24ч"
+                value={data.summary.buckets?.new_24h ?? data.summary.signals24h}
+                hint="CVE с новым first_seen за 24ч"
+                tone="new"
+              />
+              <PulseStat
+                label="Новые 7д"
+                value={data.summary.buckets?.new_7d ?? Math.max(0, data.summary.signals7d - data.summary.signals24h)}
+                hint="Только 1–7 дней (без суток)"
+              />
+              <PulseStat
+                label="Обновл. 24ч"
+                value={data.summary.buckets?.updated_24h ?? data.summary.updatedSignals24h ?? 0}
+                hint="Изменение сигнала за сутки (не TI sync)"
+                tone="new"
+              />
               <PulseStat label="Hot CVE" value={data.summary.hotCves} tone="hot" />
-              <PulseStat label="В выборке" value={data.summary.total} />
+              <PulseStat label="В выборке" value={data.summary.total} hint="Уникальные CVE в окне" />
             </div>
             {(data.timeline?.length ?? 0) > 0 ? <ActivityTimeline days={data.timeline} /> : null}
             {(data.vendorHeatmap?.length ?? 0) > 0 ? (
@@ -711,7 +768,7 @@ export function ThreatFeedPanel({
             className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs dark:border-border dark:bg-black/20"
           >
             <option value="threat">Threat score</option>
-            <option value="recent">Сначала новые</option>
+            <option value="recent">Сначала по first_seen</option>
           </select>
         </div>
 
@@ -771,7 +828,7 @@ export function ThreatFeedPanel({
           </div>
         ) : null}
 
-        <div className="mt-4 space-y-2">
+        <div className="mt-4 space-y-4">
           {feedQuery.isLoading ? (
             <div className="text-sm text-muted">Загрузка…</div>
           ) : items.length === 0 ? (
@@ -794,107 +851,140 @@ export function ThreatFeedPanel({
               ) : null}
             </div>
           ) : (
-            items.map((it) => (
-              <article
-                key={itemKey(it)}
-                className={cn(
-                  "rounded-xl border px-3 py-2.5 transition-[transform,box-shadow] duration-300",
-                  flashKeys.has(itemKey(it)) && "ring-2 ring-accent/30 shadow-sm",
-                  flashKeys.has(itemKey(it)) && "ti-enter",
-                  bumpKeys.has(itemKey(it)) && "ti-bump",
-                  it.is_new
-                    ? "border-accent/25 bg-accent/[0.04]"
-                    : it.is_updated
-                      ? "border-warn/20 bg-warn/[0.04]"
-                      : "border-slate-200/90 bg-slate-50/80 dark:border-white/[0.06] dark:bg-black/20"
-                )}
-              >
-                <div className="flex flex-wrap items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => onOpenCve?.(it.cve_id)}
-                        className="font-mono text-xs font-semibold text-accent hover:underline"
+            groupedSections.map((section) => (
+              <section key={section.key} className="space-y-2">
+                <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-200/80 pb-1.5 dark:border-white/[0.06]">
+                  <div>
+                    <div className="text-[12px] font-semibold text-fg/90">{section.label}</div>
+                    <div className="text-[10px] text-muted">{section.hint}</div>
+                  </div>
+                  <div className="tabular-nums text-[11px] text-muted">
+                    {section.items.length}
+                    {section.total > section.items.length ? ` / ${section.total}` : ""} CVE
+                  </div>
+                </div>
+                {section.items.length === 0 ? (
+                  <div className="text-[11px] text-muted">На этой странице нет карточек этой группы.</div>
+                ) : (
+                  section.items.map((it, i) => {
+                    const k = itemKey(it, i);
+                    const when = signalDisplayTime(it);
+                    return (
+                      <article
+                        key={k}
+                        className={cn(
+                          "rounded-xl border px-3 py-2.5 transition-[transform,box-shadow] duration-300",
+                          flashKeys.has(k) && "ring-2 ring-accent/30 shadow-sm",
+                          flashKeys.has(k) && "ti-enter",
+                          bumpKeys.has(k) && "ti-bump",
+                          it.is_new
+                            ? "border-accent/25 bg-accent/[0.04]"
+                            : it.is_updated
+                              ? "border-warn/20 bg-warn/[0.04]"
+                              : "border-slate-200/90 bg-slate-50/80 dark:border-white/[0.06] dark:bg-black/20"
+                        )}
                       >
-                        {it.cve_id}
-                      </button>
-                      <ThreatScoreBadge score={it.threat_score} />
-                      {it.is_new ? (
-                        <span className="rounded-full border border-accent/35 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
-                          NEW
-                        </span>
-                      ) : it.is_updated ? (
-                        <span className="rounded-full border border-warn/35 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
-                          UPD
-                        </span>
-                      ) : null}
-                      <span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent">
-                        {exploitSignalLabel(it.signal_type)}
-                      </span>
-                    </div>
-                    <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                      <ExploitIntelBadges
-                        item={{
-                          exploit_known: it.cisa_kev,
-                          vckev_only: it.vckev_only,
-                          epss_spike: it.epss_spike,
-                          epss_delta_7d: it.epss_delta_7d,
-                          has_poc: it.has_poc,
-                          has_public_exploit: it.has_public_exploit
-                        }}
-                        compact
-                      />
-                      <EpssSparkline values={it.epss_sparkline} />
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 items-start gap-1">
-                    <button
-                      type="button"
-                      title="VOC кейс + задача"
-                      disabled={casePending === it.cve_id}
-                      onClick={() => void createCase(it)}
-                      className="rounded-lg border border-slate-200 p-1.5 hover:bg-white dark:border-border dark:hover:bg-black/30"
-                    >
-                      <ClipboardPlus className="h-3.5 w-3.5 text-accent" />
-                    </button>
-                    <div className="text-right text-[10px] text-muted">
-                      <div>{fmtRelativeTs(it.last_seen_at)}</div>
-                    </div>
-                  </div>
-                </div>
-                <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted">
-                  {it.vendor ? (
-                    <span className="text-fg/80">
-                      {it.vendor}
-                      {it.product ? ` / ${it.product}` : ""}
-                    </span>
-                  ) : null}
-                  <span>
-                    CVSS <span className="font-mono text-fg/80">{it.cvss_base ?? "—"}</span>
-                  </span>
-                  <span>
-                    EPSS <span className="font-mono text-fg/80">{fmtEpssPct(it.epss) ?? "—"}</span>
-                    {it.epss_delta_7d != null ? (
-                      <span className="ml-1">({fmtEpssDelta(it.epss_delta_7d)})</span>
-                    ) : null}
-                  </span>
-                  <span>
-                    Risk <span className="font-mono text-fg/80">{it.risk_score ?? "—"}</span>
-                  </span>
-                </div>
-                {it.url || it.title ? (
-                  <div className="mt-1.5 text-[11px]">
-                    {it.url ? (
-                      <a href={it.url} target="_blank" rel="noreferrer" className="text-fg/85 hover:underline">
-                        {it.title?.trim() || it.url}
-                      </a>
-                    ) : (
-                      it.title
-                    )}
-                  </div>
-                ) : null}
-              </article>
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => onOpenCve?.(it.cve_id)}
+                                className="font-mono text-xs font-semibold text-accent hover:underline"
+                              >
+                                {it.cve_id}
+                              </button>
+                              <ThreatScoreBadge score={it.threat_score} />
+                              {it.is_new ? (
+                                <span className="rounded-full border border-accent/35 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
+                                  NEW 24ч
+                                </span>
+                              ) : it.is_updated ? (
+                                <span className="rounded-full border border-warn/35 bg-warn/10 px-2 py-0.5 text-[10px] text-warn">
+                                  UPD 24ч
+                                </span>
+                              ) : section.key === "new_7d" ? (
+                                <span className="rounded-full border border-slate-300 bg-white/70 px-2 py-0.5 text-[10px] text-muted dark:border-border dark:bg-black/20">
+                                  NEW 7д
+                                </span>
+                              ) : null}
+                              <span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] text-accent">
+                                {exploitSignalLabel(it.signal_type)}
+                              </span>
+                              {(it.signal_count ?? 1) > 1 ? (
+                                <span className="text-[10px] text-muted">{it.signal_count} сигналов</span>
+                              ) : null}
+                            </div>
+                            <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                              <ExploitIntelBadges
+                                item={{
+                                  exploit_known: it.cisa_kev,
+                                  vckev_only: it.vckev_only,
+                                  epss_spike: it.epss_spike,
+                                  epss_delta_7d: it.epss_delta_7d,
+                                  has_poc: it.has_poc,
+                                  has_public_exploit: it.has_public_exploit
+                                }}
+                                compact
+                              />
+                              <EpssSparkline values={it.epss_sparkline} />
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 items-start gap-1">
+                            <button
+                              type="button"
+                              title="VOC кейс + задача"
+                              disabled={casePending === it.cve_id}
+                              onClick={() => void createCase(it)}
+                              className="rounded-lg border border-slate-200 p-1.5 hover:bg-white dark:border-border dark:hover:bg-black/30"
+                            >
+                              <ClipboardPlus className="h-3.5 w-3.5 text-accent" />
+                            </button>
+                            <div className="min-w-[7.5rem] text-right text-[10px] text-muted">
+                              <div className="text-fg/80">{fmtRelativeTs(when.primary)}</div>
+                              <div className="opacity-80">{when.label}</div>
+                              {when.secondary ? (
+                                <div className="mt-0.5 opacity-70">впервые {fmtRelativeTs(when.secondary)}</div>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted">
+                          {it.vendor ? (
+                            <span className="text-fg/80">
+                              {it.vendor}
+                              {it.product ? ` / ${it.product}` : ""}
+                            </span>
+                          ) : null}
+                          <span>
+                            CVSS <span className="font-mono text-fg/80">{it.cvss_base ?? "—"}</span>
+                          </span>
+                          <span>
+                            EPSS <span className="font-mono text-fg/80">{fmtEpssPct(it.epss) ?? "—"}</span>
+                            {it.epss_delta_7d != null ? (
+                              <span className="ml-1">({fmtEpssDelta(it.epss_delta_7d)})</span>
+                            ) : null}
+                          </span>
+                          <span>
+                            Risk <span className="font-mono text-fg/80">{it.risk_score ?? "—"}</span>
+                          </span>
+                        </div>
+                        {it.url || it.title ? (
+                          <div className="mt-1.5 text-[11px]">
+                            {it.url ? (
+                              <a href={it.url} target="_blank" rel="noreferrer" className="text-fg/85 hover:underline">
+                                {it.title?.trim() || it.url}
+                              </a>
+                            ) : (
+                              it.title
+                            )}
+                          </div>
+                        ) : null}
+                      </article>
+                    );
+                  })
+                )}
+              </section>
             ))
           )}
         </div>

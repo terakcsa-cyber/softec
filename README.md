@@ -1,6 +1,6 @@
 # Платформа разведки уязвимостей (Vuln Intel Platform)
 
-Монорепозиторий на **pnpm + Turbo** для сбора и нормализации данных об уязвимостях (CVE, EPSS, KEV, бюллетени вендоров), **ИИ‑обогащения** карточек CVE, веб‑интерфейса для аналитики и модуля **ASV** (Attack Surface / сканирование поверхности атаки с **Nuclei**).
+Монорепозиторий на **pnpm + Turbo** для сбора и нормализации данных об уязвимостях (CVE, EPSS, KEV, бюллетени вендоров), обогащения карточек CVE/BDU и веб‑интерфейса для аналитики.
 
 **Документация:** [docs/README.md](docs/README.md) — полный индекс.  
 **Пользователям:** [docs/USER_GUIDE.md](docs/USER_GUIDE.md) · **Администраторам:** [docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md) · **Зрелость:** [docs/MATURITY.md](docs/MATURITY.md)
@@ -8,10 +8,9 @@
 Цели проекта:
 
 - быстрый поиск и просмотр CVE с метриками и контекстом;
-- фоновые конвейеры ingest + очереди RabbitMQ с DLQ;
-- опциональное **LLM**‑обогащение (Ollama на LAN или любой OpenAI‑совместимый `chat/completions`);
-- **сканирование активов** (URL, IP, домен, CIDR) с портами, HTTP‑пробами и **Nuclei**;
-- **ИИ‑триаж** находок ASV и **ИИ‑приоритизация** связанных issues.
+- фоновые конвейеры ingest (NVD / EPSS / KEV / BDU) + очереди RabbitMQ с DLQ;
+- режимы текстового обогащения: локальный `baseline` по умолчанию, `translate` через LibreTranslate или опциональный `llm` (+ фоновый BG enrich);
+- эксплуатация на сервере: `./deploy.sh`, встроенный **tls-proxy** / Let's Encrypt, обновления из UI.
 
 ---
 
@@ -20,9 +19,9 @@
 | Приложение | Стек | Назначение |
 |------------|------|------------|
 | `apps/web` | Next.js (App Router) | UI, BFF‑маршруты (`/api/...`), прокси к Nest API |
-| `apps/api` | NestJS | HTTP API: аутентификация, CVE, статистика, **ASV REST**, публикация задач в очередь |
-| `apps/ingest` | NestJS | NVD / KEV / EPSS, patch‑advisories, **воркер ASV** (`asv.scan`) |
-| `apps/ai` | NestJS | Воркеры: enrich CVE, **ASV triage**, **ASV issue priority** |
+| `apps/api` | NestJS | HTTP API: аутентификация, CVE, статистика, публикация задач в очередь |
+| `apps/ingest` | NestJS | NVD / KEV / EPSS, patch‑advisories |
+| `apps/ai` | NestJS | Воркеры: enrich CVE, score |
 | `packages/shared` | TypeScript | Общие типы, утилиты, схемы |
 
 Инфраструктура для локальной разработки: **`infra/docker-compose.yml`** — Postgres, Redis, RabbitMQ.
@@ -65,68 +64,16 @@
 - UI: `/health`.
 - BFF: `GET /api/health` — параллельные проверки API и зависимостей (для авторизованного пользователя передаётся `Authorization`).
 
-### ASV — сканер поверхности атаки
-
-Модуль для учёта **активов** и запуска **скан‑ранов** с записью наблюдений и находок в Postgres.
-
-**Типы активов** (`asset_type`):
-
-- `url` — полный URL (веб‑ориентированное сканирование путей + Nuclei по «живым» origin’ам).
-- `ip`, `domain`, `cidr` — сетевой контур: **TCP‑проверка портов** из профиля, минимальная или расширенная **HTTP‑проба** открытых web‑портов (80/443/8080/8443), **Nuclei в режиме `host:port`** (`network`), без «пентеста по путям» как у классического URL‑ассета.
-
-**Профили сканирования** (таблица `asv_scan_profile`, сиды в API при инициализации схемы):
-
-- **safe** — узкий набор портов, щадящие HTTP‑пути, режим `safe` для политики Nuclei.
-- **standard** — расширенный портовый список, несколько стандартных HTTP‑путей, режим `standard`, широкий набор тегов Nuclei для URL.
-- **monster** — максимально широкий портовый список, **дополнительные HTTP‑пути** (в т.ч. типичные чувствительные эндпоинты вроде `/.env`, swagger и т.д. в конфиге профиля), повышенные таймауты и конкурентность; для **URL** включается **двухфазный «умный» Nuclei**: сначала **lite** (misconfig / panel / tech / …), затем при наличии **технологических подсказок** и отсутствии жёсткой блокировки WAF — **heavy** (`cve`, `vuln`, только critical/high). Для **IP / domain / CIDR** при профиле **monster** выполняется тот же **lite → heavy** по списку целей **`host:port`**, с учётом WAF/таймаутов для **решения, запускать ли heavy**; **lite по открытым портам не отменяется** только из‑за того, что HTTP за Cloudflare отдаёт `null` (поведение доведено до разумного для CDN‑IP).
-
-**Артефакты скана** (`asv_scan_artifact`): `scanner.log`, `nuclei.stdout`, `nuclei.stderr`, `nuclei.jsonl` — удобно смотреть в UI и отлаживать шаблоны.
-
-**Nuclei**:
-
-- Включается переменными окружения (см. `.env.example`, блок `ASV_NUCLEI_*`): `ASV_NUCLEI_ENABLED`, раннер **docker** или бинарь на хосте, образ `ASV_NUCLEI_IMAGE`, лимиты времени, каталог шаблонов на хосте (`ASV_NUCLEI_TEMPLATES_DIR`), опции обновления шаблонов.
-- Для сетевых целей используются протоколы **`tcp,ssl`** там, где это уместно, чтобы не навязывать чисто HTTP‑шаблоны всем портам.
-- Ошибки уровня `[FTL]` и фатальные проблемы прокси учитываются при разборе результата; скан может завершиться **`failed`** при критическом падении Nuclei (вместо «тихого» успеха).
-
-**ИИ по ASV**:
-
-- Очередь **`ai.asv-triage`** — структурированный **триаж находки** (запрос из UI/API, результат в `asv_ai_note` / связанных сущностях по реализации).
-- Очередь **`ai.asv-priority`** — **приоритизация issue**, связанных с ASV.
-
-**Ручная валидация находок через Metasploit**:
-
-- В UI ASV у каждой находки доступен «Metasploit помощник»: генерация команд + **ручной запуск проверки**.
-- При ручном запуске создаётся `asv_msf_run`, а `apps/ingest` поднимает ephemeral контейнер `metasploitframework/metasploit-framework` и выполняет `msfconsole -q -r /work/run.rc`.
-- По умолчанию используется режим **safe** (action `check`/`run`/`search`). Режим **exploit** доступен только при явном подтверждении рисков в UI и серверной валидации.
-- Сохраняются артефакты: `msf.rc`, `msf.stdout`, `msf.stderr`, `msf.meta`, а также события (audit trail) по run’у.
-
 **Очереди RabbitMQ (основные)**:
 
 | Очередь | Потребитель | Назначение |
 |---------|-------------|------------|
-| `asv.scan` | `apps/ingest` | Выполнение скана по активу |
-| `ai.enrich` | `apps/ai` | LLM‑обогащение CVE |
-| `ai.asv-triage` | `apps/ai` | Триаж находки ASV |
-| `ai.asv-priority` | `apps/ai` | Приоритет issue |
-| `asv.msf` | `apps/ingest` | Ручной запуск Metasploit‑валидации находки |
+| `ai.enrich` | `apps/ai` | Обогащение CVE/BDU через текущий `TEXT_ENGINE` |
+| `ai.score` | `apps/ai` | Пересчёт скоринга |
 
 Для каждой очереди объявляются **DLQ** (`dlq.*`) и привязка к exchange `vuln.dlx`.
 
-**Важно про DLQ**: если в дашборде «Очереди» вы видите, например, `dlq.ai.enrich > 0`, это означает, что часть задач enrich была **отклонена (`rejected`)** воркером и больше не будет обработана автоматически. Обычно это связано с недоступностью/ошибками LLM или проблемами валидации. В UI можно безопасно выполнить **Retry** (вернуть сообщения в основную очередь) после устранения причины.
-
-**REST API ASV** (базовый префикс `/api/asv` — см. `apps/api/src/routes/asv.controller.ts`):
-
-- активы: список / создание / обновление;
-- профили сканирования;
-- запуск и список **scan runs**;
-- находки, наблюдения портов/HTTP, инвентарь, **дифф** между прогонами;
-- артефакты прогона (в т.ч. тело `nuclei.stderr`);
-- справочник шаблонов Nuclei для UI;
-- постановка задач на **ИИ‑триаж** и **ИИ‑приоритет**.
-
-**Веб‑панель ASV** (`apps/web/src/components/dashboard/asv-scanner-panel.tsx`): управление активами, выбор профиля, просмотр прогонов, находок, артефактов, запрос ИИ‑триажа (с опросом статуса).
-
----
+**Важно про DLQ**: если в дашборде «Очереди» вы видите, например, `dlq.ai.enrich > 0`, это означает, что часть задач enrich была **отклонена (`rejected`)** воркером и больше не будет обработана автоматически. Обычно это связано с недоступностью внешнего движка (`llm`/`translate`) или проблемами валидации. В UI можно безопасно выполнить **Retry** (вернуть сообщения в основную очередь) после устранения причины.
 
 ## Интеграции и внешние данные
 
@@ -145,8 +92,8 @@
 
 ```
 apps/api       — NestJS HTTP API
-apps/ingest    — NestJS: NVD/KEV/EPSS/patch + ASV worker
-apps/ai        — NestJS: enrich + ASV triage/priority workers
+apps/ingest    — NestJS: NVD/KEV/EPSS/patch
+apps/ai        — NestJS: enrich + score workers
 apps/web       — Next.js UI + BFF
 packages/shared — общий код
 infra          — Docker Compose (Postgres, Redis, RabbitMQ) + init SQL
@@ -196,12 +143,16 @@ cp .env.example .env
 
 Обязательно задайте **`JWT_SECRET`** (не короче 32 символов).
 
+Bootstrap admin создаётся автоматически, если `auth_user` пуста: default `admin@vuln-intel.local` / `ChangeMe!Admin1`. Переопределите через `AUTH_BOOTSTRAP_EMAIL` / `AUTH_BOOTSTRAP_PASSWORD` до первого старта API; при первом входе администратор обязан сменить пароль.
+
 Рекомендуется:
 
-- первый пользователь создаётся интерактивно на `/login`, если `auth_user` пустая; `AUTH_BOOTSTRAP_EMAIL` / `AUTH_BOOTSTRAP_PASSWORD` — только headless fallback;
 - `NVD_API_KEY` — лимиты NVD;
-- `LLM_ENDPOINT`, `LLM_API_KEY` (если нужен ключ), `LLM_MODEL` — для ИИ;
-- для ASV / Nuclei — блок **`ASV_NUCLEI_*`** в `.env.example` (включение сканера, Docker‑образ, таймауты, путь к шаблонам на диске).
+- `TEXT_ENGINE=baseline` по умолчанию: digest/manual enrich работают без LLM;
+- `TEXT_ENGINE=translate` + `LIBRETRANSLATE_URL` — baseline + перевод через LibreTranslate-compatible `/translate`;
+- `TEXT_ENGINE=llm`, `LLM_ENDPOINT`, `LLM_API_KEY` (если нужен ключ), `LLM_MODEL` — только если нужен LLM pipeline.
+
+RBAC: `viewer` — только чтение; `analyst` — чтение и рабочие изменения; `admin` — всё это плюс ops и управление пользователями. Пользователей создаёт администратор в **Settings → Пользователи**.
 
 ### 3. Установка зависимостей
 
@@ -268,13 +219,13 @@ rm -f .dev.lock
 
 `deploy.sh` автоматически создаёт `.env.production`, генерирует сильные секреты, проверяет compose config, собирает и поднимает stack. При интерактивном запуске спросит режим: **«Чистая установка»** (удалит Docker volumes Postgres/Redis/RabbitMQ) или **«Обновление платформы»** (данные сохраняются). Флаги: `--fresh` / `--update` (или `--keep-data`). Наружу публикуется только web (`WEB_PUBLISHED_PORT`, по умолчанию **3000**); API и зависимости остаются внутри Docker network. Подробная инструкция: `docs/deploy-linux-docker.md`.
 
-### Отключение AI‑fanout при недоступной LLM
+### Enrich: ручной режим и дайджесты
 
-Если LLM (например, Ollama в LAN) временно недоступна, очередь `ai.enrich` может расти. Для режима «не накачивать очередь» используйте:
+Автоматический enrich из ingest выключен. Ручные кнопки в карточках CVE/BDU и подготовка digest используют текущий `TEXT_ENGINE`; в режиме `llm` задачи могут идти через очередь `ai.enrich`, а DLQ/retry остаётся для повторов:
 
 - `NVD_FANOUT_ENRICH=false` — не публиковать enrich‑задачи из NVD ingest
 - `HOT24_AI_SWEEP=false` — не делать автодогон enrich для окна 24ч
-- `BACKLOG_AI_SWEEP=false` — не делать автодогон backlog (по умолчанию выключен)
+- `BACKLOG_AI_SWEEP=false` — не делать автодогон backlog
 
 ---
 
@@ -294,7 +245,7 @@ rm -f .dev.lock
 
 ### ИИ (Ollama на LAN / GPU)
 
-- Разумно ограничивать параллелизм: `LLM_MAX_PARALLEL`, `AI_ENRICH_PREFETCH`, настройки очередей ASV (на стороне RabbitMQ — prefetch у потребителей).
+- Разумно ограничивать параллелизм: `LLM_MAX_PARALLEL`, `AI_ENRICH_PREFETCH`.
 
 ---
 
@@ -312,11 +263,6 @@ rm -f .dev.lock
 
 Если сеть режет `t.me`, переключите источник на RSS (`FSTEC_FEED_SOURCE`, `FSTEC_TG_RSS_URL`).
 
-### Nuclei / Docker
-
-- Убедитесь, что Docker доступен пользователю, образ `ASV_NUCLEI_IMAGE` можно скачать.  
-- Первый прогон с обновлением шаблонов может занять много времени и места на диске — смотрите `ASV_NUCLEI_TEMPLATES_DIR`, `ASV_NUCLEI_UPDATE_MAX_MS`, `ASV_NUCLEI_SKIP_TEMPLATE_BOOTSTRAP`.
-
 ### EPSS / KEV / NVD не обновляются
 
 Проверьте `GET /api/stats/summary`, сетевой доступ с хоста ingest и логи `apps/ingest`.
@@ -330,7 +276,6 @@ rm -f .dev.lock
 - В production: надёжный `JWT_SECRET`, отключение лишних dev‑флагов (`AUTH_ALLOW_REGISTER` и т.д.).  
 - Сервисный **`INTERNAL_API_BEARER`**: в `NODE_ENV=production` не принимается, пока явно не задано **`ALLOW_INTERNAL_API_BEARER=true`** (иначе только JWT).  
 - CORS API в production: **`API_CORS_ORIGIN`** — список origin через запятую; без переменной CORS для браузера отключён (удобно при доступе к API только с того же хоста через reverse proxy).  
-- ASV и Nuclei способны генерировать **активный сетевой трафик** к указанным вами активам — используйте только **разрешённые** цели и профили; теги `intrusive` / `dos` в дополнительных аргументах Nuclei могут навредить инфраструктуре.
 
 ### SAST / DAST (сканеры в репозитории)
 

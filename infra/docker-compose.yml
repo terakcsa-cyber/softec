@@ -49,6 +49,32 @@ services:
       timeout: 5s
       retries: 20
 
+  # LibreTranslate-compatible translate API on host :5050 (5000 busy on macOS AirPlay).
+  # Uses MyMemory bridge while Argos CDN (argos-net.com) is too slow/unreachable for model downloads.
+  # To switch back to official offline LibreTranslate: restore libretranslate/libretranslate image + models volume.
+  libretranslate:
+    build:
+      context: ./translate-proxy
+    image: vuln-intel-translate-proxy:local
+    restart: unless-stopped
+    ports:
+      - "5050:5000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5000
+      # Optional: raises MyMemory daily quota
+      # MYMEMORY_EMAIL: you@example.com
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/languages', timeout=3)\""
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
 volumes:
   pg_data:
   redis_data:

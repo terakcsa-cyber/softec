@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, Plus, Save, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "../ui/cn";
 
@@ -71,6 +71,10 @@ type TelegramVerifyResult = {
 };
 
 type IntegrationState = {
+  textEngine: {
+    textEngine: "baseline" | "translate" | "llm";
+    translateEndpoint: string;
+  };
   llm: {
     profiles: Array<{
       id: string;
@@ -121,8 +125,34 @@ function emptyProfile(): LlmProfileUi {
   };
 }
 
-export function IntegrationSettingsPanel() {
+function SettingsBlock({
+  title,
+  description,
+  children
+}: {
+  title: string;
+  description?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-border dark:bg-white/[0.04] dark:shadow-none">
+      <div className="text-[13px] font-medium text-fg/90">{title}</div>
+      {description ? <div className="mt-1 text-[11px] leading-relaxed text-muted">{description}</div> : null}
+      <div className="mt-3">{children}</div>
+    </section>
+  );
+}
+
+export type IntegrationSettingsSection = "integrations" | "textEngine" | "all";
+
+export function IntegrationSettingsPanel({
+  section = "all"
+}: {
+  section?: IntegrationSettingsSection;
+}) {
   const qc = useQueryClient();
+  const showIntegrations = section === "integrations" || section === "all";
+  const showTextEngine = section === "textEngine" || section === "all";
   const q = useQuery({
     queryKey: ["settings", "integrations"],
     queryFn: async () => {
@@ -134,6 +164,8 @@ export function IntegrationSettingsPanel() {
 
   const [profiles, setProfiles] = useState<LlmProfileUi[] | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [textEngine, setTextEngine] = useState<"baseline" | "translate" | "llm">("baseline");
+  const [translateEndpoint, setTranslateEndpoint] = useState("");
   const [nvdKeyDraft, setNvdKeyDraft] = useState("");
   const [vcTokenDraft, setVcTokenDraft] = useState("");
   const [nvdVerify, setNvdVerify] = useState<NvdVerifyResult | null>(null);
@@ -178,6 +210,12 @@ export function IntegrationSettingsPanel() {
     );
     setActiveId(q.data.llm.activeId ?? null);
   }, [q.data, profiles]);
+
+  useEffect(() => {
+    if (!q.data?.textEngine) return;
+    setTextEngine(q.data.textEngine.textEngine ?? "baseline");
+    setTranslateEndpoint(q.data.textEngine.translateEndpoint ?? "");
+  }, [q.data?.textEngine]);
 
   useEffect(() => {
     if (!q.data?.mpvm) return;
@@ -379,6 +417,10 @@ export function IntegrationSettingsPanel() {
     mutationFn: async (): Promise<IntegrationPutResponse> => {
       if (!merged) throw new Error("Нет данных формы");
       const body: Record<string, unknown> = {
+        textEngine: {
+          textEngine,
+          translateEndpoint: translateEndpoint.trim()
+        },
         llm: {
           profiles: merged.profiles.map((p) => {
             const row: Record<string, unknown> = {
@@ -406,7 +448,7 @@ export function IntegrationSettingsPanel() {
     },
     onSuccess: (data: IntegrationPutResponse) => {
       if (data.nvdVerification) setNvdVerify(data.nvdVerification);
-      setMsg("Сохранено. LLM — воркеры apps/ai; ключ NVD в БД — ingest на ближайшем цикле.");
+      setMsg("Сохранено. Text engine/LLM — воркеры apps/ai; ключ NVD в БД — ingest на ближайшем цикле.");
       setErr(null);
       void qc.setQueryData(["settings", "integrations"], data);
       void qc.invalidateQueries({ queryKey: ["stats", "queue"] });
@@ -418,6 +460,8 @@ export function IntegrationSettingsPanel() {
         }))
       );
       setActiveId(data.llm.activeId ?? null);
+      setTextEngine(data.textEngine.textEngine ?? "baseline");
+      setTranslateEndpoint(data.textEngine.translateEndpoint ?? "");
       setNvdKeyDraft("");
     },
     onError: (e: unknown) => {
@@ -509,574 +553,642 @@ export function IntegrationSettingsPanel() {
   const data = q.data!;
   const list = merged?.profiles ?? [];
 
-  return (
-    <div className="space-y-8">
-      <div>
-        <div className="text-sm font-medium">Интеграции</div>
-        <div className="mt-1 text-[11px] text-muted">
-          LLM, NVD, БДУ, MaxPatrol VM, Telegram-бот для постов из карточек CVE/BDU.
-        </div>
-      </div>
 
+  return (
+    <div className="space-y-5">
       {msg ? <div className="rounded-lg border border-ok/30 bg-ok/10 px-3 py-2 text-[11px] text-ok">{msg}</div> : null}
       {err ? <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[11px] text-danger">{err}</div> : null}
 
-      <div className="rounded-xl border border-slate-200/90 bg-slate-50/90 p-4 dark:border-white/[0.06] dark:bg-black/20">
-        <div className="text-[12px] font-medium text-fg/90">NVD API key</div>
-        <div className="mt-1 text-[11px] text-muted">
-          В БД: {data.nvd.hasDbKey ? "задан" : "нет"} · в .env: {data.nvd.hasEnvKey ? "есть NVD_API_KEY" : "нет"} ·
-          активный: <span className="font-medium text-fg/85">{sourceLabel(data.nvd.activeKeySource)}</span>
-        </div>
-        {data.nvd.hasDbKey && data.nvd.hasEnvKey ? (
-          <div className="mt-2 text-[10px] text-warn">
-            Ключ в БД имеет приоритет над .env. Удалите или исправьте неверный NVD_API_KEY в .env, чтобы не путаться.
-          </div>
-        ) : null}
-        <div className="mt-2 text-[10px] text-muted">
-          Статус NVD ingest и очередей — в «Здоровье системы».
-        </div>
-        <input
-          type="password"
-          autoComplete="off"
-          value={nvdKeyDraft}
-          onChange={(e) => setNvdKeyDraft(e.target.value)}
-          placeholder="Новый ключ (сохранить в БД)…"
-          className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
-        />
-        {nvdVerify ? (
-          <div
-            className={cn(
-              "mt-3 rounded-lg border px-3 py-2 text-[11px]",
-              nvdVerify.ok && !nvdVerify.apiKeyRejected
-                ? "border-ok/30 bg-ok/10 text-ok"
-                : "border-warn/35 bg-warn/10 text-warn"
-            )}
-          >
-            Проверка: {nvdVerify.ok ? "OK" : "ошибка"} · HTTP {nvdVerify.status ?? "—"} · {nvdVerify.ms}ms
-            {nvdVerify.apiKeyRejected ? " · ключ недействителен (404)" : ""}
-            {nvdVerify.error ? <div className="mt-1 text-[10px] opacity-90">{nvdVerify.error}</div> : null}
-          </div>
-        ) : null}
-        <div className="mt-2 flex flex-wrap gap-2">
-          <button
-            type="button"
-            disabled={verifyNvdMut.isPending}
-            onClick={() =>
-              void verifyNvdMut.mutate(nvdKeyDraft.trim() || undefined)
-            }
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-fg/85 hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25"
-          >
-            {verifyNvdMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            Проверить ключ
-          </button>
-          <button
-            type="button"
-            disabled={saveNvdMut.isPending || !nvdKeyDraft.trim()}
-            onClick={() => void saveNvdMut.mutateAsync(nvdKeyDraft)}
-            className={cn(
-              "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[11px]",
-              "border-accent/30 bg-accent/10 text-fg/90 hover:bg-accent/15",
-              (!nvdKeyDraft.trim() || saveNvdMut.isPending) && "pointer-events-none opacity-50"
-            )}
-          >
-            {saveNvdMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-            Сохранить в БД
-          </button>
-          <button
-            type="button"
-            disabled={clearNvdMut.isPending || !data.nvd.hasDbKey}
-            onClick={() => void clearNvdMut.mutateAsync()}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-fg/85 hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25"
-          >
-            {clearNvdMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-            Удалить ключ из БД
-          </button>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-amber-200/90 bg-amber-50/50 p-4 dark:border-amber-900/40 dark:bg-amber-950/25">
-        <div className="text-[12px] font-medium text-fg/90">VulnCheck API (KEV + XDB)</div>
-        <div className="mt-1 text-[11px] text-muted">
-          Community token для каталога VulnCheck KEV. В БД: {data.vulncheck?.hasDbToken ? "задан" : "нет"} · в .env:{" "}
-          {data.vulncheck?.hasEnvToken ? "VULNCHECK_API_TOKEN" : "нет"} · активен:{" "}
-          {data.vulncheck?.activeTokenSource === "db"
-            ? "БД"
-            : data.vulncheck?.activeTokenSource === "env"
-              ? ".env"
-              : "не задан"}
-        </div>
-        {data.vulncheck?.lastIngestAt ? (
-          <div className="mt-2 text-[10px] text-muted">
-            Посл. ingest: {new Date(data.vulncheck.lastIngestAt).toLocaleString()}
-            {typeof data.vulncheck.lastIngestItems === "number"
-              ? ` · ${data.vulncheck.lastIngestItems} записей`
-              : ""}
-            {typeof data.vulncheck.kevCount === "number" ? ` · в БД: ${data.vulncheck.kevCount}` : ""}
-          </div>
-        ) : null}
-        <input
-          type="password"
-          autoComplete="off"
-          value={vcTokenDraft}
-          onChange={(e) => setVcTokenDraft(e.target.value)}
-          placeholder={data.vulncheck?.hasDbToken ? "Новый токен…" : "VulnCheck API token"}
-          className="mt-3 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
-        />
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            disabled={saveVulncheckMut.isPending || !vcTokenDraft.trim()}
-            onClick={() => void saveVulncheckMut.mutateAsync(vcTokenDraft)}
-            className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] disabled:opacity-50"
-          >
-            {saveVulncheckMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-            Сохранить в БД
-          </button>
-          <button
-            type="button"
-            disabled={clearVulncheckMut.isPending || !data.vulncheck?.hasDbToken}
-            onClick={() => void clearVulncheckMut.mutateAsync()}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] disabled:opacity-50 dark:border-border dark:bg-black/25"
-          >
-            {clearVulncheckMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
-            Удалить из БД
-          </button>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-sky-200/90 bg-sky-50/50 p-4 dark:border-sky-900/40 dark:bg-sky-950/25">
-        <div className="text-[12px] font-medium text-fg/90">Telegram-бот</div>
-        <div className="mt-1 text-[11px] text-muted">
-          Токен от <span className="font-mono">@BotFather</span>, chat id канала/чата (например{" "}
-          <span className="font-mono">-100…</span>). Кнопка «Пост в ТГ» в карточке CVE/BDU шлёт сообщение по шаблону
-          банка.
-        </div>
-        {data.telegram ? (
-          <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-muted">
-            {data.telegram.hasBotToken ? <span className="text-ok">токен в БД</span> : <span className="text-warn">токен не задан</span>}
-            {data.telegram.chatId ? (
-              <span>
-                chat: <span className="font-mono text-fg/75">{data.telegram.chatId}</span>
-              </span>
-            ) : null}
-            {data.telegram.lastPostAt ? (
-              <span>посл. пост: {new Date(data.telegram.lastPostAt).toLocaleString()}</span>
-            ) : null}
-            {data.telegram.lastPostIdentifier ? <span>({data.telegram.lastPostIdentifier})</span> : null}
-          </div>
-        ) : null}
-        <label className="mt-3 block text-[10px] text-muted">Токен бота</label>
-        <input
-          type="password"
-          autoComplete="off"
-          value={tgBotTokenDraft}
-          onChange={(e) => setTgBotTokenDraft(e.target.value)}
-          placeholder={data.telegram?.hasBotToken ? "Новый токен…" : "123456:ABC…"}
-          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
-        />
-        <label className="mt-2 block text-[10px] text-muted">Chat ID</label>
-        <input
-          value={tgChatId}
-          onChange={(e) => setTgChatId(e.target.value)}
-          placeholder="-1001234567890"
-          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm dark:border-border dark:bg-black/25"
-        />
-        {tgVerify ? (
-          <div
-            className={cn(
-              "mt-3 rounded-lg border px-3 py-2 text-[11px]",
-              tgVerify.ok ? "border-ok/30 bg-ok/10 text-ok" : "border-warn/35 bg-warn/10 text-warn"
-            )}
-          >
-            Проверка: {tgVerify.ok ? "тестовое сообщение отправлено" : "ошибка"}
-            {tgVerify.error ? <div className="mt-1 opacity-90">{tgVerify.error}</div> : null}
-          </div>
-        ) : null}
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            disabled={verifyTgMut.isPending || (!tgBotTokenDraft.trim() && !data.telegram?.hasBotToken) || !tgChatId.trim()}
-            onClick={() => void verifyTgMut.mutate()}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25"
-          >
-            {verifyTgMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            Проверить (тест в канал)
-          </button>
-          <button
-            type="button"
-            disabled={
-              saveTgMut.isPending ||
-              !tgChatId.trim() ||
-              (!tgBotTokenDraft.trim() && !data.telegram?.hasBotToken)
-            }
-            onClick={() => void saveTgMut.mutateAsync()}
-            className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] disabled:opacity-50"
-          >
-            {saveTgMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-            Сохранить
-          </button>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-violet-200/90 bg-violet-50/50 p-4 dark:border-violet-900/40 dark:bg-violet-950/25">
-        <div className="text-[12px] font-medium text-fg/90">MaxPatrol VM</div>
-        <div className="mt-1 text-[11px] text-muted">
-          URL консоли MP VM (HTTPS, порт 443), логин учётки и API-токен (Bearer). Синхронизация забирает активы,
-          установленное ПО/пакеты, версии и уязвимости через <span className="font-mono">assets_grid</span>.
-        </div>
-        {data.mpvm ? (
-          <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-muted">
-            <span>
-              в системе: <span className="font-medium text-fg/85">{data.mpvm.assetCount.toLocaleString()}</span> активов
-            </span>
-            <span>
-              <span className="font-medium text-fg/85">{data.mpvm.softwareCount.toLocaleString()}</span> ПО/пакетов
-            </span>
-            <span>
-              <span className="font-medium text-fg/85">{data.mpvm.vulnerabilityCount.toLocaleString()}</span> уязвимостей
-            </span>
-            {data.mpvm.hasApiToken ? <span className="text-ok">токен в БД</span> : <span className="text-warn">токен не задан</span>}
-            {data.mpvm.lastSyncAt ? (
-              <span>посл. sync: {new Date(data.mpvm.lastSyncAt).toLocaleString()}</span>
-            ) : null}
-            {typeof data.mpvm.lastSyncFetched === "number" ? (
-              <span>({data.mpvm.lastSyncFetched} шт.)</span>
-            ) : null}
-          </div>
-        ) : null}
-        {data.mpvm?.lastSyncError ? (
-          <div className="mt-2 text-[10px] text-danger">{data.mpvm.lastSyncError}</div>
-        ) : null}
-        <label className="mt-3 block text-[10px] text-muted">URL MP VM</label>
-        <input
-          value={mpvmBaseUrl}
-          onChange={(e) => setMpvmBaseUrl(e.target.value)}
-          placeholder="https://mpvm.company.local"
-          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
-        />
-        <label className="mt-2 block text-[10px] text-muted">Логин (учётная запись)</label>
-        <input
-          value={mpvmUsername}
-          onChange={(e) => setMpvmUsername(e.target.value)}
-          placeholder="admin"
-          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
-        />
-        <label className="mt-2 block text-[10px] text-muted">API-токен</label>
-        <input
-          type="password"
-          autoComplete="off"
-          value={mpvmTokenDraft}
-          onChange={(e) => setMpvmTokenDraft(e.target.value)}
-          placeholder={data.mpvm?.hasApiToken ? "Новый токен (оставьте пустым — не менять)…" : "Bearer / API token…"}
-          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
-        />
-        <label className="mt-2 block text-[10px] text-muted">PDQL (активы + ПО/пакеты + уязвимости)</label>
-        <textarea
-          value={mpvmPdql}
-          onChange={(e) => setMpvmPdql(e.target.value)}
-          rows={3}
-          className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-[11px] dark:border-border dark:bg-black/25"
-        />
-        <label className="mt-2 flex items-center gap-2 text-[11px] text-fg/75">
-          <input
-            type="checkbox"
-            checked={mpvmTlsInsecure}
-            onChange={(e) => setMpvmTlsInsecure(e.target.checked)}
-          />
-          Не проверять TLS (самоподписанный сертификат)
-        </label>
-        {mpvmVerify ? (
-          <div
-            className={cn(
-              "mt-3 rounded-lg border px-3 py-2 text-[11px]",
-              mpvmVerify.ok ? "border-ok/30 bg-ok/10 text-ok" : "border-warn/35 bg-warn/10 text-warn"
-            )}
-          >
-            Проверка: {mpvmVerify.ok ? "OK" : "ошибка"} · {mpvmVerify.ms}ms
-            {mpvmVerify.ok ? ` · образец: ${mpvmVerify.assetSample} записей` : ""}
-            {mpvmVerify.error ? <div className="mt-1 opacity-90">{mpvmVerify.error}</div> : null}
-          </div>
-        ) : null}
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            disabled={verifyMpvmMut.isPending || !mpvmBaseUrl.trim()}
-            onClick={() => void verifyMpvmMut.mutate()}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25"
-          >
-            {verifyMpvmMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            Проверить подключение
-          </button>
-          <button
-            type="button"
-            disabled={saveMpvmMut.isPending || !mpvmBaseUrl.trim()}
-            onClick={() => void saveMpvmMut.mutateAsync()}
-            className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] disabled:opacity-50"
-          >
-            {saveMpvmMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-            Сохранить
-          </button>
-          <button
-            type="button"
-            disabled={
-              syncMpvmMut.isPending ||
-              (!data.mpvm?.hasApiToken && !mpvmTokenDraft.trim()) ||
-              !mpvmBaseUrl.trim()
-            }
-            onClick={() => void syncMpvmMut.mutateAsync()}
-            className="inline-flex items-center gap-2 rounded-lg border border-violet-300/50 bg-violet-500/15 px-3 py-1.5 text-[11px] disabled:opacity-50"
-          >
-            {syncMpvmMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-            Синхронизировать inventory
-          </button>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-teal-200/90 bg-teal-50/60 p-4 dark:border-teal-900/50 dark:bg-teal-950/20">
-        <div className="text-[12px] font-medium text-fg/90">БДУ ФСТЭК (vulxml)</div>
-        <div className="mt-1 text-[11px] text-muted">
-          Источник по умолчанию:{" "}
-          <span className="font-mono text-[10px] text-fg/80">https://bdu.fstec.ru/files/documents/vulxml.zip</span>
-          . Override: <span className="font-mono">BDU_XML_URL</span>, зеркало:{" "}
-          <span className="font-mono">BDU_ALLOW_MIRROR_FALLBACK=true</span>.
-        </div>
-        <div className="mt-2 text-[10px] text-muted">Статус БДУ ingest — в «Здоровье системы».</div>
-      </div>
-
-      <div className="rounded-xl border border-dashed border-slate-300/90 bg-white/60 p-4 text-[11px] leading-relaxed text-muted dark:border-white/10 dark:bg-black/10">
-        <div className="font-medium text-fg/90">Развёртывание (минимум для оператора)</div>
-        <ul className="mt-2 list-inside list-disc space-y-1">
-          <li>
-            <span className="text-fg/80">Postgres + Redis + RabbitMQ</span> —{" "}
-            <span className="font-mono">infra/docker-compose.yml</span>, переменная{" "}
-            <span className="font-mono">DATABASE_URL</span> в .env.
-          </li>
-          <li>
-            <span className="text-fg/80">Ключ NVD</span> — лучше здесь (БД), не в .env:{" "}
-            <a
-              className="text-accent hover:underline"
-              href="https://nvd.nist.gov/developers/request-an-api-key"
-              target="_blank"
-              rel="noreferrer"
-            >
-              запрос ключа на nist.gov
-            </a>
-            . Неверный ключ даёт HTTP 404 на все запросы.
-          </li>
-          <li>
-            <span className="text-fg/80">LLM</span> — профиль ниже или <span className="font-mono">LLM_*</span> в .env
-            (Ollama/OpenAI/x.ai).
-          </li>
-          <li>
-            <span className="text-fg/80">Ingest</span> — <span className="font-mono">apps/ingest</span>, интервал{" "}
-            <span className="font-mono">NVD_POLL_INTERVAL_MS</span>, пауза страниц{" "}
-            <span className="font-mono">NVD_PAGE_SLEEP_MS=6500</span> с ключом.
-          </li>
-        </ul>
-      </div>
-
-      <div className="rounded-xl border border-slate-200/90 bg-slate-50/90 p-4 dark:border-white/[0.06] dark:bg-black/20">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <div className="text-[12px] font-medium text-fg/90">Профили LLM</div>
-            <div className="mt-1 text-[11px] text-muted">
-              Fallback из .env: <span className="font-mono">{data.llm.envFallback.endpoint}</span> · модель{" "}
-              <span className="font-mono">{data.llm.envFallback.model}</span>
-              {data.llm.envFallback.hasApiKey ? " · ключ в .env есть" : ""}
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              setProfiles((prev) => [...(prev ?? list), emptyProfile()]);
-            }}
-            className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] text-fg/90 hover:bg-accent/15"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Профиль
-          </button>
-        </div>
-
-        <div className="mt-4 space-y-4">
-          <div className="rounded-xl border border-slate-200 bg-white p-3 dark:border-white/10 dark:bg-black/30">
-            <div className="flex flex-wrap items-start justify-between gap-2">
-              <label className="flex items-center gap-2 text-[11px] text-muted">
-                <input
-                  type="radio"
-                  name="llm-active"
-                  checked={!merged?.activeId}
-                  onChange={() => setActiveId(null)}
-                />
-                Использовать Fallback (.env)
-              </label>
-              <span className="text-[10px] text-muted">рекомендуется для локального Ollama</span>
-            </div>
-            <div className="mt-2 text-[10px] text-muted">
-              Endpoint: <span className="font-mono text-fg/80">{data.llm.envFallback.endpoint}</span> · model:{" "}
-              <span className="font-mono text-fg/80">{data.llm.envFallback.model}</span>
-            </div>
-          </div>
-
-          {list.map((p, idx) => (
-            <div key={p.id} className="rounded-xl border border-slate-200 bg-white p-3 dark:border-white/10 dark:bg-black/30">
-              <div className="flex flex-wrap items-start justify-between gap-2">
-                <label className="flex items-center gap-2 text-[11px] text-muted">
-                  <input
-                    type="radio"
-                    name="llm-active"
-                    checked={merged?.activeId === p.id}
-                    onChange={() => setActiveId(p.id)}
-                  />
-                  Активный
-                </label>
-                <button
-                  type="button"
-                  className="text-[11px] text-danger hover:underline"
-                  onClick={() => {
-                    setProfiles((prev) => (prev ?? list).filter((x) => x.id !== p.id));
-                    if (merged?.activeId === p.id) setActiveId(null);
-                  }}
-                >
-                  Удалить
-                </button>
-              </div>
-              <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
-                <div>
-                  <div className="text-[10px] text-muted">Имя</div>
-                  <input
-                    value={p.name}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setProfiles((prev) => {
-                        const base = prev ?? list;
-                        const cp = [...base];
-                        cp[idx] = { ...cp[idx]!, name: v };
-                        return cp;
-                      });
-                    }}
-                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm dark:border-border dark:bg-black/25"
-                  />
-                </div>
-                <div>
-                  <div className="text-[10px] text-muted">Модель</div>
-                  <input
-                    value={p.model}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setProfiles((prev) => {
-                        const base = prev ?? list;
-                        const cp = [...base];
-                        cp[idx] = { ...cp[idx]!, model: v };
-                        return cp;
-                      });
-                    }}
-                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm font-mono dark:border-border dark:bg-black/25"
-                  />
-                </div>
-                <div className="md:col-span-2">
-                  <div className="text-[10px] text-muted">Endpoint (OpenAI‑compatible)</div>
-                  <input
-                    value={p.endpoint}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setProfiles((prev) => {
-                        const base = prev ?? list;
-                        const cp = [...base];
-                        cp[idx] = { ...cp[idx]!, endpoint: v };
-                        return cp;
-                      });
-                    }}
-                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm font-mono dark:border-border dark:bg-black/25"
-                  />
-                </div>
-                <div>
-                  <div className="text-[10px] text-muted">promptVersion</div>
-                  <input
-                    value={p.promptVersion}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setProfiles((prev) => {
-                        const base = prev ?? list;
-                        const cp = [...base];
-                        cp[idx] = { ...cp[idx]!, promptVersion: v };
-                        return cp;
-                      });
-                    }}
-                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm dark:border-border dark:bg-black/25"
-                  />
-                </div>
-                <div>
-                  <div className="text-[10px] text-muted">API key (опционально)</div>
-                  <input
-                    type="text"
-                    autoComplete="off"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    inputMode="text"
-                    data-lpignore="true"
-                    value={p.apiKeyDraft}
-                    placeholder={p.hasApiKey ? "•••• (в БД есть — оставь пустым чтобы не менять)" : "пусто для Ollama"}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setProfiles((prev) => {
-                        const base = prev ?? list;
-                        const cp = [...base];
-                        cp[idx] = { ...cp[idx]!, apiKeyDraft: v, clearApiKey: false };
-                        return cp;
-                      });
-                    }}
-                    className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm font-mono dark:border-border dark:bg-black/25"
-                  />
-                  <div className="mt-1 text-[10px] text-muted">
-                    Если ключ уже есть в БД — оставь поле пустым, чтобы <span className="text-fg/80">не менять</span>. Вставь новый ключ
-                    (например Gemini) — чтобы <span className="text-fg/80">заменить</span>.
+      {showIntegrations ? (
+        <div className="space-y-4">
+          <SettingsBlock
+            title="NVD API key"
+            description={
+              <>
+                В БД: {data.nvd.hasDbKey ? "задан" : "нет"} · в .env: {data.nvd.hasEnvKey ? "есть NVD_API_KEY" : "нет"} ·
+                активный: <span className="font-medium text-fg/85">{sourceLabel(data.nvd.activeKeySource)}</span>
+                {data.nvd.hasDbKey && data.nvd.hasEnvKey ? (
+                  <div className="mt-1 text-warn">
+                    Ключ в БД имеет приоритет над .env. Удалите или исправьте неверный NVD_API_KEY в .env, чтобы не путаться.
                   </div>
-                  {p.hasApiKey ? (
+                ) : null}
+                <div className="mt-1">Статус NVD ingest и очередей — в «Здоровье системы».</div>
+              </>
+            }
+          >
+            <input
+              type="password"
+              autoComplete="off"
+              value={nvdKeyDraft}
+              onChange={(e) => setNvdKeyDraft(e.target.value)}
+              placeholder="Новый ключ (сохранить в БД)…"
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
+            />
+            {nvdVerify ? (
+              <div
+                className={cn(
+                  "mt-3 rounded-lg border px-3 py-2 text-[11px]",
+                  nvdVerify.ok && !nvdVerify.apiKeyRejected
+                    ? "border-ok/30 bg-ok/10 text-ok"
+                    : "border-warn/35 bg-warn/10 text-warn"
+                )}
+              >
+                Проверка: {nvdVerify.ok ? "OK" : "ошибка"} · HTTP {nvdVerify.status ?? "—"} · {nvdVerify.ms}ms
+                {nvdVerify.apiKeyRejected ? " · ключ недействителен (404)" : ""}
+                {nvdVerify.error ? <div className="mt-1 text-[10px] opacity-90">{nvdVerify.error}</div> : null}
+              </div>
+            ) : null}
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={verifyNvdMut.isPending}
+                onClick={() => void verifyNvdMut.mutate(nvdKeyDraft.trim() || undefined)}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-fg/85 hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25"
+              >
+                {verifyNvdMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                Проверить ключ
+              </button>
+              <button
+                type="button"
+                disabled={saveNvdMut.isPending || !nvdKeyDraft.trim()}
+                onClick={() => void saveNvdMut.mutateAsync(nvdKeyDraft)}
+                className={cn(
+                  "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-[11px]",
+                  "border-accent/30 bg-accent/10 text-fg/90 hover:bg-accent/15",
+                  (!nvdKeyDraft.trim() || saveNvdMut.isPending) && "pointer-events-none opacity-50"
+                )}
+              >
+                {saveNvdMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                Сохранить в БД
+              </button>
+              <button
+                type="button"
+                disabled={clearNvdMut.isPending || !data.nvd.hasDbKey}
+                onClick={() => void clearNvdMut.mutateAsync()}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] text-fg/85 hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25"
+              >
+                {clearNvdMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                Удалить ключ из БД
+              </button>
+            </div>
+          </SettingsBlock>
+
+          <SettingsBlock
+            title="VulnCheck API (KEV + XDB)"
+            description={
+              <>
+                Community token для каталога VulnCheck KEV. В БД: {data.vulncheck?.hasDbToken ? "задан" : "нет"} · в .env:{" "}
+                {data.vulncheck?.hasEnvToken ? "VULNCHECK_API_TOKEN" : "нет"} · активен:{" "}
+                {data.vulncheck?.activeTokenSource === "db"
+                  ? "БД"
+                  : data.vulncheck?.activeTokenSource === "env"
+                    ? ".env"
+                    : "не задан"}
+                {data.vulncheck?.lastIngestAt ? (
+                  <div className="mt-1">
+                    Посл. ingest: {new Date(data.vulncheck.lastIngestAt).toLocaleString()}
+                    {typeof data.vulncheck.lastIngestItems === "number"
+                      ? ` · ${data.vulncheck.lastIngestItems} записей`
+                      : ""}
+                    {typeof data.vulncheck.kevCount === "number" ? ` · в БД: ${data.vulncheck.kevCount}` : ""}
+                  </div>
+                ) : null}
+              </>
+            }
+          >
+            <input
+              type="password"
+              autoComplete="off"
+              value={vcTokenDraft}
+              onChange={(e) => setVcTokenDraft(e.target.value)}
+              placeholder={data.vulncheck?.hasDbToken ? "Новый токен…" : "VulnCheck API token"}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
+            />
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={saveVulncheckMut.isPending || !vcTokenDraft.trim()}
+                onClick={() => void saveVulncheckMut.mutateAsync(vcTokenDraft)}
+                className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] disabled:opacity-50"
+              >
+                {saveVulncheckMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                Сохранить в БД
+              </button>
+              <button
+                type="button"
+                disabled={clearVulncheckMut.isPending || !data.vulncheck?.hasDbToken}
+                onClick={() => void clearVulncheckMut.mutateAsync()}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] disabled:opacity-50 dark:border-border dark:bg-black/25"
+              >
+                {clearVulncheckMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                Удалить из БД
+              </button>
+            </div>
+          </SettingsBlock>
+
+          <SettingsBlock
+            title="Telegram-бот"
+            description={
+              <>
+                Токен от <span className="font-mono">@BotFather</span>, chat id канала/чата (например{" "}
+                <span className="font-mono">-100…</span>). Кнопка «Пост в ТГ» в карточке CVE/BDU шлёт сообщение по шаблону
+                банка.
+                {data.telegram ? (
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    {data.telegram.hasBotToken ? (
+                      <span className="text-ok">токен в БД</span>
+                    ) : (
+                      <span className="text-warn">токен не задан</span>
+                    )}
+                    {data.telegram.chatId ? (
+                      <span>
+                        chat: <span className="font-mono text-fg/75">{data.telegram.chatId}</span>
+                      </span>
+                    ) : null}
+                    {data.telegram.lastPostAt ? (
+                      <span>посл. пост: {new Date(data.telegram.lastPostAt).toLocaleString()}</span>
+                    ) : null}
+                    {data.telegram.lastPostIdentifier ? <span>({data.telegram.lastPostIdentifier})</span> : null}
+                  </div>
+                ) : null}
+              </>
+            }
+          >
+            <label className="block text-[10px] text-muted">Токен бота</label>
+            <input
+              type="password"
+              autoComplete="off"
+              value={tgBotTokenDraft}
+              onChange={(e) => setTgBotTokenDraft(e.target.value)}
+              placeholder={data.telegram?.hasBotToken ? "Новый токен…" : "123456:ABC…"}
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
+            />
+            <label className="mt-2 block text-[10px] text-muted">Chat ID</label>
+            <input
+              value={tgChatId}
+              onChange={(e) => setTgChatId(e.target.value)}
+              placeholder="-1001234567890"
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm dark:border-border dark:bg-black/25"
+            />
+            {tgVerify ? (
+              <div
+                className={cn(
+                  "mt-3 rounded-lg border px-3 py-2 text-[11px]",
+                  tgVerify.ok ? "border-ok/30 bg-ok/10 text-ok" : "border-warn/35 bg-warn/10 text-warn"
+                )}
+              >
+                Проверка: {tgVerify.ok ? "тестовое сообщение отправлено" : "ошибка"}
+                {tgVerify.error ? <div className="mt-1 opacity-90">{tgVerify.error}</div> : null}
+              </div>
+            ) : null}
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={
+                  verifyTgMut.isPending ||
+                  (!tgBotTokenDraft.trim() && !data.telegram?.hasBotToken) ||
+                  !tgChatId.trim()
+                }
+                onClick={() => void verifyTgMut.mutate()}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25"
+              >
+                {verifyTgMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                Проверить (тест в канал)
+              </button>
+              <button
+                type="button"
+                disabled={
+                  saveTgMut.isPending ||
+                  !tgChatId.trim() ||
+                  (!tgBotTokenDraft.trim() && !data.telegram?.hasBotToken)
+                }
+                onClick={() => void saveTgMut.mutateAsync()}
+                className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] disabled:opacity-50"
+              >
+                {saveTgMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                Сохранить
+              </button>
+            </div>
+          </SettingsBlock>
+
+          <SettingsBlock
+            title="MaxPatrol VM"
+            description={
+              <>
+                URL консоли MP VM (HTTPS, порт 443), логин учётки и API-токен (Bearer). Синхронизация забирает активы,
+                установленное ПО/пакеты, версии и уязвимости через <span className="font-mono">assets_grid</span>.
+                {data.mpvm ? (
+                  <div className="mt-1 flex flex-wrap gap-2">
+                    <span>
+                      в системе:{" "}
+                      <span className="font-medium text-fg/85">{data.mpvm.assetCount.toLocaleString()}</span> активов
+                    </span>
+                    <span>
+                      <span className="font-medium text-fg/85">{data.mpvm.softwareCount.toLocaleString()}</span> ПО/пакетов
+                    </span>
+                    <span>
+                      <span className="font-medium text-fg/85">{data.mpvm.vulnerabilityCount.toLocaleString()}</span>{" "}
+                      уязвимостей
+                    </span>
+                    {data.mpvm.hasApiToken ? (
+                      <span className="text-ok">токен в БД</span>
+                    ) : (
+                      <span className="text-warn">токен не задан</span>
+                    )}
+                    {data.mpvm.lastSyncAt ? (
+                      <span>посл. sync: {new Date(data.mpvm.lastSyncAt).toLocaleString()}</span>
+                    ) : null}
+                    {typeof data.mpvm.lastSyncFetched === "number" ? (
+                      <span>({data.mpvm.lastSyncFetched} шт.)</span>
+                    ) : null}
+                  </div>
+                ) : null}
+                {data.mpvm?.lastSyncError ? (
+                  <div className="mt-1 text-danger">{data.mpvm.lastSyncError}</div>
+                ) : null}
+              </>
+            }
+          >
+            <label className="block text-[10px] text-muted">URL MP VM</label>
+            <input
+              value={mpvmBaseUrl}
+              onChange={(e) => setMpvmBaseUrl(e.target.value)}
+              placeholder="https://mpvm.company.local"
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
+            />
+            <label className="mt-2 block text-[10px] text-muted">Логин (учётная запись)</label>
+            <input
+              value={mpvmUsername}
+              onChange={(e) => setMpvmUsername(e.target.value)}
+              placeholder="admin"
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
+            />
+            <label className="mt-2 block text-[10px] text-muted">API-токен</label>
+            <input
+              type="password"
+              autoComplete="off"
+              value={mpvmTokenDraft}
+              onChange={(e) => setMpvmTokenDraft(e.target.value)}
+              placeholder={
+                data.mpvm?.hasApiToken ? "Новый токен (оставьте пустым — не менять)…" : "Bearer / API token…"
+              }
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
+            />
+            <label className="mt-2 block text-[10px] text-muted">PDQL (активы + ПО/пакеты + уязвимости)</label>
+            <textarea
+              value={mpvmPdql}
+              onChange={(e) => setMpvmPdql(e.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-[11px] dark:border-border dark:bg-black/25"
+            />
+            <label className="mt-2 flex items-center gap-2 text-[11px] text-fg/75">
+              <input
+                type="checkbox"
+                checked={mpvmTlsInsecure}
+                onChange={(e) => setMpvmTlsInsecure(e.target.checked)}
+              />
+              Не проверять TLS (самоподписанный сертификат)
+            </label>
+            {mpvmVerify ? (
+              <div
+                className={cn(
+                  "mt-3 rounded-lg border px-3 py-2 text-[11px]",
+                  mpvmVerify.ok ? "border-ok/30 bg-ok/10 text-ok" : "border-warn/35 bg-warn/10 text-warn"
+                )}
+              >
+                Проверка: {mpvmVerify.ok ? "OK" : "ошибка"} · {mpvmVerify.ms}ms
+                {mpvmVerify.ok ? ` · образец: ${mpvmVerify.assetSample} записей` : ""}
+                {mpvmVerify.error ? <div className="mt-1 opacity-90">{mpvmVerify.error}</div> : null}
+              </div>
+            ) : null}
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={verifyMpvmMut.isPending || !mpvmBaseUrl.trim()}
+                onClick={() => void verifyMpvmMut.mutate()}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-[11px] hover:bg-slate-50 disabled:opacity-50 dark:border-border dark:bg-black/25"
+              >
+                {verifyMpvmMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                Проверить подключение
+              </button>
+              <button
+                type="button"
+                disabled={saveMpvmMut.isPending || !mpvmBaseUrl.trim()}
+                onClick={() => void saveMpvmMut.mutateAsync()}
+                className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] disabled:opacity-50"
+              >
+                {saveMpvmMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                Сохранить
+              </button>
+              <button
+                type="button"
+                disabled={
+                  syncMpvmMut.isPending ||
+                  (!data.mpvm?.hasApiToken && !mpvmTokenDraft.trim()) ||
+                  !mpvmBaseUrl.trim()
+                }
+                onClick={() => void syncMpvmMut.mutateAsync()}
+                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-[11px] disabled:opacity-50 dark:border-border dark:bg-white/[0.06]"
+              >
+                {syncMpvmMut.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                Синхронизировать inventory
+              </button>
+            </div>
+          </SettingsBlock>
+
+          <SettingsBlock
+            title="БДУ ФСТЭК (vulxml)"
+            description={
+              <>
+                Источник по умолчанию:{" "}
+                <span className="font-mono text-[10px] text-fg/80">
+                  https://bdu.fstec.ru/files/documents/vulxml.zip
+                </span>
+                . Override: <span className="font-mono">BDU_XML_URL</span>, зеркало:{" "}
+                <span className="font-mono">BDU_ALLOW_MIRROR_FALLBACK=true</span>.
+                <div className="mt-1">Статус БДУ ingest — в «Здоровье системы».</div>
+              </>
+            }
+          >
+            <p className="text-[11px] text-muted">Отдельный ключ в UI не требуется — достаточно доступности источника и ingest.</p>
+          </SettingsBlock>
+
+          <details className="rounded-xl border border-dashed border-slate-300 bg-slate-50/60 px-4 py-3 text-[11px] leading-relaxed text-muted open:pb-4 dark:border-border dark:bg-white/[0.03]">
+            <summary className="cursor-pointer select-none font-medium text-fg/85">
+              Справка по развёртыванию
+            </summary>
+            <ul className="mt-2 list-inside list-disc space-y-1">
+              <li>
+                <span className="text-fg/80">Postgres + Redis + RabbitMQ</span> —{" "}
+                <span className="font-mono">infra/docker-compose.yml</span>, переменная{" "}
+                <span className="font-mono">DATABASE_URL</span> в .env.
+              </li>
+              <li>
+                <span className="text-fg/80">Ключ NVD</span> — лучше здесь (БД), не в .env:{" "}
+                <a
+                  className="text-accent hover:underline"
+                  href="https://nvd.nist.gov/developers/request-an-api-key"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  запрос ключа на nist.gov
+                </a>
+                . Неверный ключ даёт HTTP 404 на все запросы.
+              </li>
+              <li>
+                <span className="text-fg/80">LLM</span> — раздел «Текст и LLM» или <span className="font-mono">LLM_*</span>{" "}
+                в .env (Ollama/OpenAI/x.ai).
+              </li>
+              <li>
+                <span className="text-fg/80">Ingest</span> — <span className="font-mono">apps/ingest</span>, интервал{" "}
+                <span className="font-mono">NVD_POLL_INTERVAL_MS</span>, пауза страниц{" "}
+                <span className="font-mono">NVD_PAGE_SLEEP_MS=6500</span> с ключом.
+              </li>
+            </ul>
+          </details>
+        </div>
+      ) : null}
+
+      {showTextEngine ? (
+        <div className="space-y-4">
+          <SettingsBlock
+            title="Text engine"
+            description="Baseline работает без внешних вызовов. Translate добавляет EN→RU через LibreTranslate, если URL задан. LLM включает текущий путь ИИ."
+          >
+            <label className="block text-[10px] text-muted">Режим</label>
+            <select
+              value={textEngine}
+              onChange={(e) => setTextEngine(e.target.value as "baseline" | "translate" | "llm")}
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm dark:border-border dark:bg-black/25"
+            >
+              <option value="baseline">baseline — NVD/BDU/CWE templates</option>
+              <option value="translate">translate — baseline + LibreTranslate</option>
+              <option value="llm">llm — текущий LLM pipeline</option>
+            </select>
+            <label className="mt-3 block text-[10px] text-muted">LibreTranslate URL</label>
+            <input
+              value={translateEndpoint}
+              onChange={(e) => setTranslateEndpoint(e.target.value)}
+              placeholder="http://libretranslate:5000"
+              className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-mono dark:border-border dark:bg-black/25"
+            />
+            <div className="mt-2 text-[10px] text-muted">
+              Можно указать base URL или полный путь <span className="font-mono">/translate</span>. Если URL пустой или
+              сервис недоступен, режим translate отдаёт baseline.
+            </div>
+          </SettingsBlock>
+
+          <SettingsBlock
+            title="Профили LLM"
+            description={
+              <>
+                Fallback из .env: <span className="font-mono">{data.llm.envFallback.endpoint}</span> · модель{" "}
+                <span className="font-mono">{data.llm.envFallback.model}</span>
+                {data.llm.envFallback.hasApiKey ? " · ключ в .env есть" : ""}
+              </>
+            }
+          >
+            <div className="mb-3 flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setProfiles((prev) => [...(prev ?? list), emptyProfile()]);
+                }}
+                className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-[11px] text-fg/90 hover:bg-accent/15"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Профиль
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 dark:border-border dark:bg-black/20">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <label className="flex items-center gap-2 text-[11px] text-muted">
+                    <input
+                      type="radio"
+                      name="llm-active"
+                      checked={!merged?.activeId}
+                      onChange={() => setActiveId(null)}
+                    />
+                    Использовать Fallback (.env)
+                  </label>
+                  <span className="text-[10px] text-muted">рекомендуется для локального Ollama</span>
+                </div>
+                <div className="mt-2 text-[10px] text-muted">
+                  Endpoint: <span className="font-mono text-fg/80">{data.llm.envFallback.endpoint}</span> · model:{" "}
+                  <span className="font-mono text-fg/80">{data.llm.envFallback.model}</span>
+                </div>
+              </div>
+
+              {list.map((p, idx) => (
+                <div
+                  key={p.id}
+                  className="rounded-lg border border-slate-200 bg-slate-50/80 p-3 dark:border-border dark:bg-black/20"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <label className="flex items-center gap-2 text-[11px] text-muted">
+                      <input
+                        type="radio"
+                        name="llm-active"
+                        checked={merged?.activeId === p.id}
+                        onChange={() => setActiveId(p.id)}
+                      />
+                      Активный
+                    </label>
                     <button
                       type="button"
-                      className="mt-1 text-[10px] text-danger hover:underline"
+                      className="text-[11px] text-danger hover:underline"
                       onClick={() => {
-                        setProfiles((prev) => {
-                          const base = prev ?? list;
-                          const cp = [...base];
-                          cp[idx] = { ...cp[idx]!, clearApiKey: true, apiKeyDraft: "" };
-                          return cp;
-                        });
+                        setProfiles((prev) => (prev ?? list).filter((x) => x.id !== p.id));
+                        if (merged?.activeId === p.id) setActiveId(null);
                       }}
                     >
-                      Очистить ключ в БД для этого профиля
+                      Удалить
                     </button>
-                  ) : null}
+                  </div>
+                  <div className="mt-2 grid grid-cols-1 gap-2 md:grid-cols-2">
+                    <div>
+                      <div className="text-[10px] text-muted">Имя</div>
+                      <input
+                        value={p.name}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setProfiles((prev) => {
+                            const base = prev ?? list;
+                            const cp = [...base];
+                            cp[idx] = { ...cp[idx]!, name: v };
+                            return cp;
+                          });
+                        }}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm dark:border-border dark:bg-black/25"
+                      />
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-muted">Модель</div>
+                      <input
+                        value={p.model}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setProfiles((prev) => {
+                            const base = prev ?? list;
+                            const cp = [...base];
+                            cp[idx] = { ...cp[idx]!, model: v };
+                            return cp;
+                          });
+                        }}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm font-mono dark:border-border dark:bg-black/25"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <div className="text-[10px] text-muted">Endpoint (OpenAI‑compatible)</div>
+                      <input
+                        value={p.endpoint}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setProfiles((prev) => {
+                            const base = prev ?? list;
+                            const cp = [...base];
+                            cp[idx] = { ...cp[idx]!, endpoint: v };
+                            return cp;
+                          });
+                        }}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm font-mono dark:border-border dark:bg-black/25"
+                      />
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-muted">promptVersion</div>
+                      <input
+                        value={p.promptVersion}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setProfiles((prev) => {
+                            const base = prev ?? list;
+                            const cp = [...base];
+                            cp[idx] = { ...cp[idx]!, promptVersion: v };
+                            return cp;
+                          });
+                        }}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm dark:border-border dark:bg-black/25"
+                      />
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-muted">API key (опционально)</div>
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                        inputMode="text"
+                        data-lpignore="true"
+                        value={p.apiKeyDraft}
+                        placeholder={
+                          p.hasApiKey ? "•••• (в БД есть — оставь пустым чтобы не менять)" : "пусто для Ollama"
+                        }
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setProfiles((prev) => {
+                            const base = prev ?? list;
+                            const cp = [...base];
+                            cp[idx] = { ...cp[idx]!, apiKeyDraft: v, clearApiKey: false };
+                            return cp;
+                          });
+                        }}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm font-mono dark:border-border dark:bg-black/25"
+                      />
+                      <div className="mt-1 text-[10px] text-muted">
+                        Если ключ уже есть в БД — оставь поле пустым, чтобы{" "}
+                        <span className="text-fg/80">не менять</span>. Вставь новый ключ (например Gemini) — чтобы{" "}
+                        <span className="text-fg/80">заменить</span>.
+                      </div>
+                      {p.hasApiKey ? (
+                        <button
+                          type="button"
+                          className="mt-1 text-[10px] text-danger hover:underline"
+                          onClick={() => {
+                            setProfiles((prev) => {
+                              const base = prev ?? list;
+                              const cp = [...base];
+                              cp[idx] = { ...cp[idx]!, clearApiKey: true, apiKeyDraft: "" };
+                              return cp;
+                            });
+                          }}
+                        >
+                          Очистить ключ в БД для этого профиля
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
                 </div>
-              </div>
+              ))}
             </div>
-          ))}
-        </div>
 
-        <div className="mt-4 flex flex-wrap gap-2">
-          <button
-            type="button"
-            disabled={saveMut.isPending || list.length === 0}
-            onClick={() => void saveMut.mutateAsync()}
-            className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-4 py-2 text-[12px] font-medium text-fg/90 hover:bg-accent/15 disabled:opacity-50"
-          >
-            {saveMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            Сохранить LLM
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              void q.refetch();
-              setProfiles(null);
-              setMsg(null);
-              setErr(null);
-            }}
-            className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-[12px] text-fg/85 hover:bg-slate-50 dark:border-border dark:bg-black/25"
-          >
-            Сбросить форму
-          </button>
+            <div className="mt-4 flex flex-wrap gap-2 border-t border-slate-200 pt-4 dark:border-border">
+              <button
+                type="button"
+                disabled={saveMut.isPending}
+                onClick={() => void saveMut.mutateAsync()}
+                className="inline-flex items-center gap-2 rounded-lg border border-accent/30 bg-accent/10 px-4 py-2 text-[12px] font-medium text-fg/90 hover:bg-accent/15 disabled:opacity-50"
+              >
+                {saveMut.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                Сохранить text engine / LLM
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void q.refetch();
+                  setProfiles(null);
+                  setMsg(null);
+                  setErr(null);
+                }}
+                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-[12px] text-fg/85 hover:bg-slate-50 dark:border-border dark:bg-black/25"
+              >
+                Сбросить форму
+              </button>
+            </div>
+          </SettingsBlock>
         </div>
-      </div>
+      ) : null}
     </div>
   );
 }

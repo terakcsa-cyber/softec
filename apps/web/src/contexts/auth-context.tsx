@@ -18,7 +18,13 @@ import {
 import { AUTH_BFF_PREFIX } from "@/lib/auth-bff";
 import { refreshSession } from "@/lib/api-fetch";
 
-export type AuthUser = { id: string; email: string; totpEnabled: boolean; role?: string };
+export type AuthUser = {
+  id: string;
+  email: string;
+  totpEnabled: boolean;
+  role?: string;
+  mustChangePassword?: boolean;
+};
 
 type AuthContextValue = {
   user: AuthUser | null;
@@ -26,11 +32,18 @@ type AuthContextValue = {
   checkInitialSetup: () => Promise<{ required: boolean; error?: string }>;
   setupFirstAdmin: (email: string, password: string) => Promise<{ ok: boolean; error?: string }>;
   login: (email: string, password: string) => Promise<
-    | { ok: true; requiresTotp: false }
+    | { ok: true; requiresTotp: false; mustChangePassword: boolean }
     | { ok: true; requiresTotp: true; pendingToken: string }
     | { ok: false; error: string }
   >;
-  completeTotp: (pendingToken: string, code: string) => Promise<{ ok: boolean; error?: string }>;
+  completeTotp: (
+    pendingToken: string,
+    code: string
+  ) => Promise<{ ok: true; mustChangePassword: boolean } | { ok: false; error?: string }>;
+  changePassword: (
+    currentPassword: string,
+    newPassword: string
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
   logout: () => Promise<void>;
   refreshMe: () => Promise<void>;
 };
@@ -138,7 +151,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (typeof data.accessToken === "string" && typeof data.refreshToken === "string") {
       setStoredTokens(data.accessToken, data.refreshToken);
       await refreshMe();
-      return { ok: true as const, requiresTotp: false as const };
+      return {
+        ok: true as const,
+        requiresTotp: false as const,
+        mustChangePassword: data.mustChangePassword === true
+      };
     }
     return { ok: false as const, error: "Unexpected response" };
   }, [refreshMe]);
@@ -182,11 +199,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (typeof data.accessToken === "string" && typeof data.refreshToken === "string") {
         setStoredTokens(data.accessToken, data.refreshToken);
         await refreshMe();
-        return { ok: true };
+        return { ok: true, mustChangePassword: data.mustChangePassword === true };
       }
       return { ok: false, error: "Unexpected response" };
     },
     [refreshMe]
+  );
+
+  const changePassword = useCallback(
+    async (currentPassword: string, newPassword: string) => {
+      const access = getStoredAccessToken();
+      if (!access) return { ok: false as const, error: "Нет активной сессии." };
+      let res: Response;
+      try {
+        res = await fetchWithTimeout(`${AUTH_BFF_PREFIX}/change-password`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${access}`,
+            "content-type": "application/json",
+            accept: "application/json"
+          },
+          body: JSON.stringify({ currentPassword, newPassword }),
+          cache: "no-store"
+        });
+      } catch {
+        return { ok: false as const, error: "Нет связи с сервером." };
+      }
+      let data: Record<string, unknown> = {};
+      try {
+        data = (await res.json()) as Record<string, unknown>;
+      } catch {
+        // keep default
+      }
+      if (!res.ok) return { ok: false as const, error: nestErrorMessage(data) };
+      clearStoredTokens();
+      setUser(null);
+      return { ok: true as const };
+    },
+    []
   );
 
   const completeTotp = useCallback(
@@ -201,7 +251,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         });
       } catch {
         return {
-          ok: false,
+          ok: false as const,
           error: "Нет связи с сервером (проверьте, что веб и API запущены)."
         };
       }
@@ -209,17 +259,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         data = (await res.json()) as Record<string, unknown>;
       } catch {
-        return { ok: false, error: "Некорректный ответ сервера." };
+        return { ok: false as const, error: "Некорректный ответ сервера." };
       }
       if (!res.ok) {
-        return { ok: false, error: nestErrorMessage(data) };
+        return { ok: false as const, error: nestErrorMessage(data) };
       }
       if (typeof data.accessToken === "string" && typeof data.refreshToken === "string") {
         setStoredTokens(data.accessToken, data.refreshToken);
         await refreshMe();
-        return { ok: true };
+        return { ok: true as const, mustChangePassword: data.mustChangePassword === true };
       }
-      return { ok: false, error: "Unexpected response" };
+      return { ok: false as const, error: "Unexpected response" };
     },
     [refreshMe]
   );
@@ -255,10 +305,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setupFirstAdmin,
       login,
       completeTotp,
+      changePassword,
       logout,
       refreshMe
     }),
-    [user, loading, checkInitialSetup, setupFirstAdmin, login, completeTotp, logout, refreshMe]
+    [user, loading, checkInitialSetup, setupFirstAdmin, login, completeTotp, changePassword, logout, refreshMe]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

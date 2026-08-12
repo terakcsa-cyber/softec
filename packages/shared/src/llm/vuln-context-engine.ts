@@ -5,6 +5,8 @@ import {
 } from "../ai/enrichment-placeholder.js";
 import { isGenericEnrichmentTitle } from "../ai/enrichment-display.js";
 import { augmentEnrichmentWithNvdFixes } from "../cve/nvd-fix-signals.js";
+import { buildBaselineEnrichmentFromBdu, type BduBaselineInput } from "../bdu/baseline-enrichment.js";
+import { buildBaselineEnrichmentFromNvd } from "../cve/baseline-enrichment.js";
 import { DEFAULT_SYSTEM_POLICY, sha256Hex, stableJsonStringify } from "../security/prompt-safety.js";
 import {
   buildVocTaskBriefFallback,
@@ -27,6 +29,18 @@ export type VulnContextLlmConfig = {
   promptVersion: string;
 };
 
+export type TextEngineMode = "baseline" | "translate" | "llm";
+
+export type TextEngineSettings = {
+  textEngine: TextEngineMode;
+  translateEndpoint: string;
+};
+
+export function normalizeTextEngineMode(value: unknown): TextEngineMode {
+  const s = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return s === "translate" || s === "llm" ? s : "baseline";
+}
+
 function defaultModelForEndpoint(endpoint: string): string {
   const u = endpoint.toLowerCase();
   if (u.includes("dashscope")) return "qwen-turbo";
@@ -44,6 +58,25 @@ function trimEnv(s: string | undefined): string {
     return t.slice(1, -1).trim();
   }
   return t;
+}
+
+export function getTextEngineSettingsFromEnv(): TextEngineSettings {
+  return {
+    textEngine: normalizeTextEngineMode(process.env.TEXT_ENGINE),
+    translateEndpoint: trimEnv(process.env.LIBRETRANSLATE_URL)
+  };
+}
+
+export function mergeTextEngineSettings(
+  base: TextEngineSettings,
+  patch: Partial<TextEngineSettings> | null | undefined
+): TextEngineSettings {
+  if (!patch) return base;
+  return {
+    textEngine: normalizeTextEngineMode(patch.textEngine ?? base.textEngine),
+    translateEndpoint:
+      typeof patch.translateEndpoint === "string" ? patch.translateEndpoint.trim() : base.translateEndpoint
+  };
 }
 
 export function getVulnContextLlmConfigFromEnv(): VulnContextLlmConfig {
@@ -659,6 +692,205 @@ export type VulnContextLlmResult = {
   promptVersion: string;
 };
 
+function libreTranslateUrl(endpoint: string): string {
+  const raw = endpoint.trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    if (!url.pathname.replace(/\/+$/g, "").endsWith("/translate")) {
+      url.pathname = `${url.pathname.replace(/\/+$/g, "")}/translate`;
+    }
+    return url.toString();
+  } catch {
+    return raw.replace(/\/+$/g, "").endsWith("/translate") ? raw : `${raw.replace(/\/+$/g, "")}/translate`;
+  }
+}
+
+function likelyEnglishText(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const s = value.trim();
+  if (s.length < 12) return false;
+  const asciiLetters = (s.match(/[A-Za-z]/g) ?? []).length;
+  const cyrillic = (s.match(/[А-Яа-яЁё]/g) ?? []).length;
+  return asciiLetters >= 8 && asciiLetters > cyrillic;
+}
+
+async function translateLibreText(text: string, endpoint: string): Promise<string> {
+  const url = libreTranslateUrl(endpoint);
+  if (!url) return text;
+  const timeoutMs = Math.max(1000, Math.min(30_000, Number(process.env.TEXT_TRANSLATE_TIMEOUT_MS ?? 8000)));
+  const maxAttempts = Math.max(1, Math.min(4, Number(process.env.TEXT_TRANSLATE_RETRIES ?? 2)));
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify({ q: text, source: "en", target: "ru", format: "text" }),
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      // 429/5xx: keep RU baseline text; BG sweep upgrades when quota recovers.
+      if (res.status === 429 || res.status >= 500) {
+        if (attempt + 1 < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+          continue;
+        }
+        return text;
+      }
+      if (!res.ok) return text;
+      const data = (await res.json()) as { translatedText?: unknown; error?: unknown };
+      if (typeof data.error === "string" && data.error.trim()) return text;
+      const translated = typeof data.translatedText === "string" ? data.translatedText.trim() : "";
+      return translated || text;
+    } catch {
+      if (attempt + 1 < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        continue;
+      }
+      return text;
+    }
+  }
+  return text;
+}
+
+async function maybeTranslateEnrichment(
+  base: Record<string, unknown>,
+  settings: TextEngineSettings
+): Promise<Record<string, unknown>> {
+  if (settings.textEngine !== "translate" || !settings.translateEndpoint.trim()) return base;
+  const next: Record<string, unknown> = { ...base };
+  const endpoint = settings.translateEndpoint;
+  // MyMemory / free proxies: serialize field calls to avoid 429 (do not Promise.all hammer).
+  const gapMs = Math.max(0, Math.min(2_000, Number(process.env.TEXT_TRANSLATE_GAP_MS ?? 150)));
+  const pause = async () => {
+    if (gapMs > 0) await new Promise((r) => setTimeout(r, gapMs));
+  };
+
+  const stringKeys = ["title", "summary", "description", "vulnerabilityClass"] as const;
+  const arrayKeys = ["remediation", "attackFlow", "nextSteps", "questions", "consequences"] as const;
+
+  for (const key of stringKeys) {
+    if (likelyEnglishText(next[key])) {
+      next[key] = await translateLibreText(String(next[key]), endpoint);
+      await pause();
+    }
+  }
+
+  for (const key of arrayKeys) {
+    const arr = next[key];
+    if (!Array.isArray(arr) || arr.length === 0) continue;
+    const out: unknown[] = [];
+    for (const item of arr) {
+      if (likelyEnglishText(item)) {
+        out.push(await translateLibreText(String(item), endpoint));
+        await pause();
+      } else {
+        out.push(item);
+      }
+    }
+    next[key] = out;
+  }
+
+  // Mixed RU/EN description: translate the English NVD body if the whole field was skipped.
+  if (typeof next.description === "string") {
+    const m = /(Описание NVD:\s*)([\s\S]+)$/m.exec(next.description);
+    if (m && likelyEnglishText(m[2])) {
+      const translatedBody = await translateLibreText(m[2], endpoint);
+      next.description = `${next.description.slice(0, m.index)}${m[1]}${translatedBody}`;
+    }
+  }
+
+  const stillEnglish =
+    stringKeys.some((k) => likelyEnglishText(next[k])) ||
+    arrayKeys.some((k) => Array.isArray(next[k]) && next[k].some((item) => likelyEnglishText(item))) ||
+    (typeof next.description === "string" &&
+      (() => {
+        const m = /Описание NVD:\s*([\s\S]+)$/m.exec(next.description);
+        return m ? likelyEnglishText(m[1]) : false;
+      })());
+
+  return {
+    ...next,
+    _display_source: stillEnglish ? "baseline_ru" : "translated"
+  };
+}
+
+export type RunTextEngineOpts = {
+  /** Phase 1: write baseline_ru immediately without calling the translate endpoint. */
+  skipTranslate?: boolean;
+};
+
+export async function runCveTextEngine(
+  cveId: string,
+  raw: Record<string, unknown>,
+  settings: TextEngineSettings,
+  opts?: RunTextEngineOpts
+): Promise<VulnContextLlmResult> {
+  const baseline = buildBaselineEnrichmentFromNvd(cveId, raw);
+  const skipTranslate = Boolean(opts?.skipTranslate) || settings.textEngine !== "translate";
+  const outputJson = skipTranslate
+    ? settings.textEngine === "translate"
+      ? { ...baseline, _display_source: "baseline_ru" }
+      : baseline
+    : await maybeTranslateEnrichment(baseline, settings).catch(() =>
+        settings.textEngine === "translate" ? { ...baseline, _display_source: "baseline_ru" } : baseline
+      );
+  const inputHash = await sha256Hex(
+    stableJsonStringify({
+      cveId,
+      raw,
+      textEngine: settings.textEngine,
+      phase: skipTranslate && settings.textEngine === "translate" ? "baseline_ru" : "full"
+    })
+  );
+  const translated =
+    settings.textEngine === "translate" &&
+    (outputJson._display_source === "translated" || outputJson._display_source === "baseline_ru");
+  return {
+    inputHash,
+    outputJson,
+    outputText: typeof outputJson.summary === "string" ? outputJson.summary : undefined,
+    model: translated ? "translate" : "baseline",
+    promptVersion: settings.textEngine === "translate" ? "translate-v1" : "baseline-v1"
+  };
+}
+
+export async function runBduTextEngine(
+  bduId: string,
+  bdu: BduBaselineInput,
+  linkedCveRaw: unknown,
+  settings: TextEngineSettings,
+  opts?: RunTextEngineOpts
+): Promise<VulnContextLlmResult> {
+  const baseline = buildBaselineEnrichmentFromBdu(bduId, bdu, linkedCveRaw);
+  const skipTranslate = Boolean(opts?.skipTranslate) || settings.textEngine !== "translate";
+  const outputJson = skipTranslate
+    ? settings.textEngine === "translate"
+      ? { ...baseline, _display_source: "baseline_ru" }
+      : baseline
+    : await maybeTranslateEnrichment(baseline, settings).catch(() =>
+        settings.textEngine === "translate" ? { ...baseline, _display_source: "baseline_ru" } : baseline
+      );
+  const inputHash = await sha256Hex(
+    stableJsonStringify({
+      bduId,
+      bdu,
+      linkedCveRaw,
+      textEngine: settings.textEngine,
+      phase: skipTranslate && settings.textEngine === "translate" ? "baseline_ru" : "full"
+    })
+  );
+  const translated =
+    settings.textEngine === "translate" &&
+    (outputJson._display_source === "translated" || outputJson._display_source === "baseline_ru");
+  return {
+    inputHash,
+    outputJson,
+    outputText: typeof outputJson.summary === "string" ? outputJson.summary : undefined,
+    model: translated ? "translate" : "baseline",
+    promptVersion: settings.textEngine === "translate" ? "translate-v1" : "baseline-v1"
+  };
+}
+
 export type LlmAnalysisKind = "cve" | "bdu";
 
 export type LlmAnalysisPromptOpts = {
@@ -991,6 +1223,7 @@ export async function runVulnContextLlm(
     outputJson as Record<string, unknown>,
     raw
   ) as LlmJson;
+  outputJson = { ...outputJson, _display_source: "llm" };
 
   return {
     inputHash,

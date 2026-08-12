@@ -1,4 +1,6 @@
 import { Body, Controller, Get, Param, Patch, Post, Query } from "@nestjs/common";
+import { CurrentUser } from "../auth/current-user.decorator.js";
+import type { AuthUser } from "../auth/jwt.strategy.js";
 import { VulnTaskService, type VulnTaskPriorityLocal, type VulnTaskStatus } from "../services/vuln-task.service.js";
 
 @Controller("vuln-tasks")
@@ -35,6 +37,12 @@ export class VulnTaskController {
     return this.tasks.create(body);
   }
 
+  // Static paths must be registered before :id, otherwise "by-cve" is captured as an id.
+  @Get("by-cve/:cveId")
+  async byCve(@Param("cveId") cveId: string) {
+    return this.tasks.tasksByCve(cveId);
+  }
+
   @Get(":id")
   async get(@Param("id") id: string) {
     return this.tasks.get(id);
@@ -43,6 +51,7 @@ export class VulnTaskController {
   @Patch(":id")
   async patch(
     @Param("id") id: string,
+    @CurrentUser() user: AuthUser,
     @Body()
     body: Partial<{
       title: string;
@@ -57,7 +66,7 @@ export class VulnTaskController {
       evidence: string | null;
     }>
   ) {
-    return this.tasks.patch(id, body);
+    return this.tasks.patch(id, body, user);
   }
 
   @Post(":id/cves")
@@ -68,11 +77,6 @@ export class VulnTaskController {
   @Post(":id/cves/:cveId/remove")
   async removeCve(@Param("id") id: string, @Param("cveId") cveId: string) {
     return this.tasks.removeCve(id, cveId);
-  }
-
-  @Get("by-cve/:cveId")
-  async byCve(@Param("cveId") cveId: string) {
-    return this.tasks.tasksByCve(cveId);
   }
 }
 

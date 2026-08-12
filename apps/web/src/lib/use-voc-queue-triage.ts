@@ -23,6 +23,7 @@ function applyOverride(item: VocQueueItem, override?: VocTriageOverride): VocQue
 export function useVocQueueTriage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const canWrite = user?.role !== "viewer";
   const [overrides, setOverrides] = useState<Record<string, VocTriageOverride>>({});
   const [pendingKey, setPendingKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -90,6 +91,10 @@ export function useVocQueueTriage() {
 
   const setStatus = useCallback(
     (item: VocQueueItem, status: VocTriageStatus) => {
+      if (!canWrite) {
+        setError("Роль viewer доступна только для чтения");
+        return;
+      }
       mutation.mutate({
         refKey: item.refKey,
         source: item.source,
@@ -102,7 +107,7 @@ export function useVocQueueTriage() {
         meta: item.payload
       });
     },
-    [mutation]
+    [canWrite, mutation]
   );
 
   return {

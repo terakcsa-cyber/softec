@@ -18,6 +18,7 @@ import {
 import { apiFetch } from "@/lib/api-fetch";
 import { useAuth } from "@/contexts/auth-context";
 import { cn } from "../ui/cn";
+import { ReadinessBar, type ReadinessPayload } from "./readiness-bar";
 
 type Tab = "overview" | "queues" | "dlq" | "pipelines" | "actions";
 
@@ -39,9 +40,6 @@ type QueueHealth = {
     dlqEnrich?: { messages: number };
     dlqScore?: { messages: number };
   };
-  llm?: Record<string, unknown>;
-  nvd?: Record<string, unknown>;
-  bdu?: Record<string, unknown>;
 };
 
 type Reconciliation = {
@@ -52,6 +50,7 @@ type Reconciliation = {
     count: number;
     lastActivity: string | null;
     lagHours: number | null;
+    ok?: boolean;
   }>;
   issues: string[];
 };
@@ -93,7 +92,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [actionErr, setActionErr] = useState<string | null>(null);
 
-  const isAdmin = user?.role === "admin" || !user?.role;
+  const isAdmin = user?.role === "admin";
 
   const healthQ = useQuery({
     queryKey: ["system", "health"],
@@ -115,6 +114,20 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
     refetchInterval: 15_000
   });
 
+  const readinessQ = useQuery({
+    queryKey: ["stats", "readiness"],
+    queryFn: async () => {
+      const res = await apiFetch("/api/stats/readiness", { cache: "no-store" });
+      return (await res.json()) as ReadinessPayload;
+    },
+    refetchInterval: (q) => {
+      const st = q.state.data?.status;
+      if (st === "syncing" || q.state.data?.jobsRunning) return 5_000;
+      if (st === "stale") return 10_000;
+      return 20_000;
+    }
+  });
+
   const reconcileQ = useQuery({
     queryKey: ["stats", "reconciliation"],
     queryFn: async () => {
@@ -122,6 +135,15 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
       return (await res.json()) as Reconciliation;
     },
     refetchInterval: 60_000
+  });
+
+  const opsStatusQ = useQuery({
+    queryKey: ["stats", "ops", "status"],
+    queryFn: async () => {
+      const res = await apiFetch("/api/stats/ops/status", { cache: "no-store" });
+      return res.json() as Promise<{ anyRunning?: boolean; jobs?: Record<string, unknown> }>;
+    },
+    refetchInterval: 5_000
   });
 
   const tiStatusQ = useQuery({
@@ -146,52 +168,96 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
     refetchInterval: tab === "dlq" ? 15_000 : false
   });
 
+  const invalidateAll = useCallback(async () => {
+    await queryClient.invalidateQueries({ queryKey: ["stats"] });
+    await queryClient.invalidateQueries({ queryKey: ["system"] });
+  }, [queryClient]);
+
   const runAction = useCallback(
-    async (label: string, fn: () => Promise<Response>) => {
+    async (label: string, fn: () => Promise<Response>, confirmText?: string) => {
+      if (confirmText && !window.confirm(confirmText)) return;
       setActionMsg(null);
       setActionErr(null);
       try {
         const res = await fn();
         const body = await res.json().catch(() => ({}));
-        if (!res.ok) {
+        const apiFailed = (body as { ok?: unknown }).ok === false;
+        if (!res.ok || apiFailed) {
           throw new Error(
             (body as { message?: string; error?: string }).message ??
               (body as { error?: string }).error ??
               `${label} failed (${res.status})`
           );
         }
-        setActionMsg(`${label}: успешно`);
-        await queryClient.invalidateQueries({ queryKey: ["stats"] });
-        await queryClient.invalidateQueries({ queryKey: ["system"] });
+        setActionMsg((body as { message?: string }).message ?? `${label}: успешно`);
+        await invalidateAll();
       } catch (e) {
         setActionErr(e instanceof Error ? e.message : String(e));
       }
     },
-    [queryClient]
+    [invalidateAll]
   );
 
   const tiRefresh = useMutation({
     mutationFn: async () =>
-      runAction("Threat Intel refresh", () =>
-        apiFetch("/api/stats/threat-feed/refresh?force=true", { method: "POST" })
+      runAction(
+        "Threat Intel refresh",
+        () => apiFetch("/api/stats/threat-feed/refresh?force=true", { method: "POST" }),
+        "Запустить Threat Intel refresh (VulnCheck KEV + exploit intel)?"
       )
   });
-
+  const epssSync = useMutation({
+    mutationFn: async () =>
+      runAction(
+        "EPSS sync",
+        () => apiFetch("/api/stats/ops/epss/sync", { method: "POST" }),
+        "Скачать и обновить EPSS feed? Это может занять 1–3 минуты."
+      )
+  });
+  const bduSync = useMutation({
+    mutationFn: async () =>
+      runAction(
+        "BDU sync",
+        () => apiFetch("/api/stats/ops/bdu/sync", { method: "POST" }),
+        "Загрузить полный реестр БДУ ФСТЭК? Тяжёлая операция (несколько минут)."
+      )
+  });
+  const nvdHot = useMutation({
+    mutationFn: async () =>
+      runAction(
+        "NVD hot sync",
+        () => apiFetch("/api/stats/ops/nvd/hot-sync", { method: "POST" }),
+        "Догон NVD за последние ~48ч (published)? Без wipe, только upsert."
+      )
+  });
+  const hot24 = useMutation({
+    mutationFn: async () =>
+      runAction(
+        "Hot24 rescore",
+        () => apiFetch("/api/stats/ops/hot24/rescore", { method: "POST" }),
+        "Поставить в очередь score для CVE за 24ч без свежего risk_score?"
+      )
+  });
   const dlqRetry = useMutation({
     mutationFn: async () =>
-      runAction("DLQ retry", () =>
-        apiFetch(`/api/stats/dlq/retry?queue=${encodeURIComponent(dlqQueue)}&limit=1000`, {
-          method: "POST"
-        })
+      runAction(
+        "DLQ retry",
+        () =>
+          apiFetch(`/api/stats/dlq/retry?queue=${encodeURIComponent(dlqQueue)}&limit=1000`, {
+            method: "POST"
+          }),
+        `Вернуть до 1000 сообщений из ${dlqQueue} в основную очередь?`
       )
   });
-
   const dlqClear = useMutation({
     mutationFn: async () =>
-      runAction("DLQ clear", () =>
-        apiFetch(`/api/stats/dlq/clear?queue=${encodeURIComponent(dlqQueue)}&limit=1000`, {
-          method: "POST"
-        })
+      runAction(
+        "DLQ clear",
+        () =>
+          apiFetch(`/api/stats/dlq/clear?queue=${encodeURIComponent(dlqQueue)}&limit=1000`, {
+            method: "POST"
+          }),
+        `УДАЛИТЬ до 1000 сообщений из ${dlqQueue}? Это необратимо.`
       )
   });
 
@@ -209,6 +275,14 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
     [healthQ.data?.checks]
   );
 
+  const anyOpsPending =
+    epssSync.isPending ||
+    bduSync.isPending ||
+    nvdHot.isPending ||
+    hot24.isPending ||
+    tiRefresh.isPending ||
+    Boolean(opsStatusQ.data?.anyRunning);
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -218,8 +292,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
             Здоровье системы
           </h1>
           <p className="mt-1 max-w-2xl text-xs text-muted">
-            Мониторинг очередей, интеграций и конвейеров данных. Управление DLQ и перезапуск задач — только для
-            администраторов.
+            Готовность данных после простоя, мониторинг очередей и аккуратный ручной ремонт конвейеров.
             {user?.role ? (
               <span className="ml-2 rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-black/30">
                 role: {user.role}
@@ -232,7 +305,9 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
           onClick={() => {
             void healthQ.refetch();
             void queueQ.refetch();
+            void readinessQ.refetch();
             void reconcileQ.refetch();
+            void opsStatusQ.refetch();
           }}
           className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium shadow-sm hover:bg-slate-50 dark:border-border dark:bg-black/25 dark:hover:bg-black/35"
         >
@@ -241,13 +316,13 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
         </button>
       </div>
 
+      <ReadinessBar data={readinessQ.data} loading={readinessQ.isLoading} />
+
       {(actionMsg || actionErr) && (
         <div
           className={cn(
             "rounded-xl border px-4 py-3 text-sm",
-            actionErr
-              ? "border-danger/30 bg-danger/10 text-danger"
-              : "border-ok/30 bg-ok/10 text-ok"
+            actionErr ? "border-danger/30 bg-danger/10 text-danger" : "border-ok/30 bg-ok/10 text-ok"
           )}
         >
           {actionErr ?? actionMsg}
@@ -281,6 +356,11 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
               upstream: <span className="font-mono text-fg/85">{healthQ.data?.upstream ?? "—"}</span>
             </span>
             <span className="text-xs text-muted">проверено: {fmtTs(healthQ.data?.checkedAt)}</span>
+            {anyOpsPending ? (
+              <span className="inline-flex items-center gap-1 text-xs text-warn">
+                <Loader2 className="h-3 w-3 animate-spin" /> идёт синхронизация
+              </span>
+            ) : null}
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {checks.map((c) => (
@@ -304,70 +384,38 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                 {c.error ? <div className="mt-1 text-[10px] text-danger">{c.error}</div> : null}
               </div>
             ))}
-            {!checks.length && healthQ.isLoading ? (
-              <div className="text-sm text-muted">Загрузка проверок…</div>
-            ) : null}
           </div>
         </div>
       )}
 
       {tab === "queues" && (
-        <div className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {(
-              [
-                ["ai.enrich", qh?.queues?.enrich?.messages, qh?.queues?.enrich?.consumers],
-                ["ai.score", qh?.queues?.score?.messages, qh?.queues?.score?.consumers],
-                ["dlq.ai.enrich", qh?.queues?.dlqEnrich?.messages, null],
-                ["dlq.ai.score", qh?.queues?.dlqScore?.messages, null]
-              ] as const
-            ).map(([name, depth, consumers]) => (
-              <div
-                key={name}
-                className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15"
-              >
-                <div className="font-mono text-[11px] text-muted">{name}</div>
-                <div className="mt-1 text-2xl font-semibold tabular-nums">
-                  {typeof depth === "number" ? depth.toLocaleString() : "—"}
-                </div>
-                {consumers != null ? (
-                  <div className="mt-1 text-[10px] text-muted">consumers: {consumers}</div>
-                ) : null}
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {(
+            [
+              ["ai.enrich", qh?.queues?.enrich?.messages, qh?.queues?.enrich?.consumers],
+              ["ai.score", qh?.queues?.score?.messages, qh?.queues?.score?.consumers],
+              ["dlq.ai.enrich", qh?.queues?.dlqEnrich?.messages, null],
+              ["dlq.ai.score", qh?.queues?.dlqScore?.messages, null]
+            ] as const
+          ).map(([name, depth, consumers]) => (
+            <div
+              key={name}
+              className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15"
+            >
+              <div className="font-mono text-[11px] text-muted">{name}</div>
+              <div className="mt-1 text-2xl font-semibold tabular-nums">
+                {typeof depth === "number" ? depth.toLocaleString() : "—"}
               </div>
-            ))}
-          </div>
-
-          {["llm", "nvd", "bdu"].map((key) => {
-            const probe = qh?.[key as keyof QueueHealth] as Record<string, unknown> | undefined;
-            if (!probe) return null;
-            const ok = Boolean(probe.ok);
-            return (
-              <div
-                key={key}
-                className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 text-[11px] dark:border-border dark:bg-black/20"
-              >
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="font-semibold uppercase tracking-wide">{key}</span>
-                  <StatusPill ok={ok} warn={probe.status === 429} />
-                </div>
-                <pre className="max-h-40 overflow-auto whitespace-pre-wrap font-mono text-[10px] text-fg/80">
-                  {JSON.stringify(probe, null, 2)}
-                </pre>
-              </div>
-            );
-          })}
-
-          {!qh?.ok && (
-            <div className="text-sm text-danger">{qh?.error ? String(qh.error) : "Очереди недоступны"}</div>
-          )}
+              {consumers != null ? (
+                <div className="mt-1 text-[10px] text-muted">consumers: {consumers}</div>
+              ) : null}
+            </div>
+          ))}
         </div>
       )}
 
       {tab === "dlq" && (
         <div className="space-y-4">
-          <p className="text-xs text-muted">
-            Dead Letter Queue — сообщения, которые не удалось обработать. Можно вернуть в основную очередь или удалить.
-          </p>
           <div className="flex flex-wrap items-center gap-2">
             <select
               value={dlqQueue}
@@ -402,13 +450,9 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
               <span className="text-[10px] text-warn">Только admin может управлять DLQ</span>
             )}
           </div>
-          <div className="rounded-xl border border-border bg-black/5 p-3 dark:bg-black/25">
-            <pre className="max-h-96 overflow-auto whitespace-pre-wrap font-mono text-[10px]">
-              {dlqSampleQ.isFetching
-                ? "Загрузка…"
-                : JSON.stringify(dlqSampleQ.data ?? {}, null, 2)}
-            </pre>
-          </div>
+          <pre className="max-h-96 overflow-auto rounded-xl border border-border bg-black/5 p-3 font-mono text-[10px] dark:bg-black/25">
+            {dlqSampleQ.isFetching ? "Загрузка…" : JSON.stringify(dlqSampleQ.data ?? {}, null, 2)}
+          </pre>
         </div>
       )}
 
@@ -419,12 +463,15 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
             <span className="text-xs text-muted">сверка: {fmtTs(reconcileQ.data?.checkedAt)}</span>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            {(reconcileQ.data?.sources ?? []).map((s) => (
+            {(reconcileQ.data?.sources ?? readinessQ.data?.sources ?? []).map((s) => (
               <div
                 key={s.source}
                 className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15"
               >
-                <div className="text-sm font-semibold uppercase">{s.source}</div>
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-semibold uppercase">{s.source}</div>
+                  <StatusPill ok={s.ok !== false} />
+                </div>
                 <dl className="mt-2 space-y-1 text-[11px]">
                   <div className="flex justify-between">
                     <dt className="text-muted">Записей</dt>
@@ -436,24 +483,12 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-muted">Lag</dt>
-                    <dd className="font-mono">
-                      {s.lagHours != null ? `${s.lagHours.toFixed(1)}h` : "—"}
-                    </dd>
+                    <dd className="font-mono">{s.lagHours != null ? `${s.lagHours.toFixed(1)}h` : "—"}</dd>
                   </div>
                 </dl>
               </div>
             ))}
           </div>
-          {(reconcileQ.data?.issues ?? []).length > 0 && (
-            <div className="rounded-xl border border-warn/30 bg-warn/10 p-4 text-xs text-warn">
-              <div className="font-semibold">Проблемы</div>
-              <ul className="mt-2 list-inside list-disc">
-                {reconcileQ.data?.issues.map((i) => (
-                  <li key={i}>{i}</li>
-                ))}
-              </ul>
-            </div>
-          )}
         </div>
       )}
 
@@ -469,29 +504,60 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
               ) : null}
             </div>
           )}
+          <p className="text-[11px] text-muted">
+            После долгого простоя: <strong>NVD hot</strong> → <strong>EPSS</strong> → <strong>BDU</strong> →{" "}
+            <strong>Threat Intel</strong> → <strong>Hot24 rescore</strong>. Статус-бар сверху покажет «Можно
+            пользоваться».
+          </p>
           <div className="grid gap-3 sm:grid-cols-2">
             <ActionCard
+              title="NVD hot sync (~48ч)"
+              desc="Догон published CVE без wipe"
+              disabled={!isAdmin || anyOpsPending}
+              pending={nvdHot.isPending}
+              onClick={() => nvdHot.mutate()}
+              status={opsStatusQ.data?.jobs?.nvd_hot}
+            />
+            <ActionCard
+              title="EPSS sync"
+              desc="Скачать актуальный EPSS feed"
+              disabled={!isAdmin || anyOpsPending}
+              pending={epssSync.isPending}
+              onClick={() => epssSync.mutate()}
+              status={opsStatusQ.data?.jobs?.epss}
+            />
+            <ActionCard
+              title="BDU sync"
+              desc="Полный реестр ФСТЭК (тяжёлая)"
+              disabled={!isAdmin || anyOpsPending}
+              pending={bduSync.isPending}
+              onClick={() => bduSync.mutate()}
+              status={opsStatusQ.data?.jobs?.bdu}
+            />
+            <ActionCard
               title="Threat Intel refresh"
-              desc="VulnCheck KEV + пересчёт exploit intel"
-              disabled={!isAdmin || tiRefresh.isPending}
+              desc="VulnCheck KEV + exploit intel"
+              disabled={!isAdmin || anyOpsPending}
+              pending={tiRefresh.isPending}
               onClick={() => tiRefresh.mutate()}
-              icon={Play}
               status={tiStatusQ.data}
+            />
+            <ActionCard
+              title="Hot24 rescore"
+              desc="Score queue для CVE за 24ч"
+              disabled={!isAdmin || anyOpsPending}
+              pending={hot24.isPending}
+              onClick={() => hot24.mutate()}
+              status={opsStatusQ.data?.jobs?.hot24_score}
             />
             <ActionCard
               title="Обновить DLQ sample"
               desc="Перечитать сообщения в выбранной DLQ"
               disabled={dlqSampleQ.isFetching}
+              pending={dlqSampleQ.isFetching}
               onClick={() => void dlqSampleQ.refetch()}
               icon={RefreshCw}
             />
-          </div>
-          <div className="rounded-xl border border-dashed border-slate-300 p-4 text-[11px] text-muted dark:border-white/10">
-            <strong className="text-fg/80">Скрипты на сервере:</strong>{" "}
-            <code className="font-mono">pnpm epss:sync</code>,{" "}
-            <code className="font-mono">pnpm rescore:hot24</code>,{" "}
-            <code className="font-mono">pnpm dlq:replay:score</code>,{" "}
-            <code className="font-mono">pnpm smoke:post-deploy</code>
           </div>
         </div>
       )}
@@ -503,16 +569,18 @@ function ActionCard({
   title,
   desc,
   disabled,
+  pending,
   onClick,
-  icon: Icon,
-  status
+  status,
+  icon: Icon = Play
 }: {
   title: string;
   desc: string;
   disabled?: boolean;
+  pending?: boolean;
   onClick: () => void;
-  icon: typeof Play;
   status?: unknown;
+  icon?: typeof Play;
 }) {
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15">
@@ -527,7 +595,7 @@ function ActionCard({
           onClick={onClick}
           className="rounded-lg border border-accent/30 bg-accent/10 p-2 hover:bg-accent/15 disabled:opacity-50"
         >
-          <Icon className="h-4 w-4" />
+          {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Icon className="h-4 w-4" />}
         </button>
       </div>
       {status != null ? (

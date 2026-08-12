@@ -3,26 +3,22 @@
 import { useMemo, useState } from "react";
 import ReactFlow, { Background, Controls, Edge, MiniMap, Node, ReactFlowProvider, useReactFlow } from "reactflow";
 import "reactflow/dist/style.css";
+import { buildBaselineAttackGraph, isUsableAttackGraph } from "@/lib/baseline-enrichment";
 
 type Graph = {
   nodes?: { id: string; label?: string; type?: string }[];
   edges?: { from: string; to: string; label?: string }[];
 };
 
-function graphFromAttackFlow(steps: string[]): Graph | null {
+function graphFromAttackFlow(steps: string[], entityId = "vuln"): Graph | null {
   const clean = steps.map((s) => s.trim()).filter(Boolean);
   if (clean.length === 0) return null;
-  const nodes = clean.map((_, idx) => ({
-    id: `step_${idx + 1}`,
-    label: `Шаг ${idx + 1}`,
-    type: "vector"
-  }));
-  const edges = clean.slice(0, -1).map((s, idx) => ({
-    from: `step_${idx + 1}`,
-    to: `step_${idx + 2}`,
-    label: s.length > 120 ? `${s.slice(0, 120)}…` : s
-  }));
-  return { nodes, edges };
+  // Prefer the richer baseline topology over a flat step chain.
+  return buildBaselineAttackGraph({
+    entityId,
+    attackFlow: clean,
+    summary: clean.join(" ")
+  });
 }
 
 function toNodes(graph: Graph | null): Node[] {
@@ -65,39 +61,33 @@ function toEdges(graph: Graph | null): Edge[] {
 
 function Inner({
   graph,
-  attackFlow
+  attackFlow,
+  entityId
 }: {
   graph: Graph | null;
   attackFlow: string[];
+  entityId?: string;
 }) {
-  const [useDerived, setUseDerived] = useState(false);
-  const derived = graph ?? (useDerived ? graphFromAttackFlow(attackFlow) : null);
+  const usable = isUsableAttackGraph(graph) ? graph : null;
+  const derived = usable ?? graphFromAttackFlow(attackFlow, entityId ?? "vuln");
   const nodes = useMemo(() => toNodes(derived), [derived]);
   const edges = useMemo(() => toEdges(derived), [derived]);
   const rf = useReactFlow();
   const [hover, setHover] = useState<{ title: string; subtitle?: string } | null>(null);
+  const sourceLabel = usable
+    ? "Из enrichment-графа"
+    : attackFlow.length > 0
+      ? "Построена из Attack flow"
+      : "Нет данных графа";
 
   return (
     <div className="glass overflow-hidden rounded-2xl">
       <div className="flex items-center justify-between px-5 py-4">
         <div>
           <div className="text-sm font-medium">Схема атаки</div>
-          <div className="text-xs text-muted">
-            {graph ? "Из LLM-графа" : attackFlow.length > 0 ? "Можно построить из Attack flow" : "Нет данных графа"}
-          </div>
+          <div className="text-xs text-muted">{sourceLabel}</div>
         </div>
         <div className="flex items-center gap-3">
-          {graph == null && attackFlow.length > 0 ? (
-            <button
-              onClick={() => {
-                setUseDerived(true);
-                setTimeout(() => rf.fitView({ padding: 0.2, duration: 250 }), 50);
-              }}
-              className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-fg/90 shadow-sm dark:border-border dark:bg-black/20 dark:shadow-none"
-            >
-              Построить схему
-            </button>
-          ) : null}
           <button
             onClick={() => rf.fitView({ padding: 0.2, duration: 250 })}
             className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-fg/90 shadow-sm dark:border-border dark:bg-black/20 dark:shadow-none"
@@ -141,15 +131,16 @@ function Inner({
 
 export function AttackGraphPanel({
   graph,
-  attackFlow
+  attackFlow,
+  entityId
 }: {
   graph: Graph | null;
   attackFlow: string[];
+  entityId?: string;
 }) {
   return (
     <ReactFlowProvider>
-      <Inner graph={graph} attackFlow={attackFlow} />
+      <Inner graph={graph} attackFlow={attackFlow} entityId={entityId} />
     </ReactFlowProvider>
   );
 }
-

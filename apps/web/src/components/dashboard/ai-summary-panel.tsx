@@ -1,6 +1,7 @@
 "use client";
 
-import { parseAiOutputJson } from "@/lib/cve-enrich-ui";
+import { parseAiOutputJson as parseCveAiOutputJson } from "@/lib/cve-enrich-ui";
+import { parseAiOutputJson as parseBduAiOutputJson } from "@/lib/bdu-enrich-ui";
 import { RefreshCw } from "lucide-react";
 import { cn } from "../ui/cn";
 
@@ -26,6 +27,7 @@ export function AiSummaryPanel({
   const d = (data ?? null) as null | {
     cve?: { cve_id?: string | null; raw?: unknown } | null;
     bdu?: { bduId?: string | null } | null;
+    linkedCveRaw?: unknown;
     ai?: { output_json?: Record<string, unknown> | null; output_text?: unknown } | null;
   };
   const entityId = d?.cve?.cve_id ?? d?.bdu?.bduId ?? null;
@@ -34,10 +36,16 @@ export function AiSummaryPanel({
     d?.cve?.raw != null && typeof d.cve.raw === "object" && !Array.isArray(d.cve.raw)
       ? d.cve.raw
       : undefined;
-  const out = parseAiOutputJson(
-    d?.ai?.output_json ?? null,
-    d?.cve?.cve_id ? { cveId: String(d.cve.cve_id), nvdRaw: cveRaw } : undefined
-  );
+  const out = d?.bdu?.bduId
+    ? parseBduAiOutputJson(d?.ai?.output_json ?? null, {
+        bduId: String(d.bdu.bduId),
+        bdu: d.bdu,
+        linkedCveRaw: d.linkedCveRaw
+      })
+    : parseCveAiOutputJson(
+        d?.ai?.output_json ?? null,
+        d?.cve?.cve_id ? { cveId: String(d.cve.cve_id), nvdRaw: cveRaw } : undefined
+      );
   const get = (k: string): unknown => (out ? out[k] : undefined);
   const enrichError = Boolean(get("_enrich_error"));
   const title = get("title") ?? null;
@@ -116,10 +124,8 @@ export function AiSummaryPanel({
                   : aiStalled
                     ? manualEnrichAllowed
                       ? "За несколько минут не пришла ИИ‑сводка. Проверьте Ollama/сеть и `LLM_*`. Закройте карточку и откройте снова или нажмите «Повторить»."
-                      : "ИИ‑сводка ещё не готова. Обогащение идёт в фоне — страница обновляется сама."
-                    : manualEnrichAllowed
-                      ? `ИИ‑данных пока нет. Свежие записи (24ч) можно запросить кнопкой ниже.`
-                      : "ИИ‑данных пока нет. Обогащение в фоне для свежих записей; для остальных — когда сервер разрешит on-demand enrich.")}
+                      : "Фоновое обогащение ещё не готово. На карточке уже показана RU‑сводка из NVD/БДУ."
+                    : "Пока нет сохранённой строки enrichment — показываем RU‑baseline из NVD/БДУ при открытии карточки.")}
             </div>
             {!aiPending && manualEnrichAllowed && entityId && onRequestEnrich ? (
               <div className="mt-3 flex flex-wrap gap-2">

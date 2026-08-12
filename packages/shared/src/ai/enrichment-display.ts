@@ -1,5 +1,8 @@
 import { augmentEnrichmentWithNvdFixes } from "../cve/nvd-fix-signals.js";
-import { buildBaselineEnrichmentFromNvd } from "../cve/baseline-enrichment.js";
+import {
+  buildBaselineEnrichmentFromNvd,
+  isUsableAttackGraph
+} from "../cve/baseline-enrichment.js";
 import {
   buildBaselineEnrichmentFromBdu,
   type BduBaselineInput
@@ -169,7 +172,7 @@ function mergeResolvedWithBaseline(
   const pick = (_key: string, aiVal: unknown, baseVal: unknown) => {
     if (Array.isArray(aiVal) && aiVal.length > 0) return aiVal;
     if (typeof aiVal === "string" && aiVal.trim()) return aiVal;
-    if (aiVal != null && typeof aiVal === "object") return aiVal;
+    if (aiVal != null && typeof aiVal === "object" && !Array.isArray(aiVal)) return aiVal;
     return baseVal;
   };
 
@@ -195,6 +198,10 @@ function mergeResolvedWithBaseline(
   const vulnerabilityClass =
     baseClass && (!aiClass || /^CWE-\d+$/i.test(aiClass)) ? baseClass : aiClass || baseClass || null;
 
+  const graph = isUsableAttackGraph(fromAi.graph) ? fromAi.graph : baseline.graph;
+  const questions = pick("questions", fromAi.questions, baseline.questions);
+  const applicability = pick("applicability", fromAi.applicability, baseline.applicability);
+
   return {
     ...baseline,
     ...fromAi,
@@ -205,11 +212,14 @@ function mergeResolvedWithBaseline(
     attackFlow: pick("attackFlow", fromAi.attackFlow, baseline.attackFlow),
     remediation: pick("remediation", fromAi.remediation, baseline.remediation),
     nextSteps: pick("nextSteps", fromAi.nextSteps, baseline.nextSteps),
+    questions,
     consequences:
       Array.isArray(fromAi.consequences) && fromAi.consequences.length > 0
         ? fromAi.consequences
         : baseline.consequences,
     exploitation: pick("exploitation", fromAi.exploitation, baseline.exploitation),
+    applicability,
+    graph,
     _display_source: fromAi._display_source ?? "ai_resolved"
   };
 }

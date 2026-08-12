@@ -9,6 +9,7 @@ import {
   normalizeFstecBulletinAnalysis,
   parseFstecBulletinText,
   runFstecBulletinAnalysisLlm,
+  sha256Hex,
   stableJsonStringify,
   type FstecBulletinParsed
 } from "@vuln-intel/shared";
@@ -342,9 +343,6 @@ export class FstecBulletinService {
       bulletinId
     ]);
 
-    const envBase = getVulnContextLlmConfigFromEnv();
-    const effective = mergeVulnContextLlmConfig(envBase, await this.integration.getEffectiveLlmConfig());
-
     const analysisContext = buildBulletinAnalysisContext({
       bulletin: {
         title: detail.bulletin.title,
@@ -353,6 +351,48 @@ export class FstecBulletinService {
       parsed: detail.parsed,
       registry: detail.registry
     });
+
+    const textEngine = await this.integration.getTextEngineSettings();
+    if (textEngine.textEngine !== "llm") {
+      const outputJson = normalizeFstecBulletinAnalysis(
+        { _display_source: textEngine.textEngine === "translate" ? "translated" : "bdu_baseline" },
+        analysisContext
+      );
+      const summaryText =
+        typeof (outputJson as { executiveSummary?: unknown }).executiveSummary === "string"
+          ? (outputJson as { executiveSummary: string }).executiveSummary
+          : null;
+      const inputHash = await sha256Hex(stableJsonStringify({ bulletinId, analysisContext, textEngine }));
+      await this.db.query(
+        `UPDATE fstec_bulletin_analysis SET
+           output_json = $2::jsonb,
+           output_text = $3,
+           model = $4,
+           prompt_version = $5,
+           input_hash = $6,
+           tokens_input = NULL,
+           tokens_output = NULL,
+           status = 'ready',
+           error_text = NULL,
+           updated_at = now()
+         WHERE bulletin_id = $1`,
+        [
+          bulletinId,
+          stableJsonStringify(outputJson),
+          summaryText,
+          textEngine.textEngine,
+          `${textEngine.textEngine}-v1`,
+          inputHash
+        ]
+      );
+      await this.db.query(`UPDATE fstec_bulletin SET status = 'ready', updated_at = now() WHERE id = $1`, [
+        bulletinId
+      ]);
+      return;
+    }
+
+    const envBase = getVulnContextLlmConfigFromEnv();
+    const effective = mergeVulnContextLlmConfig(envBase, await this.integration.getEffectiveLlmConfig());
 
     const llmConfig = {
       ...effective,
@@ -365,7 +405,7 @@ export class FstecBulletinService {
         result.outputJson as Record<string, unknown>,
         analysisContext
       );
-      const normalized = { ...result, outputJson };
+      const normalized = { ...result, outputJson: { ...outputJson, _display_source: "llm" } };
       const notConfigured = isLlmNotConfiguredEnrichment({
         output_text: normalized.outputText ?? null,
         output_json: normalized.outputJson
@@ -391,7 +431,7 @@ export class FstecBulletinService {
          WHERE bulletin_id = $1`,
         [
           bulletinId,
-          stableJsonStringify(outputJson),
+          stableJsonStringify(normalized.outputJson),
           summaryText,
           normalized.model,
           normalized.promptVersion,

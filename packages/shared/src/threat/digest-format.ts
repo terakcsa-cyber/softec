@@ -139,6 +139,70 @@ function fmtDelta(n?: number | null): string {
   return `${sign}${(n * 100).toFixed(1)}pp`;
 }
 
+function hasCyrillic(s: string): boolean {
+  return /[А-Яа-яЁё]/.test(s);
+}
+
+function compactText(text?: string | null, max = 260): string {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  if (t.length <= max) return t;
+  const cut = t.slice(0, max);
+  const last = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf(" "));
+  return `${(last > 80 ? cut.slice(0, last) : cut).trim()}…`;
+}
+
+function impactHintFromDescription(desc?: string | null): string | null {
+  const lower = String(desc ?? "").toLowerCase();
+  if (/remote code execution|execute arbitrary code|arbitrary code execution|code execution/.test(lower)) {
+    return "риск удалённого выполнения кода";
+  }
+  if (/privilege escalation|escalat(e|ion) of privilege|gain privileges/.test(lower)) {
+    return "риск повышения привилегий";
+  }
+  if (/denial of service|crash|panic|resource exhaustion/.test(lower)) {
+    return "риск отказа в обслуживании";
+  }
+  if (/information disclosure|information leak|exposure of sensitive|read arbitrary/.test(lower)) {
+    return "риск раскрытия информации";
+  }
+  if (/authentication bypass|bypass authentication/.test(lower)) return "риск обхода аутентификации";
+  if (/authorization bypass|bypass authorization|access control/.test(lower)) return "риск обхода авторизации";
+  return null;
+}
+
+export function buildThreatDigestFallbackSummaryRu(row: ThreatDigestHotCve | ThreatDigestCriticalEvent): string {
+  const existing = compactText(row.summary_ru, 380);
+  if (existing && hasCyrillic(existing)) return existing;
+
+  const hot = "signal_count" in row ? row : null;
+  const critical = "tags" in row ? row : null;
+  const product = [row.vendor, row.product].filter(Boolean).join(" / ");
+  const subject = product ? `${row.cve_id} в ${product}` : row.cve_id;
+  const tags: string[] = [];
+  if (hot?.cisa_kev || critical?.tags.includes("CISA KEV")) tags.push("CISA KEV");
+  if (hot?.vckev_only || critical?.tags.includes("VCK-only")) tags.push("VulnCheck KEV");
+  if (hot?.has_public_exploit || critical?.tags.includes("Публичный эксплойт")) tags.push("публичный эксплойт");
+  else if (hot?.has_poc || critical?.tags.includes("PoC")) tags.push("PoC");
+  if (hot?.epss_spike || critical?.tags.includes("EPSS↑")) tags.push("всплеск EPSS");
+
+  const impact =
+    hot?.description ? impactHintFromDescription(hot.description) : null;
+  const metrics = [
+    typeof row.cvss_base === "number" ? `CVSS ${row.cvss_base}` : null,
+    typeof row.epss === "number" ? `EPSS ${(row.epss * 100).toFixed(1)}%` : null,
+    "threat_score" in row ? `threat ${row.threat_score}` : null
+  ].filter(Boolean);
+
+  return [
+    `${subject}: ${impact ?? "активные exploit-сигналы требуют проверки применимости"}.`,
+    tags.length ? `Флаги: ${tags.join(", ")}.` : null,
+    metrics.length ? metrics.join(" · ") + "." : null
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
 function cvssEmoji(score: number | null): string {
   if (score == null) return "⚪";
   if (score >= 9) return "🔴";
@@ -287,6 +351,8 @@ function formatHotCveBlock(title: string, rows: ThreatDigestHotCve[]): string {
     if (row.vendor) {
       lines.push(`   🏢 ${escapeTelegramHtml(row.vendor)}${row.product ? ` / ${escapeTelegramHtml(row.product)}` : ""}`);
     }
+    const summary = buildThreatDigestFallbackSummaryRu(row);
+    if (summary) lines.push(`   ${escapeTelegramHtml(summary)}`);
   });
   return lines.join("\n");
 }

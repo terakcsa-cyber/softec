@@ -40,8 +40,13 @@ Options:
   --no-auto-install     Do not install missing Docker/Compose packages
   -h, --help            Show this help
 
-Typical first deploy:
+Typical first deploy (server «тачка»):
+  git clone <repo> && cd vuln-intel-platform
   ./deploy.sh --origin=https://vuln-intel.example.com
+  # then in UI: Settings → Веб / TLS → Let's Encrypt (needs public DNS + :80)
+
+Update without wiping data:
+  git pull && ./deploy.sh --yes --update
 EOF
 }
 
@@ -529,6 +534,51 @@ normalize_env_file() {
     log "Enabling BDU mirror fallback for resilient first ingest."
     write_env_value BDU_ALLOW_MIRROR_FALLBACK "true" "$ENV_FILE"
   fi
+
+  # EPSS defaults (FIRST/CSV failover lives in shared epss-ingest; schedule via EpssIngestJob).
+  local epss_boot
+  epss_boot="$(read_env_value EPSS_BOOT_ON_START "$ENV_FILE" || true)"
+  if [[ -z "$epss_boot" ]]; then
+    write_env_value EPSS_BOOT_ON_START "true" "$ENV_FILE"
+  fi
+  local epss_poll
+  epss_poll="$(read_env_value EPSS_POLL_INTERVAL_MS "$ENV_FILE" || true)"
+  if [[ -z "$epss_poll" ]]; then
+    write_env_value EPSS_POLL_INTERVAL_MS "86400000" "$ENV_FILE"
+  fi
+
+  # TLS / Let's Encrypt publish defaults (tls-proxy in compose).
+  local tls_https
+  tls_https="$(read_env_value WEB_TLS_PUBLISHED_PORT "$ENV_FILE" || true)"
+  if [[ -z "$tls_https" ]]; then
+    if [[ "$STAGING" == "1" ]]; then
+      write_env_value WEB_TLS_PUBLISHED_PORT "8443" "$ENV_FILE"
+    else
+      write_env_value WEB_TLS_PUBLISHED_PORT "443" "$ENV_FILE"
+    fi
+  fi
+  local tls_http
+  tls_http="$(read_env_value WEB_TLS_HTTP_PORT "$ENV_FILE" || true)"
+  if [[ -z "$tls_http" ]]; then
+    if [[ "$STAGING" == "1" ]]; then
+      write_env_value WEB_TLS_HTTP_PORT "8080" "$ENV_FILE"
+    else
+      write_env_value WEB_TLS_HTTP_PORT "80" "$ENV_FILE"
+    fi
+  fi
+  local le_auto
+  le_auto="$(read_env_value LETSENCRYPT_AUTO_RENEW "$ENV_FILE" || true)"
+  if [[ -z "$le_auto" ]]; then
+    write_env_value LETSENCRYPT_AUTO_RENEW "true" "$ENV_FILE"
+  fi
+
+  # Bake git identity into env (also passed as compose build args via shell export).
+  if [[ -n "${PLATFORM_GIT_SHA:-}" ]]; then
+    write_env_value PLATFORM_GIT_SHA "$PLATFORM_GIT_SHA" "$ENV_FILE"
+  fi
+  if [[ -n "${PLATFORM_GIT_BRANCH:-}" ]]; then
+    write_env_value PLATFORM_GIT_BRANCH "$PLATFORM_GIT_BRANCH" "$ENV_FILE"
+  fi
 }
 
 validate_env_file() {
@@ -647,6 +697,13 @@ ensure_docker_daemon
 ensure_compose
 check_host_capacity
 choose_deploy_mode
+
+# Bake git identity into API image (for Settings → Обновления).
+if command -v git >/dev/null 2>&1 && [[ -d "$ROOT_DIR/.git" ]]; then
+  export PLATFORM_GIT_SHA="${PLATFORM_GIT_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || true)}"
+  export PLATFORM_GIT_BRANCH="${PLATFORM_GIT_BRANCH:-$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)}"
+  export PLATFORM_GIT_TAG="${PLATFORM_GIT_TAG:-$(git -C "$ROOT_DIR" describe --tags --exact-match 2>/dev/null || true)}"
+fi
 prepare_interactive_env_inputs
 ensure_port_available "$WEB_PORT"
 create_or_update_env

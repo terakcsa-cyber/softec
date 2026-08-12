@@ -13,21 +13,20 @@
 3. [Локальная разработка](#3-локальная-разработка)
 4. [Production deploy](#4-production-deploy)
 5. [Переменные окружения (справочник)](#5-переменные-окружения-справочник)
-6. [Аутентификация и ADMIN_EMAILS](#6-аутентификация-и-admin_emails)
+6. [Аутентификация и RBAC](#6-аутентификация-и-rbac)
 7. [Конвейеры данных (ingest)](#7-конвейеры-данных-ingest)
 8. [Очереди RabbitMQ и DLQ](#8-очереди-rabbitmq-и-dlq)
-9. [LLM / AI workers](#9-llm--ai-workers)
+9. [Text engine / AI workers](#9-text-engine--ai-workers)
 10. [Threat Digest (prepare / send)](#10-threat-digest-prepare--send)
 11. [Интеграции](#11-интеграции)
-12. [ASV / Nuclei / Metasploit](#12-asv--nuclei--metasploit)
-13. [Резервное копирование и восстановление](#13-резервное-копирование-и-восстановление)
-14. [Обновление и откат](#14-обновление-и-откат)
-15. [CI/CD и качество](#15-cicd-и-качество)
-16. [Безопасность (чеклист)](#16-безопасность-чеклист)
-17. [Runbook: типовые инциденты](#17-runbook-типовые-инциденты)
-18. [Скрипты и команды](#18-скрипты-и-команды)
-19. [System Health UI и мониторинг](#19-system-health-ui-и-мониторинг)
-20. [Staging environment](#20-staging-environment)
+12. [Резервное копирование и восстановление](#12-резервное-копирование-и-восстановление)
+13. [Обновление и откат](#13-обновление-и-откат)
+14. [CI/CD и качество](#14-cicd-и-качество)
+15. [Безопасность (чеклист)](#15-безопасность-чеклист)
+16. [Runbook: типовые инциденты](#16-runbook-типовые-инциденты)
+17. [Скрипты и команды](#17-скрипты-и-команды)
+18. [System Health UI и мониторинг](#18-system-health-ui-и-мониторинг)
+19. [Staging environment](#19-staging-environment)
 
 ---
 
@@ -48,16 +47,16 @@
     ┌────────────┐  ┌────────────┐  ┌────────────┐
     │ apps/ingest│  │  apps/ai   │  │  Postgres  │
     │ NVD,EPSS,  │  │ enrich,    │  │  Redis     │
-    │ ASV worker │  │ score,ASV  │  │  RabbitMQ  │
+    │ BDU,patch  │  │ score      │  │  RabbitMQ  │
     └────────────┘  └────────────┘  └────────────┘
 ```
 
 | Сервис | Роль |
 |--------|------|
 | **web** | UI, BFF (`/api/*` → Nest), статика |
-| **api** | Auth, CVE, stats, ASV REST, публикация в очереди |
-| **ingest** | NVD/EPSS/KEV/BDU/advisories, boot jobs, ASV scan consumer |
-| **ai** | Consumers: `ai.enrich`, `ai.score`, `ai.asv-*` |
+| **api** | Auth, CVE, stats, публикация в очереди |
+| **ingest** | NVD/EPSS/KEV/BDU/advisories, boot jobs |
+| **ai** | Consumers: `ai.enrich`, `ai.score` |
 | **postgres** | Единый источник данных |
 | **redis** | Кэш enrich, сессии вспомогательные |
 | **rabbitmq** | Topic exchange `vuln.events`, DLX `vuln.dlx` |
@@ -77,13 +76,13 @@
 | Disk | 50 GB SSD |
 | OS | Linux (Ubuntu 22.04+), Docker 24+ |
 
-### Рекомендуется (production + ASV + LLM fanout)
+### Рекомендуется (production + опциональный LLM)
 
 | Ресурс | Значение |
 |--------|----------|
 | CPU | 8–16 vCPU |
 | RAM | 32 GB |
-| Disk | 200+ GB (NVD catalog, Nuclei templates, PG) |
+| Disk | 200+ GB (NVD catalog, PG) |
 | Network | Исходящий HTTPS к NVD, EPSS, CISA; LAN к Ollama |
 
 ### Порты
@@ -159,13 +158,26 @@ docker compose --env-file .env.production -f infra/docker-compose.prod.yml ps
 
 ### TLS
 
-`deploy.sh` **не** выпускает сертификаты. Используйте nginx/Caddy/Traefik:
+Встроенный сервис `tls-proxy` (Caddy) в `infra/docker-compose.prod.yml` / `staging.yml` завершает HTTPS и проксирует на `web:3000`.
 
 ```
-Internet → TLS :443 → reverse proxy → web:3000
+Internet → TLS :443 (tls-proxy) → web:3000
+         → HTTP  :80  → ACME webroot (/.well-known/acme-challenge/) + redirect HTTPS
 ```
 
-Задайте `PUBLIC_WEB_ORIGIN` и `API_CORS_ORIGIN` в `.env.production`.
+**One-click из UI (admin):** Настройки → **Веб / TLS**
+
+1. **Получить Let's Encrypt** — certbot HTTP-01 (webroot) в контейнере `api`, затем копирование `fullchain`/`privkey` в volume `tls_certs` и reload `tls-proxy`. Нужны: публичный DNS на этот хост, порт **80** снаружи (`WEB_TLS_HTTP_PORT`), email для ACME-аккаунта. Checkbox «Staging CA» — тестовый УЦ (браузеры не доверяют; безопаснее для dry-run).
+2. **Обновить LE** — `certbot renew` + повторная установка в `tls_certs` (если issuer = Let's Encrypt).
+3. **Самоподписанный (lab)** — запасной вариант для внутренней сети / localhost.
+
+Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acme_webroot` / `acme_staging_webroot`), certbot state (`letsencrypt_data` / `letsencrypt_staging_data`). В образе API установлен пакет `certbot`.
+
+Порты: `WEB_TLS_PUBLISHED_PORT` (prod default 443), `WEB_TLS_HTTP_PORT` (80). Прямой HTTP к web (`WEB_PUBLISHED_PORT`) остаётся доступен для отладки. После выпуска LE выставьте `PUBLIC_WEB_ORIGIN` / `API_CORS_ORIGIN` на `https://…`.
+
+**Авто-renew:** при issuer=Let's Encrypt API раз в сутки проверяет срок и вызывает `certbot renew`, если осталось &lt; `LETSENCRYPT_RENEW_DAYS` (default 30). Отключить: `LETSENCRYPT_AUTO_RENEW=false`. Ручная кнопка «Обновить LE» всегда доступна.
+
+**Ограничения:** localhost / `.local` / голый IP — Let's Encrypt не выдаст; без публичного :80 HTTP-01 не пройдёт; staging с портом 8080 по умолчанию не подходит для LE без проброса 80.
 
 ---
 
@@ -187,7 +199,9 @@ Internet → TLS :443 → reverse proxy → web:3000
 
 | Переменная | Default | Описание |
 |------------|---------|----------|
-| `ADMIN_EMAILS` | (пусто) | Список email админов через запятую. Пусто = все JWT пользователи = админы (dev mode) |
+| `AUTH_BOOTSTRAP_EMAIL` | `admin@vuln-intel.local` | Email bootstrap-администратора при пустой `auth_user` |
+| `AUTH_BOOTSTRAP_PASSWORD` | `ChangeMe!Admin1` | Bootstrap-пароль; пользователь обязан сменить его при первом входе |
+| `ADMIN_EMAILS` | (пусто) | Legacy allowlist для admin-only API по email. Пусто не повышает всех пользователей до admin |
 | `AUTH_ALLOW_REGISTER` | false | Публичная регистрация |
 | `AUTH_ALLOW_REGISTER_IN_PRODUCTION` | false | Доп. флаг для prod |
 | `ALLOW_INTERNAL_API_BEARER` | false | Сервисный bearer в prod |
@@ -199,7 +213,7 @@ Internet → TLS :443 → reverse proxy → web:3000
 | Переменная | Default | Описание |
 |------------|---------|----------|
 | `NVD_API_KEY` | — | Ключ NVD 2.0 (рекомендуется) |
-| `NVD_FANOUT_ENRICH` | true | Enrich только CVE ≤24ч |
+| `NVD_FANOUT_ENRICH` | false | Auto enrich из NVD ingest выключен; enrich только вручную и при digest prepare |
 | `NVD_FANOUT_SCORE_HOT_ONLY` | true | Score только hot CVE |
 | `NVD_PUB_HOT_SYNC` | true | Отдельный проход по published |
 | `INTEGRATIONS_BOOT` | true | Boot job при старте ingest |
@@ -209,9 +223,9 @@ Internet → TLS :443 → reverse proxy → web:3000
 
 | Переменная | Default | Описание |
 |------------|---------|----------|
-| `HOT24_AI_SWEEP` | true | Догон enrich для 24ч |
+| `HOT24_AI_SWEEP` | false | Auto enrich sweep выключен; digest prepare ставит нужные CVE отдельно |
 | `HOT24_AI_SWEEP_LIMIT` | 200 | Лимит за проход |
-| `HOT24_AI_SWEEP_ON_START_MS` | 8000 | Задержка sweep при старте |
+| `HOT24_AI_SWEEP_ON_START_MS` | 0 | AI sweep при старте выключен |
 | `HOT24_AI_SWEEP_INTERVAL_MS` | 0 | Периодический sweep (0=выкл) |
 | `HOT24_SCORE_SWEEP` | true | Догон risk_score |
 | `HOT24_SCORE_STALE_HOURS` | 6 | Пересчёт если score старше |
@@ -220,12 +234,14 @@ Internet → TLS :443 → reverse proxy → web:3000
 | `DLQ_BOOT_RETRY` | false | Авто-replay DLQ при старте (prod: false) |
 | `DLQ_BOOT_RETRY_LIMIT` | 200 | Лимит на очередь |
 
-### LLM
+### Text engine / LLM
 
 | Переменная | Пример | Описание |
 |------------|--------|----------|
-| `LLM_ENDPOINT` | `http://192.168.1.69:11434/v1/chat/completions` | OpenAI-compatible |
-| `LLM_MODEL` | `qwen2.5:7b` | Модель |
+| `TEXT_ENGINE` | `baseline` | `baseline` без внешних вызовов, `translate` через LibreTranslate, `llm` через LLM pipeline |
+| `LIBRETRANSLATE_URL` | local `http://127.0.0.1:5050`, prod `http://libretranslate:5000` | Endpoint для `TEXT_ENGINE=translate`. Локально сейчас LT-compatible **MyMemory bridge** (`infra/translate-proxy`), т.к. Argos CDN часто недоступен |
+| `LLM_ENDPOINT` | `http://192.168.1.69:11434/v1/chat/completions` | OpenAI-compatible; используется только при `TEXT_ENGINE=llm` |
+| `LLM_MODEL` | `qwen2.5:7b` | Модель для `llm` |
 | `LLM_API_KEY` | — | Пусто для Ollama |
 | `LLM_TIMEOUT_MS` | 300000 | Таймаут HTTP |
 | `LLM_MAX_PARALLEL` | 3 | Параллельность к Ollama |
@@ -234,42 +250,59 @@ Internet → TLS :443 → reverse proxy → web:3000
 
 ### EPSS
 
-| Переменная | Описание |
-|------------|----------|
-| `EPSS_MAX_DECOMPRESSED_BYTES` | Лимит gzip (default 64MB) |
-| `EPSS_FAIL_RETRY_MS` | Backoff при сбое |
-| `EPSS_BOOT_RESCORE_LIMIT` | Сколько CVE пересчитать после boot import |
+Ежедневный CSV.gz (FIRST → Cyentia failover), boot при пустой/stale таблице, rescore через `ai.score`. Ручной sync: System Health → Управление или `pnpm epss:sync` / `POST /api/stats/ops/epss/sync`.
+
+| Переменная | Default | Описание |
+|------------|---------|----------|
+| `EPSS_BOOT_ON_START` | true | Импорт при старте если пусто/stale |
+| `EPSS_POLL_INTERVAL_MS` | 86400000 | Интервал job |
+| `EPSS_FEED_URL` | (FIRST) | Опциональный primary URL; иначе empiricalsecurity + cyentia |
+| `EPSS_FETCH_RETRIES` | 5 | Попытки по URL-ам |
+| `EPSS_FAIL_RETRY_MS` | 300000 | Backoff при сбое цикла |
+| `EPSS_MAX_DECOMPRESSED_BYTES` | 64MB | Лимит gzip |
+| `EPSS_BOOT_RESCORE_LIMIT` | 5000 | Сколько CVE пересчитать после boot |
+| `EPSS_RESCORE_LIMIT` | 20000 | Лимит rescore после полного ingest |
 
 ---
 
-## 6. Аутентификация и ADMIN_EMAILS
+## 6. Аутентификация и RBAC
 
 ### Модель
 
 - Глобальный `JwtAuthGuard` на всех API routes кроме `@Public()`.
-- Пользователи в таблице `auth_user`.
+- Пользователи и роли хранятся в таблице `auth_user`.
 - TOTP опционально per user.
+
+### Bootstrap администратора
+
+Если `auth_user` пуста, API при старте создаёт администратора:
+
+- email: `admin@vuln-intel.local`
+- пароль: `ChangeMe!Admin1`
+- `must_change_password=true`, поэтому при первом входе пользователь обязан сменить пароль.
+
+```env
+AUTH_BOOTSTRAP_EMAIL=sec@example.com
+AUTH_BOOTSTRAP_PASSWORD=UseYourOwnLongPassword1
+```
+
+Задайте эти переменные до первого старта API, если нужны свои начальные реквизиты. После создания пользователей управляйте доступом через UI, а bootstrap-пароль не используйте как рабочий.
+
+### Роли
+
+| Роль | Права |
+|------|-------|
+| `viewer` | Только чтение; `POST`/`PUT`/`PATCH`/`DELETE` блокируются `WriteRoleGuard` |
+| `analyst` | Чтение и рабочие write-операции: задачи, карточки, ручное enrich, triage |
+| `admin` | Права analyst + admin-only операции: DLQ/ops, digest prepare/send, настройки и пользователи |
+
+### Управление пользователями
+
+Администратор создаёт и редактирует пользователей в **Settings → Пользователи**: email, роль, `enabled`, требование смены пароля и reset password. Self-service регистрация по умолчанию выключена.
 
 ### ADMIN_EMAILS
 
-Контролирует доступ к **дорогим** операциям:
-
-- `POST /api/stats/dlq/*`
-- `POST /api/stats/threat-digest/prepare`
-- `POST /api/stats/threat-digest/telegram`
-
-```env
-ADMIN_EMAILS=admin@example.com,sec@example.com
-```
-
-**Production:** задайте явно. Если пусто — любой залогиненный пользователь = админ (только для dev).
-
-### Bootstrap первого пользователя
-
-1. UI `/login` (если `auth_user` пуста), или
-2. `AUTH_BOOTSTRAP_EMAIL` + `AUTH_BOOTSTRAP_PASSWORD` в env (headless).
-
-После создания — **удалите** bootstrap пароль из env.
+`ADMIN_EMAILS` остаётся legacy allowlist для admin-only API по email. Основной источник прав — `auth_user.role`; пустой `ADMIN_EMAILS` **не** делает всех пользователей admin.
 
 ### INTERNAL_API_BEARER
 
@@ -334,7 +367,6 @@ pnpm nvd:pub-catchup
 |---------|----------|----------|
 | `ai.enrich` | api, ingest | apps/ai |
 | `ai.score` | ingest, api | apps/ai |
-| `asv.scan` | api | ingest |
 | `dlq.ai.enrich` | DLX | admin retry |
 | `dlq.ai.score` | DLX | admin retry |
 
@@ -351,7 +383,7 @@ GET /api/stats/queue
 
 | Причина | Действие |
 |---------|----------|
-| LLM down / timeout | Починить Ollama, `POST /api/stats/dlq/retry?queue=dlq.ai.enrich` |
+| Внешний движок down / timeout | Починить Ollama/LLM или LibreTranslate, затем `POST /api/stats/dlq/retry?queue=dlq.ai.enrich` |
 | Zod validation | Проверить sample: `GET /api/stats/dlq/sample` |
 | OOM в worker | Уменьшить prefetch, увеличить RAM |
 
@@ -370,7 +402,7 @@ Replay генерирует новый `idempotencyKey` с суффиксом `:
 
 ---
 
-## 9. LLM / AI workers
+## 9. Text engine / AI workers
 
 ### Проверка health
 
@@ -378,6 +410,16 @@ Replay генерирует новый `idempotencyKey` с суффиксом `:
 GET /api/stats/queue
 # → llm.ok, llm.endpoint, llm.ms
 ```
+
+### Режимы TEXT_ENGINE
+
+| Режим | Поведение |
+|-------|-----------|
+| `baseline` | Default: локальные шаблоны NVD/BDU/CWE без внешних AI-вызовов |
+| `translate` | `baseline` + EN→RU через LibreTranslate-compatible `/translate`, если задан `LIBRETRANSLATE_URL` |
+| `llm` | Полный LLM pipeline через `LLM_ENDPOINT` / `LLM_MODEL` / ключи |
+
+Manual enrich и `threat-digest/prepare` работают без LLM в режимах `baseline` и `translate`: API синхронно готовит обогащение через текущий text engine и не ждёт очередь LLM.
 
 ### Ollama на LAN
 
@@ -399,14 +441,15 @@ Worker пропускает CVE с успешным `enrichment_ai`. Исклю�
 `AI_SCORE_SKIP_FRESH_HOURS=2` — пропуск для NVD fanout дублей.  
 Force recompute: `score:epss:*`, `score:hot24h:*`, `:dlq:`.
 
-### Отключить fanout при проблемах с LLM
+### Auto enrich
 
 ```env
 NVD_FANOUT_ENRICH=false
 HOT24_AI_SWEEP=false
+BACKLOG_AI_SWEEP=false
 ```
 
-Очередь можно purge в RabbitMQ UI после стабилизации.
+Auto enrich выключен: `ai.enrich` пополняется только ручными кнопками в карточках, digest prepare, DLQ replay и retry внутри worker. В режимах `baseline`/`translate` manual enrich и digest prepare могут завершаться сразу в API без LLM-очереди. Очередь можно purge в RabbitMQ UI после остановки старого авто-хвоста.
 
 ---
 
@@ -435,7 +478,7 @@ POST /api/stats/threat-digest/telegram
 
 ### PDF
 
-Генерируется `ThreatDigestPdfService` — fact sheets с LLM-текстом из `enrichment_ai`.
+Генерируется `ThreatDigestPdfService` — fact sheets с текстом из `enrichment_ai`, созданным текущим `TEXT_ENGINE`.
 
 ---
 
@@ -463,34 +506,7 @@ FSTEC_FEED_SOURCE=tg   # или rss
 
 ---
 
-## 12. ASV / Nuclei / Metasploit
-
-### Включение Nuclei
-
-```env
-ASV_NUCLEI_ENABLED=1
-ASV_NUCLEI_RUNNER=docker
-ASV_NUCLEI_IMAGE=projectdiscovery/nuclei:latest
-ASV_NUCLEI_TEMPLATES_DIR=/var/lib/vuln-intel/nuclei-templates
-```
-
-Первый запуск скачивает ~1GB шаблонов.
-
-### Metasploit
-
-```env
-MSF_ENABLED=1
-```
-
-Только **ручной** запуск из UI. Docker socket должен быть доступен ingest.
-
-### Юридическое
-
-Сканирование и Metasploit — только с **письменным разрешением** владельца активов.
-
----
-
-## 13. Резервное копирование и восстановление
+## 12. Резервное копирование и восстановление
 
 ### Postgres dump
 
@@ -522,9 +538,46 @@ gunzip -c backup.sql.gz | docker compose --env-file .env.production -f infra/doc
 
 ---
 
-## 14. Обновление и откат
+## 13. Обновление и откат
 
-### Обновление
+### Обновление из UI (рекомендуется на prod)
+
+В **Настройки → Обновления** (роль `admin`):
+
+1. **Проверить обновления** — сверка текущего SHA с git remote (`origin` / `PLATFORM_UPDATE_REPO_URL`).
+2. При наличии коммитов ahead — просмотр changelog и **Применить обновление** (если включён safe-apply).
+
+Безопасность apply:
+
+- никогда не вызывается `docker compose down -v` / `--fresh`;
+- `.env*` и секреты не перезаписываются;
+- только `git merge --ff-only`;
+- перед apply по умолчанию `pg_dump` в `backups/`;
+- job выполняется one-shot контейнером, чтобы rebuild `api`/`web` не убивал процесс.
+
+Для one-click apply в Docker подключите helper (нужен абсолютный путь к checkout на хосте):
+
+```bash
+export PLATFORM_HOST_REPO_PATH=/opt/vuln-intel-platform
+# в .env.production: PLATFORM_UPDATE_APPLY_ENABLED=true
+docker compose --env-file .env.production \
+  -f infra/docker-compose.prod.yml \
+  -f infra/docker-compose.update-helper.yml \
+  up -d api
+```
+
+Без helper доступна только проверка; apply откажет с понятным RU-сообщением.
+
+Эквивалент CLI:
+
+```bash
+bash scripts/platform-update.sh
+# или:
+git pull
+./deploy.sh --yes --update
+```
+
+### Обновление вручную
 
 ```bash
 cd vuln-intel-platform
@@ -532,7 +585,7 @@ git pull
 ./deploy.sh --yes --update
 ```
 
-Схема БД применяется API при старте (`SchemaService`).
+Схема БД применяется API при старте (`SchemaService` + `MigrationService`).
 
 ### Откат
 
@@ -545,7 +598,7 @@ git checkout <previous-tag>
 
 ---
 
-## 15. CI/CD и качество
+## 14. CI/CD и качество
 
 ### GitHub Actions (`.github/workflows/ci.yml`)
 
@@ -578,16 +631,16 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 
 ---
 
-## 16. Безопасность (чеклист)
+## 15. Безопасность (чеклист)
 
 ### Перед go-live
 
 - [ ] `JWT_SECRET` — криптостойкий, уникальный
-- [ ] `ADMIN_EMAILS` задан
+- [ ] Bootstrap-пароль изменён; рабочие администраторы имеют роль `admin`
 - [ ] `AUTH_ALLOW_REGISTER=false`
 - [ ] `ALLOW_INTERNAL_API_BEARER=false`
 - [ ] `DLQ_BOOT_RETRY=false`
-- [ ] TLS на reverse proxy
+- [ ] TLS: `tls-proxy` + сертификат из Настройки → Веб / TLS (или внешний reverse proxy)
 - [ ] Postgres/Redis/RabbitMQ не в public network
 - [ ] `.env.production` в `.gitignore`
 - [ ] Firewall: только 443 (и SSH)
@@ -603,17 +656,17 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 
 ---
 
-## 17. Runbook: типовые инциденты
+## 16. Runbook: типовые инциденты
 
 ### INC-01: Очередь ai.enrich > 500
 
 **Симптомы:** UI health, растущий `enrich` в stats/queue.  
 **Диагностика:** `llm.ok`, логи `apps/ai`, sample DLQ.  
 **Решение:**
-1. Починить LLM connectivity.
+1. Починить connectivity внешнего движка (`llm`/`translate`) или переключиться на `TEXT_ENGINE=baseline`.
 2. `dlq/retry` если есть DLQ.
-3. Временно `NVD_FANOUT_ENRICH=false` если catch-up не нужен.
-4. После стабилизации — включить fanout обратно.
+3. Убедиться, что `NVD_FANOUT_ENRICH=false`, `HOT24_AI_SWEEP=false`, `BACKLOG_AI_SWEEP=false`.
+4. Purge `ai.enrich`, если это старый авто-хвост; digest можно подготовить заново.
 
 ### INC-02: Risk scores «не обновляются»
 
@@ -626,10 +679,10 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 **Причина:** JWT_SECRET сменился, истёк token, clock skew.  
 **Решение:** Перелогин; проверить `JWT_SECRET` не менялся между api рестартами без re-login.
 
-### INC-04: Digest отправился без LLM
+### INC-04: Digest не ждёт LLM
 
-**После фикса 2026-07:** UI блокирует send. Если старая версия web — обновить deploy.  
-**Проверка:** prepare status `completed=true` перед send.
+**Ожидаемо**, если `TEXT_ENGINE=baseline` или `translate`: prepare готовит enrichment без LLM и сразу возвращает completed.
+Если нужен именно LLM-текст, задайте `TEXT_ENGINE=llm`, проверьте `LLM_ENDPOINT`/ключи и дождитесь `prepare status completed=true`.
 
 ### INC-05: EPSS пустой после fresh install
 
@@ -649,11 +702,12 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 
 ---
 
-## 18. Скрипты и команды
+## 17. Скрипты и команды
 
 | Команда | Назначение |
 |---------|------------|
 | `./deploy.sh` | Production deploy |
+| `bash scripts/platform-update.sh` | Safe update (ff-only + compose up --build, no volume wipe) |
 | `pnpm dev` | Локальный стек |
 | `pnpm infra:up/down/wipe` | Docker infra |
 | `pnpm epss:sync` | Ручной EPSS import |
@@ -677,7 +731,7 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 
 ---
 
-## 19. System Health UI и мониторинг
+## 18. System Health UI и мониторинг
 
 ### Модуль «Здоровье системы» (web)
 
@@ -685,11 +739,11 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 
 | Вкладка | Содержимое |
 |---------|------------|
-| **Обзор** | `/api/health`, сводка очередей, reconciliation |
+| **Обзор** | Readiness bar, `/api/health`, сводка очередей, reconciliation |
 | **Очереди** | Глубина очередей ingest/ai |
 | **DLQ** | Просмотр, retry, clear (только **admin**) |
-| **Конвейеры** | Статус threat-intel refresh, digest prepare jobs |
-| **Управление** | Ручной refresh TI, ссылки в настройки |
+| **Конвейеры** | Сверка источников + статус threat-intel / digest jobs |
+| **Управление** | Ops (admin): EPSS / BDU / NVD hot-sync / hot24 rescore; TI refresh |
 
 Мониторинг **не дублируется** в Overview / Settings / Threat — только ссылка «→ Здоровье системы».
 
@@ -697,11 +751,11 @@ WEB_BASE=http://127.0.0.1:3001 API_BASE=http://127.0.0.1:4001 pnpm security:dast
 
 | Роль | Права |
 |------|-------|
-| `admin` | Все write-операции + DLQ + digest prepare |
-| `analyst` | Чтение + мутации задач/CVE (не admin-only) |
+| `admin` | Все write-операции + DLQ/ops + digest prepare/send + управление пользователями |
+| `analyst` | Чтение + мутации задач/CVE/triage/manual enrich (не admin-only) |
 | `viewer` | Только чтение; `WriteRoleGuard` блокирует POST/PUT/PATCH/DELETE |
 
-Роль хранится в `auth_user.role`, попадает в JWT. Legacy: если `ADMIN_EMAILS` не задан — все пользователи считаются admin.
+Роль хранится в `auth_user.role` и попадает в JWT. `ADMIN_EMAILS` — только legacy allowlist для admin-only API; если он пустой, дополнительных admin-прав не выдаётся.
 
 ### Prometheus + Grafana (опционально)
 
@@ -738,7 +792,7 @@ SMOKE_BEARER=            # для smoke:integration
 
 ---
 
-## 20. Staging environment
+## 19. Staging environment
 
 Pre-production стек с **изолированными volumes** и портом **3080**.
 

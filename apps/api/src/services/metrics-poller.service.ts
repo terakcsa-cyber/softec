@@ -6,9 +6,7 @@ const POLL_QUEUES = [
   "ai.enrich",
   "ai.score",
   "dlq.ai.enrich",
-  "dlq.ai.score",
-  "asv.scan",
-  "dlq.asv.scan"
+  "dlq.ai.score"
 ] as const;
 
 @Injectable()

@@ -66,6 +66,11 @@ async function main() {
     fstec_url TEXT NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
   )`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_year_idx ON bdu_vuln (identify_year DESC NULLS LAST)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_cvss_idx ON bdu_vuln (cvss_score DESC NULLS LAST)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_publication_date_idx ON bdu_vuln (publication_date)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_last_upd_date_idx ON bdu_vuln (last_upd_date)`);
+  await pool.query(`CREATE INDEX IF NOT EXISTS bdu_vuln_cve_ids_gin ON bdu_vuln USING gin (cve_ids)`);
 
   const chunk = 250;
   for (let i = 0; i < records.length; i += chunk) {
