@@ -55,14 +55,21 @@ type GenerateResult = TlsStatus & {
 
 async function readApiError(res: Response, fallback: string) {
   try {
-    const data = (await res.json()) as { message?: unknown; error?: unknown };
-    if (typeof data.message === "string") return data.message;
-    if (Array.isArray(data.message)) return data.message.join(", ");
-    if (typeof data.error === "string") return data.error;
+    const text = await res.text();
+    try {
+      const data = JSON.parse(text) as { message?: unknown; error?: unknown };
+      if (typeof data.message === "string" && data.message.trim()) return data.message;
+      if (Array.isArray(data.message) && data.message.length) return data.message.map(String).join(", ");
+      if (typeof data.error === "string" && data.error.trim()) return data.error;
+    } catch {
+      // not JSON
+    }
+    const trimmed = text.trim().slice(0, 800);
+    if (trimmed) return `${fallback} (HTTP ${res.status}): ${trimmed}`;
   } catch {
     // ignore
   }
-  return fallback;
+  return `${fallback} (HTTP ${res.status})`;
 }
 
 function formatDate(iso: string | null): string {
@@ -117,7 +124,7 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
 
   const letsencrypt = useMutation({
     mutationFn: async () => {
-      const res = await apiFetch("/api/settings/tls/letsencrypt", {
+      const res = await apiFetch("/api/settings/tls/acme", {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify({
@@ -143,7 +150,7 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
 
   const renew = useMutation({
     mutationFn: async () => {
-      const res = await apiFetch("/api/settings/tls/letsencrypt/renew", {
+      const res = await apiFetch("/api/settings/tls/acme/renew", {
         method: "POST",
         headers: { accept: "application/json" },
         cache: "no-store"

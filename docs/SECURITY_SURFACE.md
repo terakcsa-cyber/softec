@@ -14,7 +14,7 @@
 | `VendorAdvisoryController` | `/vendor-advisories` | GET list, GET `:id`, GET vendors |
 | `VulnTaskController` | `/vuln-tasks` | CRUD + CVE links + by-cve |
 | `IntegrationSettingsController` | `/settings/integrations` | GET, PUT |
-| `WebTlsController` | `/settings/tls` | GET status; POST generate / letsencrypt / letsencrypt/renew (admin) |
+| `WebTlsController` | `/settings/tls` | GET status; POST generate / acme / acme/renew (admin) |
 | `PlatformUpdateController` | `/settings/updates` | GET status, POST check/apply (admin; apply opt-in) |
 | `AuthController` | `/auth` | login, refresh, register (условно), 2fa, me, users CRUD (admin) |
 

@@ -21,7 +21,8 @@ semgrep-out.json
 data/
 backups/
 **/tls-certs/
-**/letsencrypt/
+# Certbot state volumes / local ACME webroot (not app source)
+**/data/letsencrypt/
 **/acme-webroot/
 *.pem
 
