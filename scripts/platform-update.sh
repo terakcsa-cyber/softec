@@ -176,7 +176,10 @@ log "Updated $before_sha -> $after_sha"
 
 write_status "build" "Сборка и перезапуск контейнеров без удаления volumes…"
 # Explicitly never pass -v / --fresh. Only up -d --build.
-if ! APP_ENV_FILE="$app_env_file" "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
+# Ensure compose can inject absolute host path for /host-repo mount consumers.
+export PLATFORM_HOST_REPO_PATH="${PLATFORM_HOST_REPO_PATH:-$ROOT_DIR}"
+if ! APP_ENV_FILE="$app_env_file" PLATFORM_HOST_REPO_PATH="$PLATFORM_HOST_REPO_PATH" \
+  "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
   up -d --build --remove-orphans; then
   die "docker compose up --build завершился с ошибкой. Volumes не трогались; проверьте логи."
 fi

@@ -631,6 +631,29 @@ normalize_env_file() {
   if [[ -n "${PLATFORM_GIT_BRANCH:-}" ]]; then
     write_env_value PLATFORM_GIT_BRANCH "$PLATFORM_GIT_BRANCH" "$ENV_FILE"
   fi
+
+  # In-app updates: absolute host checkout + remote URL (no manual helper compose).
+  write_env_value PLATFORM_HOST_REPO_PATH "$ROOT_DIR" "$ENV_FILE"
+  export PLATFORM_HOST_REPO_PATH="$ROOT_DIR"
+
+  local apply_enabled repo_url repo_branch
+  apply_enabled="$(read_env_value PLATFORM_UPDATE_APPLY_ENABLED "$ENV_FILE" || true)"
+  if [[ -z "$apply_enabled" ]]; then
+    write_env_value PLATFORM_UPDATE_APPLY_ENABLED "true" "$ENV_FILE"
+  fi
+
+
+  repo_branch="$(read_env_value PLATFORM_UPDATE_BRANCH "$ENV_FILE" || true)"
+  if [[ -z "$repo_branch" ]]; then
+    write_env_value PLATFORM_UPDATE_BRANCH "${PLATFORM_GIT_BRANCH:-main}" "$ENV_FILE"
+  fi
+  repo_url="$(read_env_value PLATFORM_UPDATE_REPO_URL "$ENV_FILE" || true)"
+  if [[ -z "$repo_url" ]] && command -v git >/dev/null 2>&1 && [[ -d "$ROOT_DIR/.git" ]]; then
+    repo_url="$(git -C "$ROOT_DIR" remote get-url origin 2>/dev/null || true)"
+    if [[ -n "$repo_url" ]]; then
+      write_env_value PLATFORM_UPDATE_REPO_URL "$repo_url" "$ENV_FILE"
+    fi
+  fi
 }
 
 validate_env_file() {
@@ -756,6 +779,7 @@ if command -v git >/dev/null 2>&1 && [[ -d "$ROOT_DIR/.git" ]]; then
   export PLATFORM_GIT_BRANCH="${PLATFORM_GIT_BRANCH:-$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)}"
   export PLATFORM_GIT_TAG="${PLATFORM_GIT_TAG:-$(git -C "$ROOT_DIR" describe --tags --exact-match 2>/dev/null || true)}"
 fi
+export PLATFORM_HOST_REPO_PATH="${PLATFORM_HOST_REPO_PATH:-$ROOT_DIR}"
 prepare_interactive_env_inputs
 ensure_port_available "$WEB_PORT"
 create_or_update_env

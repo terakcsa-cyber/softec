@@ -597,8 +597,8 @@ gunzip -c backup.sql.gz | docker compose --env-file .env.production -f infra/doc
 В **Настройки → Обновления** (роль `admin`):
 
 1. **Проверить обновления** — сверка текущего SHA с git remote (`origin` / `PLATFORM_UPDATE_REPO_URL`).
-2. При наличии коммитов ahead — просмотр changelog и **Применить обновление** (если включён safe-apply).
-3. **Диск и бэкапы** — прогресс-бар свободного места + **Очистить старое** (удаляет лишние `backups/*.sql.gz`, оставляя N свежих; опционально dangling Docker images/build cache, без volumes).
+2. При наличии коммитов ahead — **Применить обновление** (включено по умолчанию в prod compose).
+3. **Диск и бэкапы** — прогресс-бар + **Очистить старое** (лишние `backups/*.sql.gz`, опционально dangling Docker images/build cache, без volumes).
 
 Безопасность apply:
 
@@ -608,34 +608,18 @@ gunzip -c backup.sql.gz | docker compose --env-file .env.production -f infra/doc
 - перед apply по умолчанию `pg_dump` в `backups/`;
 - job выполняется one-shot контейнером, чтобы rebuild `api`/`web` не убивал процесс.
 
-Для one-click apply в Docker подключите helper (нужен абсолютный путь к checkout на хосте):
+Prod/staging compose сами монтируют git checkout в `/host-repo` и `docker.sock`.  
+`PLATFORM_REPO_DIR` в `.env` **не нужен**. `./deploy.sh --yes --update` проставляет `PLATFORM_HOST_REPO_PATH` и `PLATFORM_UPDATE_REPO_URL` из `git remote`.
 
-```bash
-export PLATFORM_HOST_REPO_PATH=/opt/vuln-intel-platform
-# в .env.production: PLATFORM_UPDATE_APPLY_ENABLED=true
-docker compose --env-file .env.production \
-  -f infra/docker-compose.prod.yml \
-  -f infra/docker-compose.update-helper.yml \
-  up -d api
-```
-
-Без helper доступна только проверка; apply откажет с понятным RU-сообщением.
-
-Если apply падает на **git fetch**: one-shot updater обычно **без SSH-ключей**. Задайте публичный/с токеном HTTPS в `PLATFORM_UPDATE_REPO_URL` (скрипт fetch’ит по нему в `origin/<branch>`). Либо обновляйте вручную на хосте, где SSH уже работает:
-
-```bash
-cd /opt/vuln-intel-platform
-git fetch origin main
-bash scripts/platform-update.sh
-```
+Если apply падает на **git fetch** — задайте HTTPS (для private — с PAT) в `PLATFORM_UPDATE_REPO_URL`.
 
 Эквивалент CLI:
 
 ```bash
-bash scripts/platform-update.sh
-# или:
 git pull
 ./deploy.sh --yes --update
+# или:
+bash scripts/platform-update.sh
 ```
 
 ### Обновление вручную

@@ -511,7 +511,11 @@ export class PlatformUpdateService {
     const envFile = process.env.PLATFORM_UPDATE_ENV_FILE?.trim() || ".env.production";
     const composeFile =
       process.env.PLATFORM_UPDATE_COMPOSE_FILE?.trim() || "infra/docker-compose.prod.yml";
-    const applyEnabled = this.envTruthy(process.env.PLATFORM_UPDATE_APPLY_ENABLED);
+    // Default ON in production images that mount /host-repo; still overridable via env=false.
+    const applyEnabled =
+      process.env.PLATFORM_UPDATE_APPLY_ENABLED == null
+        ? true
+        : this.envTruthy(process.env.PLATFORM_UPDATE_APPLY_ENABLED);
     const backup = process.env.PLATFORM_UPDATE_BACKUP == null
       ? true
       : this.envTruthy(process.env.PLATFORM_UPDATE_BACKUP);
@@ -546,6 +550,31 @@ export class PlatformUpdateService {
     return existsSync("/host-repo") ? "/host-repo" : resolve(process.cwd());
   }
 
+  /** Absolute host path for docker run -v (compose-helper). */
+  private async resolveHostRepoPath(
+    cfg: ReturnType<PlatformUpdateService["config"]>
+  ): Promise<string | null> {
+    if (cfg.hostRepoPath) return cfg.hostRepoPath;
+    if (!(await this.exists("/.dockerenv"))) {
+      return cfg.repoDir;
+    }
+    const dest = cfg.repoDir || "/host-repo";
+    const cid = (process.env.HOSTNAME || "").trim();
+    if (!cid) return null;
+    const out = await this.execCapture(
+      "docker",
+      [
+        "inspect",
+        "-f",
+        `{{range .Mounts}}{{if eq .Destination "${dest}"}}{{.Source}}{{end}}{{end}}`,
+        cid
+      ],
+      { allowFail: true, timeoutMs: 10_000 }
+    );
+    const src = out?.split("\n").map((l) => l.trim()).find(Boolean) || null;
+    return src && src.startsWith("/") ? src : null;
+  }
+
   private async evaluateApplyGate(
     cfg: ReturnType<PlatformUpdateService["config"]>,
     extraBlockers: string[]
@@ -556,7 +585,7 @@ export class PlatformUpdateService {
 
     if (!enabled) {
       blockersRu.push(
-        "Автоприменение выключено (PLATFORM_UPDATE_APPLY_ENABLED). Проверка доступна; apply на сервере: bash scripts/platform-update.sh"
+        "Автоприменение выключено (PLATFORM_UPDATE_APPLY_ENABLED=false). Проверка доступна; apply на сервере: bash scripts/platform-update.sh"
       );
       return { enabled, allowed: false, mode, blockersRu: [...new Set(blockersRu)] };
     }
@@ -564,10 +593,13 @@ export class PlatformUpdateService {
     const inDocker = await this.exists("/.dockerenv");
     const repoOk = cfg.repoDir != null && (await this.isGitRepo(cfg.repoDir));
     if (!repoOk) {
-      blockersRu.push("PLATFORM_REPO_DIR не указывает на git checkout хоста.");
+      blockersRu.push(
+        "Нет git checkout в контейнере (/host-repo). Пересоздайте api через обычный deploy: ./deploy.sh --yes --update (mount репозитория уже в docker-compose.prod.yml)."
+      );
       return { enabled, allowed: false, mode, blockersRu: [...new Set(blockersRu)] };
     }
 
+    const hostPath = await this.resolveHostRepoPath(cfg);
     const gateBlockers: string[] = [];
     if (await this.gitDirtyTracked(cfg.repoDir!)) {
       gateBlockers.push("Git working tree грязный — сначала уберите локальные правки.");
@@ -582,17 +614,17 @@ export class PlatformUpdateService {
     const dockerOk = await this.commandOk("docker", ["version"]);
     const composeOk = await this.commandOk("docker", ["compose", "version"]);
     if (inDocker) {
-      if (!cfg.hostRepoPath) {
+      if (!hostPath) {
         gateBlockers.push(
-          "В Docker для apply нужен PLATFORM_HOST_REPO_PATH (абсолютный путь к checkout на хосте)."
+          "Не удалось определить путь checkout на хосте (mount /host-repo). Пересоздайте api: ./deploy.sh --yes --update"
         );
       }
       if (!dockerOk) {
         gateBlockers.push(
-          "В контейнере API нет docker CLI / docker.sock. Подключите infra/docker-compose.update-helper.yml."
+          "В контейнере API нет docker CLI / docker.sock. Пересоздайте api обычным deploy (sock уже в docker-compose.prod.yml)."
         );
       }
-      if (gateBlockers.length === 0 && cfg.hostRepoPath && dockerOk) {
+      if (gateBlockers.length === 0 && hostPath && dockerOk) {
         mode = "compose-helper";
       }
     } else if (composeOk) {
@@ -742,8 +774,12 @@ export class PlatformUpdateService {
 
   private async startComposeHelper(): Promise<void> {
     const cfg = this.config();
-    const hostPath = cfg.hostRepoPath;
-    if (!hostPath) throw new BadRequestException("PLATFORM_HOST_REPO_PATH required");
+    const hostPath = await this.resolveHostRepoPath(cfg);
+    if (!hostPath) {
+      throw new BadRequestException(
+        "Не удалось определить host path для /host-repo. Пересоздайте api: ./deploy.sh --yes --update"
+      );
+    }
 
     // One-shot updater outside the stack so API/web rebuild does not kill the job.
     const name = "vuln-intel-platform-updater";

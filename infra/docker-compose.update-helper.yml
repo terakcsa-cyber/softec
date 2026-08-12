@@ -1,33 +1,17 @@
-# Optional override: enable in-app platform updates from Settings → Обновления.
+# Legacy override — no longer required.
+# Host git checkout + docker.sock for in-app updates are baked into
+# infra/docker-compose.prod.yml and infra/docker-compose.staging.yml.
 #
-# Usage (production):
-#   export PLATFORM_HOST_REPO_PATH=/absolute/path/to/vuln-intel-platform
-#   docker compose --env-file .env.production \
-#     -f infra/docker-compose.prod.yml \
-#     -f infra/docker-compose.update-helper.yml \
-#     up -d api
-#
-# Safety:
-# - Mounts the host git checkout (read-write) and docker.sock into `api`
-# - Apply still refuses dirty trees, never runs `down -v`, never rewrites .env
-# - Apply runs as a one-shot `docker:27-cli` container so rebuild of api/web does not kill the job
-#
-# Security note: docker.sock access is powerful. Enable only on trusted admin hosts.
+# Keeping this file so old docs/scripts that pass
+#   -f infra/docker-compose.update-helper.yml
+# still work (idempotent env/volume merge).
 
 services:
   api:
     environment:
-      PLATFORM_UPDATE_APPLY_ENABLED: ${PLATFORM_UPDATE_APPLY_ENABLED:-true}
       PLATFORM_REPO_DIR: /host-repo
-      PLATFORM_HOST_REPO_PATH: ${PLATFORM_HOST_REPO_PATH:?set PLATFORM_HOST_REPO_PATH to the absolute host checkout path}
-      PLATFORM_UPDATE_BRANCH: ${PLATFORM_UPDATE_BRANCH:-}
-      PLATFORM_UPDATE_REPO_URL: ${PLATFORM_UPDATE_REPO_URL:-}
-      PLATFORM_UPDATE_ENV_FILE: ${PLATFORM_UPDATE_ENV_FILE:-.env.production}
-      PLATFORM_UPDATE_COMPOSE_FILE: ${PLATFORM_UPDATE_COMPOSE_FILE:-infra/docker-compose.prod.yml}
-      PLATFORM_UPDATE_BACKUP: ${PLATFORM_UPDATE_BACKUP:-true}
-      PLATFORM_GIT_SHA: ${PLATFORM_GIT_SHA:-}
-      PLATFORM_GIT_BRANCH: ${PLATFORM_GIT_BRANCH:-}
-      PLATFORM_GIT_TAG: ${PLATFORM_GIT_TAG:-}
+      PLATFORM_HOST_REPO_PATH: ${PLATFORM_HOST_REPO_PATH:-}
+      PLATFORM_UPDATE_APPLY_ENABLED: ${PLATFORM_UPDATE_APPLY_ENABLED:-true}
     volumes:
-      - ${PLATFORM_HOST_REPO_PATH}:/host-repo
+      - ..:/host-repo
       - /var/run/docker.sock:/var/run/docker.sock
