@@ -18,6 +18,7 @@ import {
   isPublishedWithinHours,
   listHot24CvesNeedingScore,
   normalizeTextEngineMode,
+  isAiScoreEnabled,
   publishScoreEvents,
   NVD_CATALOG_FLOOR_ISO,
   NVD_CATALOG_SCAN_MODE,
@@ -724,9 +725,9 @@ export class NvdIngestJob implements OnModuleInit {
       );
     }
 
-    // Score: по умолчанию только CVE из окна 24ч по published (не весь catch-up lastModified).
+    // Score: off unless TEXT_ENGINE=llm (or AI_SCORE_ENABLED=true). Hot-only by default.
     const scoreHotOnly = this.scoreFanoutHotOnly();
-    if (!scoreHotOnly || isPublishedWithinHours(publishedAtIso)) {
+    if (isAiScoreEnabled() && (!scoreHotOnly || isPublishedWithinHours(publishedAtIso))) {
       this.queue.publish("vuln.events", "vuln.score.requested.v1", {
         id: uuidv4(),
         type: QueueEventType.ScoreCveRequested,
@@ -1054,6 +1055,7 @@ export class NvdIngestJob implements OnModuleInit {
    * Ключ idempotency `score:hot24h:…` — один прогон в час на CVE.
    */
   private async sweepHotWindowScore() {
+    if (!isAiScoreEnabled()) return;
     if (process.env.HOT24_SCORE_SWEEP === "false") return;
 
     const limit = Math.max(1, Math.min(2000, Number(process.env.HOT24_SCORE_SWEEP_LIMIT ?? 500)));

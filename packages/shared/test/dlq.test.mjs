@@ -24,36 +24,78 @@ function scoreEnvelope(cveId = "CVE-2024-0002") {
 
 describe("replayDlqMessages", () => {
   it("replays valid enrich and score messages", async () => {
-    const queue = ["dlq.ai.enrich"];
-    const bodies = [enrichEnvelope(), scoreEnvelope()];
-    let idx = 0;
-    const published = [];
+    const prevFlag = process.env.AI_SCORE_ENABLED;
+    process.env.AI_SCORE_ENABLED = "true";
+    try {
+      const queue = ["dlq.ai.enrich"];
+      const bodies = [enrichEnvelope(), scoreEnvelope()];
+      let idx = 0;
+      const published = [];
 
-    const channel = {
-      async assertExchange() {},
-      async get(_q, { noAck }) {
-        assert.equal(noAck, false);
-        if (idx >= bodies.length) return false;
-        const body = bodies[idx++];
-        return { content: Buffer.from(JSON.stringify(body), "utf8") };
-      },
-      ack() {},
-      nack(_msg, _all, requeue) {
-        assert.equal(requeue, true);
-      },
-      publish(ex, rk, buf, opts) {
-        published.push({ ex, rk, body: JSON.parse(buf.toString("utf8")), opts });
-        return true;
-      }
-    };
+      const channel = {
+        async assertExchange() {},
+        async get(_q, { noAck }) {
+          assert.equal(noAck, false);
+          if (idx >= bodies.length) return false;
+          const body = bodies[idx++];
+          return { content: Buffer.from(JSON.stringify(body), "utf8") };
+        },
+        ack() {},
+        nack(_msg, _all, requeue) {
+          assert.equal(requeue, true);
+        },
+        publish(ex, rk, buf, opts) {
+          published.push({ ex, rk, body: JSON.parse(buf.toString("utf8")), opts });
+          return true;
+        }
+      };
 
-    const res = await replayDlqMessages(channel, { queues: queue, limitPerQueue: 10 });
-    assert.equal(res.replayed, 2);
-    assert.equal(res.skipped, 0);
-    assert.equal(published.length, 2);
-    assert.match(published[0].body.idempotencyKey, /:dlq:/);
-    assert.equal(published[0].rk, "vuln.enrich.requested.v1");
-    assert.equal(published[1].rk, "vuln.score.requested.v1");
+      const res = await replayDlqMessages(channel, { queues: queue, limitPerQueue: 10 });
+      assert.equal(res.replayed, 2);
+      assert.equal(res.skipped, 0);
+      assert.equal(published.length, 2);
+      assert.match(published[0].body.idempotencyKey, /:dlq:/);
+      assert.equal(published[0].rk, "vuln.enrich.requested.v1");
+      assert.equal(published[1].rk, "vuln.score.requested.v1");
+    } finally {
+      if (prevFlag === undefined) delete process.env.AI_SCORE_ENABLED;
+      else process.env.AI_SCORE_ENABLED = prevFlag;
+    }
+  });
+
+  it("skips score replay when ai.score disabled", async () => {
+    const prevEngine = process.env.TEXT_ENGINE;
+    const prevFlag = process.env.AI_SCORE_ENABLED;
+    process.env.TEXT_ENGINE = "baseline";
+    delete process.env.AI_SCORE_ENABLED;
+    try {
+      let nacked = 0;
+      const channel = {
+        async assertExchange() {},
+        async get() {
+          return { content: Buffer.from(JSON.stringify(scoreEnvelope()), "utf8") };
+        },
+        ack() {},
+        nack() {
+          nacked++;
+        },
+        publish() {
+          throw new Error("should not publish score when disabled");
+        }
+      };
+      const res = await replayDlqMessages(channel, {
+        queues: ["dlq.ai.score"],
+        limitPerQueue: 1
+      });
+      assert.equal(res.replayed, 0);
+      assert.equal(res.skipped, 1);
+      assert.equal(nacked, 1);
+    } finally {
+      if (prevEngine === undefined) delete process.env.TEXT_ENGINE;
+      else process.env.TEXT_ENGINE = prevEngine;
+      if (prevFlag === undefined) delete process.env.AI_SCORE_ENABLED;
+      else process.env.AI_SCORE_ENABLED = prevFlag;
+    }
   });
 
   it("nacks invalid JSON without ack", async () => {

@@ -12,6 +12,7 @@ import {
   parseBduVulNode,
   parseNvdTimestampIso,
   publishScoreEvents,
+  isAiScoreEnabled,
   type BduVulxmlRecord
 } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
@@ -90,6 +91,13 @@ export class OpsRepairService {
 
   async runHot24(actorEmail?: string) {
     return this.run("hot24_score", async () => {
+      if (!isAiScoreEnabled()) {
+        return {
+          message:
+            "Hot24 score skipped: ai.score disabled (set TEXT_ENGINE=llm or AI_SCORE_ENABLED=true)",
+          detail: { enqueued: 0, skipped: true, reason: "ai_score_disabled" }
+        };
+      }
       const limit = Math.max(1, Math.min(2000, Number(process.env.HOT24_SCORE_SWEEP_LIMIT ?? 500)));
       const staleHours = Math.max(0, Math.min(168, Number(process.env.HOT24_SCORE_STALE_HOURS ?? 6)));
       const bucket = hot24ScoreHourBucket();

@@ -3,7 +3,8 @@ import { describe, it } from "node:test";
 import {
   EnrichCveRequestedEventSchema,
   publishScoreEvents,
-  buildScoreEventsForCveIds
+  buildScoreEventsForCveIds,
+  isAiScoreEnabled
 } from "../dist/index.js";
 
 describe("queue schemas", () => {
@@ -17,19 +18,62 @@ describe("queue schemas", () => {
   });
 });
 
+describe("isAiScoreEnabled", () => {
+  it("defaults off for baseline/translate", () => {
+    assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "baseline" }), false);
+    assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "translate" }), false);
+    assert.equal(isAiScoreEnabled({}), false);
+  });
+
+  it("enables for llm or AI_SCORE_ENABLED=true", () => {
+    assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "llm" }), true);
+    assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "baseline", AI_SCORE_ENABLED: "true" }), true);
+    assert.equal(isAiScoreEnabled({ TEXT_ENGINE: "llm", AI_SCORE_ENABLED: "false" }), false);
+  });
+});
+
 describe("publishScoreEvents", () => {
-  it("publishes to vuln.events with count", async () => {
-    const calls = [];
-    const publisher = (ex, rk, body) => {
-      calls.push({ ex, rk, body });
-    };
-    const events = await buildScoreEventsForCveIds(["CVE-2024-0001"], {
-      producer: { service: "test", version: "0" },
-      tag: "unit"
-    });
-    const n = publishScoreEvents(publisher, events);
-    assert.equal(n, 1);
-    assert.equal(calls[0].ex, "vuln.events");
-    assert.equal(calls[0].rk, "vuln.score.requested.v1");
+  it("publishes to vuln.events with count when enabled", async () => {
+    const prevFlag = process.env.AI_SCORE_ENABLED;
+    process.env.AI_SCORE_ENABLED = "true";
+    try {
+      const calls = [];
+      const publisher = (ex, rk, body) => {
+        calls.push({ ex, rk, body });
+      };
+      const events = await buildScoreEventsForCveIds(["CVE-2024-0001"], {
+        producer: { service: "test", version: "0" },
+        tag: "unit"
+      });
+      const n = publishScoreEvents(publisher, events);
+      assert.equal(n, 1);
+      assert.equal(calls[0].ex, "vuln.events");
+      assert.equal(calls[0].rk, "vuln.score.requested.v1");
+    } finally {
+      if (prevFlag === undefined) delete process.env.AI_SCORE_ENABLED;
+      else process.env.AI_SCORE_ENABLED = prevFlag;
+    }
+  });
+
+  it("no-ops when score disabled", async () => {
+    const prevEngine = process.env.TEXT_ENGINE;
+    const prevFlag = process.env.AI_SCORE_ENABLED;
+    process.env.TEXT_ENGINE = "baseline";
+    delete process.env.AI_SCORE_ENABLED;
+    try {
+      const calls = [];
+      const events = await buildScoreEventsForCveIds(["CVE-2024-0001"], {
+        producer: { service: "test", version: "0" },
+        tag: "unit"
+      });
+      const n = publishScoreEvents((ex, rk, body) => calls.push({ ex, rk, body }), events);
+      assert.equal(n, 0);
+      assert.equal(calls.length, 0);
+    } finally {
+      if (prevEngine === undefined) delete process.env.TEXT_ENGINE;
+      else process.env.TEXT_ENGINE = prevEngine;
+      if (prevFlag === undefined) delete process.env.AI_SCORE_ENABLED;
+      else process.env.AI_SCORE_ENABLED = prevFlag;
+    }
   });
 });

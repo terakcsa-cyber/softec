@@ -150,7 +150,8 @@ Bootstrap admin создаётся автоматически, если `auth_us
 - `NVD_API_KEY` — лимиты NVD;
 - `TEXT_ENGINE=baseline` по умолчанию: digest/manual enrich работают без LLM;
 - `TEXT_ENGINE=translate` + `LIBRETRANSLATE_URL` — baseline + перевод через LibreTranslate-compatible `/translate`;
-- `TEXT_ENGINE=llm`, `LLM_ENDPOINT`, `LLM_API_KEY` (если нужен ключ), `LLM_MODEL` — только если нужен LLM pipeline.
+- `TEXT_ENGINE=llm`, `LLM_ENDPOINT`, `LLM_API_KEY` (если нужен ключ), `LLM_MODEL` — только если нужен LLM pipeline;
+- `ai.score` / `dlq.ai.score` выключены из коробки; включаются при `TEXT_ENGINE=llm` (или `AI_SCORE_ENABLED=true`).
 
 RBAC: `viewer` — только чтение; `analyst` — чтение и рабочие изменения; `admin` — всё это плюс ops и управление пользователями. Пользователей создаёт администратор в **Settings → Пользователи**.
 

@@ -5,7 +5,8 @@ import {
   QueueEventEnvelopeSchema,
   QueueEventType,
   ScoreCveRequestedEventSchema,
-  computeUnifiedRiskScoreV2
+  computeUnifiedRiskScoreV2,
+  isAiScoreEnabled
 } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
@@ -26,6 +27,13 @@ export class ScoringWorker implements OnModuleInit {
   async onModuleInit() {
     await this.ensureSchema();
     await this.queue.ensureTopology();
+    if (!isAiScoreEnabled()) {
+      // eslint-disable-next-line no-console
+      console.log(
+        "[ai:score] disabled (set TEXT_ENGINE=llm or AI_SCORE_ENABLED=true to consume ai.score)"
+      );
+      return;
+    }
     const ch = this.queue.channel!;
     // Keep <= PG_POOL_MAX: each message may use DB for several sequential queries.
     ch.prefetch(Number(process.env.AI_SCORE_PREFETCH ?? 4));

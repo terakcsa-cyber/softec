@@ -1,6 +1,6 @@
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
-import { QueueEventType, stableJsonStringify, sha256Hex } from "@vuln-intel/shared";
+import { QueueEventType, isAiScoreEnabled, stableJsonStringify, sha256Hex } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
 
@@ -120,6 +120,7 @@ export class KevIngestJob implements OnModuleInit {
 
       const present = await this.db.query<{ cve_id: string }>(`SELECT cve_id FROM cve WHERE cve_id = $1 LIMIT 1`, [cveId]);
       if ((present.rowCount ?? 0) === 0) continue;
+      if (!isAiScoreEnabled()) continue;
       rescored++;
 
       const idempotencyKey = await sha256Hex(

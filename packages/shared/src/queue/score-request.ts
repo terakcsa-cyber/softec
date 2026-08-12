@@ -2,6 +2,18 @@ import { randomUUID } from "node:crypto";
 import { QueueEventType } from "./events.js";
 import { sha256Hex, stableJsonStringify } from "../security/prompt-safety.js";
 
+/**
+ * ai.score / dlq.ai.score are off by default (baseline|translate).
+ * Enabled when TEXT_ENGINE=llm, or forced with AI_SCORE_ENABLED=true.
+ * AI_SCORE_ENABLED=false forces off even in llm mode.
+ */
+export function isAiScoreEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const flag = (env.AI_SCORE_ENABLED ?? "").trim().toLowerCase();
+  if (flag === "false" || flag === "0" || flag === "no") return false;
+  if (flag === "true" || flag === "1" || flag === "yes") return true;
+  return (env.TEXT_ENGINE ?? "").trim().toLowerCase() === "llm";
+}
+
 export type ScoreEventProducer = { service: string; version: string };
 
 export type ScoreRequestedEnvelope = {
@@ -78,6 +90,7 @@ export type ScorePublisher = (
 ) => void;
 
 export function publishScoreEvents(publish: ScorePublisher, events: ScoreRequestedEnvelope[]): number {
+  if (!isAiScoreEnabled() || events.length === 0) return 0;
   for (const event of events) {
     publish("vuln.events", "vuln.score.requested.v1", event);
   }

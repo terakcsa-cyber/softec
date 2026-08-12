@@ -4,6 +4,7 @@ import { Throttle } from "@nestjs/throttler";
 import {
   UserRole,
   isAdminUser,
+  isAiScoreEnabled,
   llmEndpointRequiresApiKey,
   parseBduVendorProductPairs,
   parseUserRole,
@@ -1069,6 +1070,12 @@ export class StatsController {
     const queue = String(queueRaw ?? "");
     if (queue !== "dlq.ai.enrich" && queue !== "dlq.ai.score") {
       return { ok: false, error: "Invalid queue (expected dlq.ai.enrich or dlq.ai.score)" };
+    }
+    if (queue === "dlq.ai.score" && !isAiScoreEnabled()) {
+      return {
+        ok: false,
+        error: "ai.score disabled (set TEXT_ENGINE=llm or AI_SCORE_ENABLED=true before retrying dlq.ai.score)"
+      };
     }
     const limit = Math.max(1, Math.min(50_000, Number(limitRaw ?? 1000)));
     try {

@@ -2,6 +2,7 @@
 /**
  * Поставить в очередь ai.score все CVE за 24ч без свежего risk_score.
  * node --env-file=.env scripts/rescore-hot24-now.mjs
+ * Requires TEXT_ENGINE=llm or AI_SCORE_ENABLED=true.
  */
 import amqplib from "amqplib";
 import pg from "pg";
@@ -9,11 +10,19 @@ import { v4 as uuidv4 } from "uuid";
 import {
   hot24ScoreHourBucket,
   hot24ScoreIdempotencyKey,
+  isAiScoreEnabled,
   listHot24CvesNeedingScore,
   QueueEventType
 } from "../packages/shared/dist/index.js";
 
 async function main() {
+  if (!isAiScoreEnabled()) {
+    console.error(
+      "[rescore-hot24] ai.score disabled — set TEXT_ENGINE=llm or AI_SCORE_ENABLED=true"
+    );
+    process.exit(2);
+  }
+
   const dbUrl = process.env.DATABASE_URL;
   const amqpUrl = process.env.RABBITMQ_URL ?? "amqp://vuln:vuln@localhost:5672/";
   if (!dbUrl) throw new Error("DATABASE_URL is required");

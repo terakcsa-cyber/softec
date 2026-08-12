@@ -10,6 +10,12 @@ const EXCHANGE = "vuln.events";
 const ROUTING_KEY = "vuln.score.requested.v1";
 const EVENT_TYPE = "vuln.score.requested.v1";
 
+const { isAiScoreEnabled } = await import("../packages/shared/dist/index.js");
+if (!isAiScoreEnabled()) {
+  console.error("[rescore-all] ai.score disabled — set TEXT_ENGINE=llm or AI_SCORE_ENABLED=true");
+  process.exit(2);
+}
+
 const LIMIT = Number(process.env.RESCORE_LIMIT ?? 0); // 0 = no limit
 const BATCH = Number(process.env.RESCORE_BATCH ?? 2000);
 const RUN_ID = process.env.RESCORE_RUN_ID ?? new Date().toISOString();

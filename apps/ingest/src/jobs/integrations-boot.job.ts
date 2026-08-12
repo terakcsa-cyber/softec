@@ -5,6 +5,7 @@ import {
   hot24ScoreHourBucket,
   hot24ScoreIdempotencyKey,
   ingestEpssFeed,
+  isAiScoreEnabled,
   listHot24CvesNeedingScore,
   publishScoreEvents,
   replayDlqMessages
@@ -44,8 +45,11 @@ export class IntegrationsBootJob implements OnModuleInit {
       await this.bootEpssIfNeeded();
       await pause(Number(process.env.INTEGRATIONS_BOOT_STEP_PAUSE_MS ?? 1500));
     }
-    if (process.env.HOT24_SCORE_BOOT !== "false") {
+    if (isAiScoreEnabled() && process.env.HOT24_SCORE_BOOT !== "false") {
       await this.bootHot24ScoreSweep();
+    } else if (!isAiScoreEnabled()) {
+      // eslint-disable-next-line no-console
+      console.log("[ingest:integrations-boot] hot24 score skip (ai.score disabled)");
     }
   }
 
