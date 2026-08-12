@@ -136,7 +136,13 @@ export class PlatformUpdateService {
   async getStatus(): Promise<PlatformUpdateStatus> {
     if (this.lastCheck && this.lastCheckedAt) {
       const job = await this.readJob();
-      return { ...this.lastCheck, job };
+      const cfg = this.config();
+      // Refresh "current" from mounted git so UI doesn't stick on bake-time PLATFORM_GIT_SHA.
+      const current = await this.resolveCurrent(cfg.repoDir);
+      const updateAvailable = Boolean(
+        current.sha && this.lastCheck.remote.sha && current.sha !== this.lastCheck.remote.sha
+      );
+      return { ...this.lastCheck, current, updateAvailable, job };
     }
     return this.check({ soft: true });
   }
@@ -646,18 +652,8 @@ export class PlatformUpdateService {
   }
 
   private async resolveCurrent(repoDir: string | null): Promise<PlatformUpdateStatus["current"]> {
-    const envSha = (process.env.PLATFORM_GIT_SHA || process.env.GIT_COMMIT || "").trim();
-    if (envSha) {
-      return {
-        sha: envSha,
-        shortSha: envSha.slice(0, 7),
-        branch: process.env.PLATFORM_GIT_BRANCH?.trim() || null,
-        tag: process.env.PLATFORM_GIT_TAG?.trim() || null,
-        versionLabel: process.env.PLATFORM_GIT_TAG?.trim() || envSha.slice(0, 7),
-        source: "env"
-      };
-    }
-
+    // Prefer live checkout (/host-repo). PLATFORM_GIT_SHA is bake-time and stays stale after apply
+    // until the next image rebuild — that made UI show "update available" forever.
     if (repoDir && (await this.isGitRepo(repoDir))) {
       const sha = (await this.execCapture("git", ["-C", repoDir, "rev-parse", "HEAD"], { allowFail: true }))?.trim() || null;
       const branch =
@@ -680,6 +676,18 @@ export class PlatformUpdateService {
           source: "git"
         };
       }
+    }
+
+    const envSha = (process.env.PLATFORM_GIT_SHA || process.env.GIT_COMMIT || "").trim();
+    if (envSha) {
+      return {
+        sha: envSha,
+        shortSha: envSha.slice(0, 7),
+        branch: process.env.PLATFORM_GIT_BRANCH?.trim() || null,
+        tag: process.env.PLATFORM_GIT_TAG?.trim() || null,
+        versionLabel: process.env.PLATFORM_GIT_TAG?.trim() || envSha.slice(0, 7),
+        source: "env"
+      };
     }
 
     return {

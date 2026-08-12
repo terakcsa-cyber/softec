@@ -172,13 +172,32 @@ write_status "pull" "Применение коммитов (fast-forward only)�
 git merge --ff-only "origin/$BRANCH" || die "fast-forward merge невозможен (локальная история разошлась с remote)"
 
 after_sha="$(git rev-parse HEAD)"
+after_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+[[ "$after_branch" == "HEAD" ]] && after_branch="$BRANCH"
 log "Updated $before_sha -> $after_sha"
+
+# Keep env/build-args in sync so UI "current version" matches checkout after rebuild.
+upsert_env() {
+  local key="$1" val="$2"
+  if grep -qE "^${key}=" "$ENV_FILE" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "$ENV_FILE"
+  else
+    printf '%s=%s\n' "$key" "$val" >>"$ENV_FILE"
+  fi
+}
+upsert_env PLATFORM_GIT_SHA "$after_sha"
+upsert_env PLATFORM_GIT_BRANCH "${after_branch:-main}"
+export PLATFORM_GIT_SHA="$after_sha"
+export PLATFORM_GIT_BRANCH="${after_branch:-main}"
 
 write_status "build" "Сборка и перезапуск контейнеров без удаления volumes…"
 # Explicitly never pass -v / --fresh. Only up -d --build.
 # Ensure compose can inject absolute host path for /host-repo mount consumers.
 export PLATFORM_HOST_REPO_PATH="${PLATFORM_HOST_REPO_PATH:-$ROOT_DIR}"
-if ! APP_ENV_FILE="$app_env_file" PLATFORM_HOST_REPO_PATH="$PLATFORM_HOST_REPO_PATH" \
+if ! APP_ENV_FILE="$app_env_file" \
+  PLATFORM_HOST_REPO_PATH="$PLATFORM_HOST_REPO_PATH" \
+  PLATFORM_GIT_SHA="$PLATFORM_GIT_SHA" \
+  PLATFORM_GIT_BRANCH="$PLATFORM_GIT_BRANCH" \
   "${COMPOSE[@]}" --env-file "$ENV_FILE" -f "$COMPOSE_FILE" \
   up -d --build --remove-orphans; then
   die "docker compose up --build завершился с ошибкой. Volumes не трогались; проверьте логи."
