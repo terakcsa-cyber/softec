@@ -231,3 +231,21 @@ describe("inline risk score", () => {
     }
   });
 });
+
+describe("listCvesNeedingRiskScore", () => {
+  it("queries missing risk_score with limit", async () => {
+    const { listCvesNeedingRiskScore } = await import("../dist/index.js");
+    let seen = null;
+    const db = {
+      async query(sql, params) {
+        seen = { sql, params };
+        return { rows: [{ cve_id: "CVE-2026-1" }], rowCount: 1 };
+      }
+    };
+    const rows = await listCvesNeedingRiskScore(db, { limit: 100 });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].cve_id, "CVE-2026-1");
+    assert.ok(String(seen.sql).includes("risk_score"));
+    assert.equal(seen.params[0], 100);
+  });
+});

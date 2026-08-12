@@ -10,7 +10,8 @@ export class DbService implements OnModuleDestroy {
       process.env.DATABASE_URL ?? "postgres://vuln:vuln@localhost:5432/vuln_intel";
     this.pool = new pg.Pool({
       connectionString: url,
-      max: Number(process.env.PG_POOL_MAX ?? 5)
+      // Score backlog concurrency can be high; keep pool >= AI_SCORE_INLINE_CONCURRENCY.
+      max: Number(process.env.PG_POOL_MAX ?? 64)
     });
   }
 

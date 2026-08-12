@@ -55,3 +55,24 @@ export async function listHot24CvesNeedingScore(
   );
   return r.rows as Hot24ScoreSweepRow[];
 }
+
+/**
+ * Full-corpus catch-up: CVE with no risk_score row (newest published first).
+ * Used by background backlog score sweep — not limited to 24h window.
+ */
+export async function listCvesNeedingRiskScore(
+  db: DbQueryable,
+  opts?: { limit?: number }
+): Promise<Hot24ScoreSweepRow[]> {
+  const limit = Math.max(1, Math.min(10_000, opts?.limit ?? 2000));
+  const r = await db.query(
+    `SELECT c.cve_id
+       FROM cve c
+  LEFT JOIN risk_score r ON r.cve_id = c.cve_id
+      WHERE r.cve_id IS NULL
+   ORDER BY ${SQL_EFFECTIVE_PUBLISHED_AT} DESC NULLS LAST
+      LIMIT $1`,
+    [limit]
+  );
+  return r.rows as Hot24ScoreSweepRow[];
+}

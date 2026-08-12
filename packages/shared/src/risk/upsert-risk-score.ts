@@ -185,7 +185,7 @@ export async function upsertRiskScoresForCveIds(
 ): Promise<number> {
   const ids = [...new Set(cveIds.map((id) => id.trim()).filter(Boolean))];
   if (!ids.length) return 0;
-  const concurrency = Math.max(1, Math.min(64, opts?.concurrency ?? 16));
+    const concurrency = Math.max(1, Math.min(64, opts?.concurrency ?? 48));
   let ok = 0;
   let idx = 0;
 

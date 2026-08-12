@@ -234,7 +234,10 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 | `HOT24_SCORE_BOOT` | true* | Score sweep при boot (*если score не выключен) |
 | `AI_SCORE_ENABLED` | `true` | Unified risk_score; `false` только чтобы поставить scoring на паузу |
 | `AI_SCORE_VIA_QUEUE` | false | Legacy Rabbit `ai.score`. По умолчанию score пишется **inline** в ingest/API |
-| `AI_SCORE_INLINE_CONCURRENCY` | 32 | Параллель inline upsert |
+| `AI_SCORE_INLINE_CONCURRENCY` | 48 | Параллель inline upsert |
+| `BACKLOG_SCORE_SWEEP` | true* | Фоновый догон всего корпуса без `risk_score` (*если `AI_SCORE_ENABLED`) |
+| `BACKLOG_SCORE_SWEEP_LIMIT` | 2500 | CVE за один проход backlog |
+| `BACKLOG_SCORE_SWEEP_INTERVAL_MS` | 12000 | Интервал backlog score |
 | `AI_SCORE_SKIP_FRESH_HOURS` | 2 | Пропуск дублей NVD score (только queue path) |
 | `DLQ_BOOT_RETRY` | false | Авто-replay DLQ при старте (prod: false) |
 | `DLQ_BOOT_RETRY_LIMIT` | 200 | Лимит на очередь |
@@ -453,10 +456,11 @@ Worker пропускает CVE с успешным `enrichment_ai`. Исклю�
 ### Score dedupe / inline
 
 По умолчанию `risk_score` пишется **inline** (`upsertRiskScoreForCve`) — очередей и DLQ нет.  
+Фоновый **`BACKLOG_SCORE_SWEEP`** догоняет весь корпус (CVE без строки в `risk_score`), ~2500 каждые 12с.  
 `AI_SCORE_SKIP_FRESH_HOURS` относится только к legacy `AI_SCORE_VIA_QUEUE=true`.  
 После миграции с очереди: `rabbitmqctl purge_queue ai.score` и `dlq.ai.score`.
 
-Force recompute: Hot24 rescore в System Health / `pnpm rescore:hot24` (теперь upsert, не enqueue).
+Force: System Health → Hot24 rescore (hot24 + backlog batch) / `pnpm rescore:hot24`.
 
 ### Auto enrich / queue guards
 

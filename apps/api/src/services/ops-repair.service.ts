@@ -10,6 +10,7 @@ import {
   hot24ScoreIdempotencyKey,
   ingestEpssFeed,
   listHot24CvesNeedingScore,
+  listCvesNeedingRiskScore,
   parseBduVulNode,
   parseNvdTimestampIso,
   publishScoreEvents,
@@ -110,8 +111,8 @@ export class OpsRepairService {
       const bucket = hot24ScoreHourBucket();
       const rows = await listHot24CvesNeedingScore(this.db, { limit, staleHours, bucket });
       const cveIds = rows.map((r) => r.cve_id);
-      const n = await applyRiskScoresForCveIds(this.db, cveIds, {
-        concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
+      const nHot = await applyRiskScoresForCveIds(this.db, cveIds, {
+        concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 48),
         buildQueueEvents: () =>
           buildScoreEventsForCveIds(cveIds, {
             producer: PRODUCER,
@@ -121,15 +122,58 @@ export class OpsRepairService {
         publishViaQueue: (events) =>
           publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
       });
+
+      // Also kick a full-corpus missing-score batch so ops button helps beyond 24h.
+      const backlogLimit = Math.max(
+        1,
+        Math.min(10_000, Number(process.env.BACKLOG_SCORE_SWEEP_LIMIT ?? 2500))
+      );
+      const backlogRows = await listCvesNeedingRiskScore(this.db, { limit: backlogLimit });
+      const backlogIds = backlogRows.map((r) => r.cve_id);
+      const nBacklog = await applyRiskScoresForCveIds(this.db, backlogIds, {
+        concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 48),
+        buildQueueEvents: () =>
+          buildScoreEventsForCveIds(backlogIds, {
+            producer: PRODUCER,
+            tag: "score-backlog-manual",
+            tsBucket: "day"
+          }),
+        publishViaQueue: (events) =>
+          publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
+      });
+
       const mode = shouldScoreViaQueue() ? "enqueued" : "upserted";
+      const total = nHot + nBacklog;
       await this.db.query(
         `INSERT INTO audit_log(actor_type, actor_id, action, metadata)
          VALUES ('user', $1, 'ops.hot24_score', $2)`,
-        [actorEmail ?? null, JSON.stringify({ [mode]: n, limit, staleHours, bucket })]
+        [
+          actorEmail ?? null,
+          JSON.stringify({
+            mode,
+            hot: nHot,
+            backlog: nBacklog,
+            total,
+            limit,
+            backlogLimit,
+            staleHours,
+            bucket
+          })
+        ]
       );
       return {
-        message: `Hot24 score: ${mode}=${n}`,
-        detail: { [mode]: n, upserted: shouldScoreViaQueue() ? 0 : n, enqueued: shouldScoreViaQueue() ? n : 0, limit, staleHours, bucket }
+        message: `Risk score: hot24 ${mode}=${nHot}, backlog ${mode}=${nBacklog} (total ${total})`,
+        detail: {
+          [mode]: total,
+          upserted: shouldScoreViaQueue() ? 0 : total,
+          enqueued: shouldScoreViaQueue() ? total : 0,
+          hot: nHot,
+          backlog: nBacklog,
+          limit,
+          backlogLimit,
+          staleHours,
+          bucket
+        }
       };
     });
   }

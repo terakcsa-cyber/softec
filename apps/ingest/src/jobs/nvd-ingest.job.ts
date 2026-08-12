@@ -22,6 +22,7 @@ import {
   initialReverseCatalogCursor,
   isPublishedWithinHours,
   listHot24CvesNeedingScore,
+  listCvesNeedingRiskScore,
   normalizeTextEngineMode,
   isAiScoreEnabled,
   publishEnrichRequested,
@@ -171,6 +172,28 @@ export class NvdIngestJob implements OnModuleInit {
           console.error("[ingest:nvd] backlog AI sweep interval failed", e);
         });
       }, backlogIntervalMs);
+    }
+
+    // Full-corpus risk_score catch-up (inline). Default ON when scoring enabled.
+    if (isAiScoreEnabled() && process.env.BACKLOG_SCORE_SWEEP !== "false") {
+      const scoreBacklogOnStartMs = Number(process.env.BACKLOG_SCORE_SWEEP_ON_START_MS ?? 6_000);
+      const scoreBacklogIntervalMs = Number(process.env.BACKLOG_SCORE_SWEEP_INTERVAL_MS ?? 12_000);
+      if (scoreBacklogOnStartMs > 0) {
+        setTimeout(() => {
+          this.sweepBacklogScore().catch((e) => {
+            // eslint-disable-next-line no-console
+            console.error("[ingest:nvd] backlog score sweep on start failed", e);
+          });
+        }, scoreBacklogOnStartMs);
+      }
+      if (scoreBacklogIntervalMs > 0) {
+        setInterval(() => {
+          this.sweepBacklogScore().catch((e) => {
+            // eslint-disable-next-line no-console
+            console.error("[ingest:nvd] backlog score sweep interval failed", e);
+          });
+        }, scoreBacklogIntervalMs);
+      }
     }
   }
 
@@ -1177,6 +1200,45 @@ export class NvdIngestJob implements OnModuleInit {
       // eslint-disable-next-line no-console
       console.log(
         `[ingest:nvd] hot24h score sweep ${shouldScoreViaQueue() ? "enqueued" : "upserted"}=${n} (limit=${limit}, bucket=${bucket})`
+      );
+    }
+  }
+
+  /**
+   * Catch-up risk_score for the whole CVE corpus (missing rows only).
+   * Runs frequently in the background so 100k+ CVEs fill without Rabbit.
+   */
+  private async sweepBacklogScore() {
+    if (!isAiScoreEnabled()) return;
+    if (process.env.BACKLOG_SCORE_SWEEP === "false") return;
+
+    const limit = Math.max(1, Math.min(10_000, Number(process.env.BACKLOG_SCORE_SWEEP_LIMIT ?? 2500)));
+    const rows = await listCvesNeedingRiskScore(this.db, { limit });
+    if (!rows.length) return;
+
+    const cveIds = rows.map((r) => r.cve_id);
+    const started = Date.now();
+    const n = await applyRiskScoresForCveIds(this.db, cveIds, {
+      concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 48),
+      onError: (cveId, err) => {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[ingest:nvd] backlog score failed cve=${cveId}: ${err instanceof Error ? err.message : String(err)}`
+        );
+      },
+      buildQueueEvents: () =>
+        buildScoreEventsForCveIds(cveIds, {
+          producer: { service: "ingest", version: "0.0.1" },
+          tag: "score-backlog",
+          tsBucket: "day"
+        }),
+      publishViaQueue: (events) =>
+        publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
+    });
+    if (n > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[ingest:nvd] backlog score ${shouldScoreViaQueue() ? "enqueued" : "upserted"}=${n} in ${Date.now() - started}ms (limit=${limit})`
       );
     }
   }
