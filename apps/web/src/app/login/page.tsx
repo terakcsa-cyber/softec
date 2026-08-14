@@ -9,7 +9,7 @@ export default function LoginPage() {
   const router = useRouter();
   const [setupRequired, setSetupRequired] = useState(false);
   const [setupChecked, setSetupChecked] = useState(false);
-  const [email, setEmail] = useState("admin@vuln-intel.local");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [totpCode, setTotpCode] = useState("");
@@ -103,14 +103,18 @@ export default function LoginPage() {
               : "Пароль и при необходимости второй фактор (TOTP)."}
         </p>
 
-        <form onSubmit={(e) => void onSubmit(e)} className="mt-6 space-y-4">
+        <form onSubmit={(e) => void onSubmit(e)} className="mt-6 space-y-4" autoComplete="off">
           {setupRequired ? (
             <>
               <div>
                 <label className="block text-xs font-medium text-muted">Email администратора</label>
                 <input
                   type="email"
-                  autoComplete="username"
+                  name="login-email"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
@@ -149,7 +153,11 @@ export default function LoginPage() {
                 <label className="block text-xs font-medium text-muted">Email</label>
                 <input
                   type="email"
-                  autoComplete="username"
+                  name="login-email"
+                  autoComplete="off"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
@@ -160,7 +168,8 @@ export default function LoginPage() {
                 <label className="block text-xs font-medium text-muted">Пароль</label>
                 <input
                   type="password"
-                  autoComplete="current-password"
+                  name="login-password"
+                  autoComplete="off"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"

@@ -1,5 +1,6 @@
 "use client";
 
+import { useAuth } from "@/contexts/auth-context";
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, Loader2, Volume2, X } from "lucide-react";
 import { apiFetch } from "@/lib/api-fetch";
@@ -58,6 +59,7 @@ async function fetchJson<T>(url: string): Promise<T | null> {
 }
 
 export function LiveFeedNotifier() {
+  const { user, loading } = useAuth();
   const [toast, setToast] = useState<Toast | null>(null);
   const [busy, setBusy] = useState(false);
   const timer = useRef<number | null>(null);
@@ -66,8 +68,10 @@ export function LiveFeedNotifier() {
 
   const soundKey = "vip:live:sound";
   const [soundEnabled, setSoundEnabled] = useState(() => safeGet(soundKey) !== "0");
+  const enabled = Boolean(user) && !loading;
 
   useEffect(() => {
+    if (!enabled) return;
     safeSet("vip:live:global", "1");
     return () => {
       try {
@@ -76,10 +80,11 @@ export function LiveFeedNotifier() {
         // ignore
       }
     };
-  }, []);
+  }, [enabled]);
 
   // Browsers block sound until a user gesture. Unlock once on first interaction.
   useEffect(() => {
+    if (!enabled) return;
     const Ctx = (window.AudioContext ||
       (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) as
       | typeof AudioContext
@@ -102,7 +107,7 @@ export function LiveFeedNotifier() {
       window.removeEventListener("pointerdown", unlock);
       window.removeEventListener("keydown", unlock);
     };
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
     safeSet(soundKey, soundEnabled ? "1" : "0");
@@ -121,6 +126,7 @@ export function LiveFeedNotifier() {
   }, []);
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
 
     const poll = async () => {
@@ -179,7 +185,9 @@ export function LiveFeedNotifier() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [soundEnabled, audioUnlocked]);
+  }, [enabled, soundEnabled, audioUnlocked]);
+
+  if (!enabled) return null;
 
   return (
     <div className="fixed bottom-4 right-4 z-[70]">
