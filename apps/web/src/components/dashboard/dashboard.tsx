@@ -1447,6 +1447,10 @@ export function Dashboard() {
         onClose={closeDashboardModal}
         onMove={moveDashboardModal}
         onFocus={focusDashboardModal}
+        onOpenTask={(taskId) => {
+          setTasksSelectedId(taskId);
+          setModuleKey("tasks");
+        }}
       />
 
       <DraggableBduModals

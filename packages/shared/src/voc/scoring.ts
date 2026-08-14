@@ -1,4 +1,5 @@
 import type { VocPriority } from "./triage.js";
+import { resolveBduHasExploit, resolveBduHasFix } from "../bdu/status.js";
 
 function clamp(n: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, n));
@@ -79,6 +80,8 @@ export type VocBduSignals = {
   hasHotLinkedCve?: boolean;
   severityLevel?: number | null;
   hasFix?: boolean | null;
+  fixStatus?: string | null;
+  exploitStatus?: string | null;
 };
 
 /** БДУ, которые обязаны попасть в VOC: высокий/крит ФСТЭК, CVSS≥7, эксплойт или горячий CVE. */
@@ -109,7 +112,8 @@ export function scoreBduForVoc(bdu: VocBduSignals): VocScoreResult {
   if (level >= 4) add(34, "критический (ФСТЭК)");
   else if (level >= 3) add(30, "высокий (ФСТЭК)");
 
-  if (bdu.hasExploit) add(28, "эксплойт (БДУ)");
+  const hasExploit = resolveBduHasExploit({ exploitStatus: bdu.exploitStatus, hasExploit: bdu.hasExploit });
+  if (hasExploit) add(28, "эксплойт (БДУ)");
   const cvss = typeof bdu.cvssScore === "number" && Number.isFinite(bdu.cvssScore) ? bdu.cvssScore : null;
   if (cvss != null) {
     if (cvss >= 9) add(20, `CVSS ${cvss.toFixed(1)}`);
@@ -119,7 +123,8 @@ export function scoreBduForVoc(bdu: VocBduSignals): VocScoreResult {
   if (bdu.hasHotLinkedCve) add(16, "горячий связанный CVE");
   else if ((bdu.linkedCveCount ?? 0) > 0) add(8, "связь с CVE");
 
-  if (bdu.hasFix === false && (level >= 3 || (cvss != null && cvss >= 7))) {
+  const hasFix = resolveBduHasFix({ fixStatus: bdu.fixStatus, hasFix: bdu.hasFix });
+  if (hasFix === false && (level >= 3 || (cvss != null && cvss >= 7))) {
     add(10, "нет исправления (ФСТЭК)");
   }
 

@@ -843,6 +843,14 @@ export function VocHomePanel({
                   <span className="text-[11px] text-muted">{vocStatusLabel(selected.status)}</span>
                 </div>
                 <h2 className="mt-2 text-[16px] font-semibold leading-snug tracking-tight">{selected.title}</h2>
+                {(() => {
+                  if (selected.source !== "cve") return null;
+                  const t = typeof selected.payload.enrich_title === "string" ? selected.payload.enrich_title.trim() : "";
+                  if (!t || t === selected.refId || t === "Комплексный анализ уязвимости" || t === `Уязвимость ${selected.refId}`) {
+                    return null;
+                  }
+                  return <div className="mt-1 text-[13px] leading-snug text-fg/85">{t}</div>;
+                })()}
                 <div className="mt-1 text-[11px] text-muted">{fmtWhen(selected.publishedAt)}</div>
               </div>
 

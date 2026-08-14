@@ -1,4 +1,5 @@
 import { normalizeBduId, normalizeCveId } from "./id.js";
+import { interpretBduExploitStatus, interpretBduFixStatus } from "./status.js";
 
 export type BduVulxmlRecord = {
   bduId: string;
@@ -33,11 +34,20 @@ const SEVERITY_LEVEL: Record<string, number> = {
 
 function pickText(v: unknown): string {
   if (v == null) return "";
-  if (typeof v === "string") return v.trim();
-  if (typeof v === "object" && v !== null && "#text" in v) {
-    return String((v as { "#text": unknown })["#text"]).trim();
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return String(v).trim();
+  if (Array.isArray(v)) return v.map(pickText).filter(Boolean).join(" ").trim();
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    if ("#text" in o) return pickText(o["#text"]);
+    const parts: string[] = [];
+    for (const [k, val] of Object.entries(o)) {
+      if (k.startsWith("@_")) continue;
+      const t = pickText(val);
+      if (t) parts.push(t);
+    }
+    return parts.join(" ").trim();
   }
-  return String(v).trim();
+  return "";
 }
 
 function severityLevel(text: string): number {
@@ -144,8 +154,8 @@ export function parseBduVulNode(vul: unknown): BduVulxmlRecord | null {
     status: pickText(row.vul_status),
     exploitStatus,
     fixStatus,
-    hasExploit: exploitStatus.toLowerCase().includes("существует"),
-    hasFix: fixStatus.toLowerCase().includes("имеется"),
+    hasExploit: interpretBduExploitStatus(exploitStatus) ?? false,
+    hasFix: interpretBduFixStatus(fixStatus) ?? false,
     sources: pickText(row.sources)
   };
 }

@@ -1,9 +1,10 @@
+import { resolveBduHasExploit, resolveBduHasFix } from "./bdu-status";
 import type { VocQueueItem } from "./voc-api";
 
 export type VocContextChip = {
   key: string;
   label: string;
-  tone?: "danger" | "warn" | "muted";
+  tone?: "danger" | "warn" | "muted" | "ok";
 };
 
 export type VocIntelContext = {
@@ -42,7 +43,7 @@ export function vocIntelContext(item: VocQueueItem): VocIntelContext | null {
     const vendor = str(p.vp_vendor);
     const product = str(p.vp_product);
     const description =
-      str(p.enrich_summary) || str(p.short_description) || (vendor || product ? null : str(item.subtitle));
+      str(p.enrich_summary) || str(p.enrich_title) || str(p.short_description) || (vendor || product ? null : str(item.subtitle));
     const cvss = num(p.cvss_base);
     const epss = num(p.epss);
     const chips: VocContextChip[] = [];
@@ -67,8 +68,17 @@ export function vocIntelContext(item: VocQueueItem): VocIntelContext | null {
   else if (level != null && level >= 3) chips.push({ key: "fstec", label: "ФСТЭК высокий", tone: "warn" });
   else chips.push({ key: "fstec", label: "ФСТЭК", tone: "warn" });
   if (cvss != null) chips.push({ key: "cvss", label: `CVSS ${cvss.toFixed(1)}`, tone: cvss >= 9 ? "danger" : cvss >= 7 ? "warn" : "muted" });
-  if (p.has_exploit) chips.push({ key: "exploit", label: "Exploit", tone: "danger" });
-  if (p.has_fix === false) chips.push({ key: "nofix", label: "нет исправления", tone: "warn" });
+  const hasExploit = resolveBduHasExploit({
+    exploitStatus: str(p.exploit_status),
+    hasExploit: typeof p.has_exploit === "boolean" ? p.has_exploit : null
+  });
+  if (hasExploit) chips.push({ key: "exploit", label: "Exploit", tone: "danger" });
+  const hasFix = resolveBduHasFix({
+    fixStatus: str(p.fix_status),
+    hasFix: typeof p.has_fix === "boolean" ? p.has_fix : null
+  });
+  if (hasFix === true) chips.push({ key: "fix", label: "есть исправление", tone: "ok" });
+  else if (hasFix === false) chips.push({ key: "nofix", label: "нет исправления", tone: "warn" });
   if (p.linked_hot) chips.push({ key: "hot", label: "горячий CVE", tone: "warn" });
   const linked = num(p.linked_count);
   if (linked != null && linked > 0) chips.push({ key: "cves", label: `CVE ${linked}`, tone: "muted" });
@@ -80,5 +90,6 @@ export function vocIntelContext(item: VocQueueItem): VocIntelContext | null {
 export function vocChipClass(tone: VocContextChip["tone"]) {
   if (tone === "danger") return "border-danger/35 bg-danger/10 text-danger";
   if (tone === "warn") return "border-warn/35 bg-warn/10 text-warn";
+  if (tone === "ok") return "border-ok/35 bg-ok/10 text-ok";
   return "border-border bg-slate-50 text-fg/70 dark:bg-white/[0.04]";
 }

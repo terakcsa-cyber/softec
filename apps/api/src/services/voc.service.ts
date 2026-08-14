@@ -4,6 +4,8 @@ import {
   CVE_HOT_WINDOW_HOURS,
   SQL_EFFECTIVE_PUBLISHED_AT,
   isSlaBreached,
+  resolveBduHasExploit,
+  resolveBduHasFix,
   scoreBduForVoc,
   scoreCveForVoc,
   sqlBduVocWindowWithinHours,
@@ -454,6 +456,7 @@ export class VocService {
       vp_product: string | null;
       short_description: string | null;
       enrich_summary: string | null;
+      enrich_title: string | null;
       vuln_class: string | null;
     }>(
       `WITH recent_cve AS MATERIALIZED (
@@ -477,14 +480,15 @@ export class VocService {
                 c.raw->'descriptions'->0->>'value',
                 c.raw->'cve'->'descriptions'->0->>'value',
                 ''
-              ) for 220), '') AS short_description,
+              ) for 800), '') AS short_description,
               NULLIF(substring(
                 CASE
                   WHEN COALESCE(ea1.output_json->>'summary', '') LIKE 'LLM not configured%' THEN ''
                   ELSE COALESCE(ea1.output_json->>'summary', '')
                 END
-                for 240
+                for 800
               ), '') AS enrich_summary,
+              NULLIF(btrim(ea1.output_json->>'title'), '') AS enrich_title,
               ${vulnClassGuessSql} AS vuln_class
          FROM recent_cve c
     LEFT JOIN LATERAL (
@@ -563,7 +567,8 @@ export class VocService {
           vp_vendor: row.vp_vendor,
           vp_product: row.vp_product,
           short_description: row.short_description,
-          enrich_summary: row.enrich_summary
+          enrich_summary: row.enrich_summary,
+          enrich_title: row.enrich_title
         }
       };
     });
@@ -590,11 +595,13 @@ export class VocService {
       cvss_score: number | null;
       has_exploit: boolean;
       has_fix: boolean;
+      fix_status: string | null;
+      exploit_status: string | null;
       severity_level: number;
       cve_ids: string[] | null;
     }>(
       `SELECT b.bdu_id, b.name, b.publication_date, b.cvss_score, b.has_exploit, b.has_fix,
-              b.severity_level, b.cve_ids
+              b.fix_status, b.exploit_status, b.severity_level, b.cve_ids
          FROM bdu_vuln b
         WHERE ${sqlBduVocWindowWithinHours("b", windowHours)}
           AND (
@@ -667,6 +674,8 @@ export class VocService {
             cvss_score: row.cvss_score,
             has_exploit: row.has_exploit,
             has_fix: row.has_fix,
+            fix_status: row.fix_status,
+            exploit_status: row.exploit_status,
             severity_level: row.severity_level,
             linked_hot: linkedHot,
             linked_count: linkedCount,
@@ -686,6 +695,8 @@ export class VocService {
       cvss_score: number | null;
       has_exploit: boolean;
       has_fix?: boolean | null;
+      fix_status?: string | null;
+      exploit_status?: string | null;
       severity_level?: number | null;
       linked_hot: boolean;
       linked_count: number;
@@ -694,14 +705,21 @@ export class VocService {
     },
     watchlist: VocWatchlistRule[]
   ): VocQueueItem {
+    const hasFix = resolveBduHasFix({ fixStatus: row.fix_status, hasFix: row.has_fix });
+    const hasExploit = resolveBduHasExploit({
+      exploitStatus: row.exploit_status,
+      hasExploit: row.has_exploit
+    });
     const scored = scoreBduForVoc({
       bduId: row.bdu_id,
-      hasExploit: row.has_exploit,
+      hasExploit: hasExploit ?? false,
       cvssScore: row.cvss_score,
       linkedCveCount: row.linked_count,
       hasHotLinkedCve: row.linked_hot,
       severityLevel: row.severity_level,
-      hasFix: row.has_fix
+      hasFix,
+      fixStatus: row.fix_status,
+      exploitStatus: row.exploit_status
     });
     const boosted = applyWatchlistBoost(scored, { text: `${row.bdu_id} ${row.name}` }, watchlist);
     return {
@@ -720,8 +738,10 @@ export class VocService {
       payload: {
         name: row.name,
         cvss_score: row.cvss_score,
-        has_exploit: row.has_exploit,
-        has_fix: row.has_fix ?? null,
+        has_exploit: hasExploit ?? false,
+        has_fix: hasFix,
+        fix_status: row.fix_status ?? null,
+        exploit_status: row.exploit_status ?? null,
         severity_level: row.severity_level ?? 0,
         linked_hot: row.linked_hot,
         linked_count: row.linked_count,
@@ -801,6 +821,7 @@ export class VocService {
       vp_product: string | null;
       short_description: string | null;
       enrich_summary: string | null;
+      enrich_title: string | null;
       vuln_class: string | null;
     }>(
       `SELECT c.cve_id, c.published_at,
@@ -816,14 +837,15 @@ export class VocService {
                 c.raw->'descriptions'->0->>'value',
                 c.raw->'cve'->'descriptions'->0->>'value',
                 ''
-              ) for 220), '') AS short_description,
+              ) for 800), '') AS short_description,
               NULLIF(substring(
                 CASE
                   WHEN COALESCE(ea1.output_json->>'summary', '') LIKE 'LLM not configured%' THEN ''
                   ELSE COALESCE(ea1.output_json->>'summary', '')
                 END
-                for 240
+                for 800
               ), '') AS enrich_summary,
+              NULLIF(btrim(ea1.output_json->>'title'), '') AS enrich_title,
               ${vulnClassGuessSql} AS vuln_class
          FROM cve c
     LEFT JOIN LATERAL (
@@ -901,6 +923,7 @@ export class VocService {
           vp_product: row.vp_product,
           short_description: row.short_description,
           enrich_summary: row.enrich_summary,
+          enrich_title: row.enrich_title,
           watchlist_match: true
         }
       };
@@ -921,11 +944,14 @@ export class VocService {
       cvss_score: number | null;
       has_exploit: boolean;
       has_fix: boolean;
+      fix_status: string | null;
+      exploit_status: string | null;
       severity_level: number;
       linked_hot: boolean;
       linked_count: number;
     }>(
-      `SELECT b.bdu_id, b.name, b.publication_date, b.cvss_score, b.has_exploit, b.has_fix, b.severity_level,
+      `SELECT b.bdu_id, b.name, b.publication_date, b.cvss_score, b.has_exploit, b.has_fix,
+              b.fix_status, b.exploit_status, b.severity_level,
               EXISTS (
                 SELECT 1
                   FROM cve_bdu_link l

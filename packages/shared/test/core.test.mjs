@@ -7,7 +7,10 @@ import {
   hot24ScoreIdempotencyKey,
   isPublishedWithinHours,
   buildHashedScoreIdempotencyKey,
-  buildScoreRequestedEvent
+  buildScoreRequestedEvent,
+  interpretBduFixStatus,
+  interpretBduExploitStatus,
+  resolveBduHasFix
 } from "../dist/index.js";
 
 describe("published-window", () => {
@@ -46,6 +49,31 @@ describe("risk scoring v2", () => {
       tgMentions24h: 100
     });
     assert.ok(high.score >= 0 && high.score <= 100);
+  });
+});
+
+describe("bdu status parsing", () => {
+  it("treats official fix without «имеется» as has-fix", () => {
+    assert.equal(interpretBduFixStatus("Официальное исправление"), true);
+    assert.equal(interpretBduFixStatus("Официальное исправление имеется"), true);
+    assert.equal(interpretBduFixStatus("Временное решение"), true);
+  });
+
+  it("does not treat «не имеется» / отсутствует as has-fix", () => {
+    assert.equal(interpretBduFixStatus("Официальное исправление отсутствует"), false);
+    assert.equal(interpretBduFixStatus("Исправление не имеется"), false);
+    assert.equal(interpretBduFixStatus("Недоступно"), false);
+  });
+
+  it("does not treat «существование … не подтверждено» as exploit", () => {
+    assert.equal(interpretBduExploitStatus("Существование эксплойта не подтверждено"), false);
+    assert.equal(interpretBduExploitStatus("Эксплуатация отсутствует"), false);
+    assert.equal(interpretBduExploitStatus("Эксплуатация существует"), true);
+  });
+
+  it("prefers status text over stale has_fix flag", () => {
+    assert.equal(resolveBduHasFix({ fixStatus: "Официальное исправление имеется", hasFix: false }), true);
+    assert.equal(resolveBduHasFix({ fixStatus: "Официальное исправление отсутствует", hasFix: true }), false);
   });
 });
 
