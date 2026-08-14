@@ -886,18 +886,25 @@ export function VulnTaskPanel({
     const key = selected ? taskIssueKey(selected) : "";
     const dueIso = active?.due_date ? String(active.due_date) : null;
     const reviewIso = active?.review_date ? String(active.review_date) : null;
+    const kevCount = Number(active?.stats?.kevCount ?? 0) || activeCves.filter((c) => Boolean(c.exploit_known)).length;
     return (
-      <div className="flex min-h-0 flex-col">
-        <div className="sticky top-0 z-10 border-b border-border bg-white/95 px-4 py-3.5 backdrop-blur dark:bg-[#0b1220]/95">
+      <div className="relative flex min-h-0 flex-col">
+        <div className="absolute inset-y-0 left-0 w-[3px] bg-accent/70" aria-hidden />
+        <div className="sticky top-0 z-10 border-b border-border bg-white/95 pl-5 pr-4 py-3.5 backdrop-blur dark:bg-[#0b1220]/95">
           <div className="flex items-start gap-3">
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-[13px] font-bold text-accent">{key}</span>
-                <StatusChip status={activeStatus} />
-                <ScoreBadge score={Number(active?.score_final ?? 0)} />
-                <PriorityBadge priority={String(active?.priority_local ?? "medium")} />
+                <span className="font-mono text-[12px] font-semibold tracking-wide text-accent">{key}</span>
+                <StatusChip status={activeStatus} compact />
+                <PriorityBadge priority={String(active?.priority_local ?? "medium")} compact />
+                {kevCount > 0 ? (
+                  <span className="rounded border border-danger/40 bg-danger/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide text-danger">
+                    KEV
+                  </span>
+                ) : null}
+                <ScoreBadge score={Number(active?.score_final ?? 0)} className="ml-auto" />
               </div>
-              <h2 className="mt-2 text-[17px] font-semibold leading-snug tracking-tight text-fg/95">
+              <h2 className="mt-2 text-[16px] font-semibold leading-snug tracking-tight text-fg/95">
                 {active?.title ?? selected}
               </h2>
               <MetaRow
@@ -910,7 +917,7 @@ export function VulnTaskPanel({
               <button
                 type="button"
                 onClick={() => void refresh()}
-                className="rounded-lg border border-border p-2 text-muted hover:bg-slate-50 hover:text-fg dark:hover:bg-white/5"
+                className="rounded-md border border-border p-1.5 text-muted hover:bg-slate-50 hover:text-fg dark:hover:bg-white/5"
                 title="Обновить"
               >
                 <RefreshCw
@@ -923,7 +930,7 @@ export function VulnTaskPanel({
               <button
                 type="button"
                 onClick={closeTask}
-                className="rounded-lg border border-border p-2 text-muted hover:bg-slate-50 hover:text-fg dark:hover:bg-white/5"
+                className="rounded-md border border-border p-1.5 text-muted hover:bg-slate-50 hover:text-fg dark:hover:bg-white/5"
                 title="Закрыть"
               >
                 <X className="h-3.5 w-3.5" />
@@ -931,7 +938,7 @@ export function VulnTaskPanel({
             </div>
           </div>
 
-          <div className="mt-3 flex flex-wrap gap-1.5 rounded-xl border border-border bg-slate-50/80 p-1 dark:bg-black/30">
+          <div className="mt-3 flex rounded-md border border-border bg-slate-50/80 p-0.5 dark:bg-black/30">
             {TASK_STATUS_COLUMNS.map((s) => {
               const activeSeg = activeStatus === s.key;
               return (
@@ -941,7 +948,7 @@ export function VulnTaskPanel({
                   onClick={() => void savePatch(readPatchFieldsForValidation(s.key))}
                   disabled={saveBusy || activeSeg}
                   className={cn(
-                    "min-w-[88px] flex-1 rounded-lg border px-3 py-1.5 text-[12px] font-semibold transition",
+                    "min-w-0 flex-1 rounded px-2.5 py-1.5 text-[11px] font-semibold uppercase tracking-wide transition",
                     activeSeg
                       ? statusMeta(s.key).segmentActive
                       : "border-transparent text-muted hover:bg-white hover:text-fg/85 dark:hover:bg-white/5",
@@ -979,7 +986,7 @@ export function VulnTaskPanel({
           </div>
         </div>
 
-        <div className="flex-1 space-y-3 overflow-y-auto px-4 py-3.5">
+        <div className="flex-1 space-y-3 overflow-y-auto pl-5 pr-4 py-3.5">
           {rightTab === "fields" ? (
             <div className="space-y-3">
               {saveErr ? (
@@ -1543,9 +1550,11 @@ export function VulnTaskPanel({
                       openTask(t.id);
                     }}
                     className={cn(
-                      "grid cursor-pointer grid-cols-[28px_minmax(0,1fr)] items-center gap-2 border-b border-border/60 px-2 py-1.5 text-left transition md:grid-cols-[28px_88px_minmax(0,1fr)_100px_72px_minmax(100px,140px)_44px_72px]",
-                      activeRow ? "bg-accent/[0.08]" : "hover:bg-black/[0.025] dark:hover:bg-white/[0.04]",
-                      picked ? "bg-accent/[0.05]" : ""
+                      "relative grid cursor-pointer grid-cols-[28px_minmax(0,1fr)] items-center gap-2 border-b border-border/60 px-2 py-2 text-left transition md:grid-cols-[28px_88px_minmax(0,1fr)_100px_72px_minmax(100px,140px)_44px_72px]",
+                      "before:absolute before:inset-y-0 before:left-0 before:w-[2px] before:content-['']",
+                      kevCount > 0 ? "before:bg-warn" : "before:bg-transparent",
+                      activeRow ? "bg-accent/[0.07] before:bg-accent" : "hover:bg-slate-50/80 dark:hover:bg-white/[0.03]",
+                      picked ? "bg-accent/[0.04]" : ""
                     )}
                     aria-selected={activeRow}
                   >
@@ -1610,7 +1619,7 @@ export function VulnTaskPanel({
       {selected ? (
         <div className="fixed inset-0 z-[8000]">
           <button type="button" onClick={closeTask} className="absolute inset-0 bg-black/25 backdrop-blur-[1px]" title="Закрыть" />
-          <aside className="absolute right-0 top-0 flex h-dvh w-[min(560px,96vw)] flex-col border-l border-border bg-white shadow-2xl dark:bg-[#0b1220]">
+          <aside className="absolute right-0 top-0 flex h-dvh w-[min(580px,96vw)] flex-col border-l border-border bg-white shadow-2xl dark:bg-[#0b1220]">
             {detailQuery.isLoading ? (
               <div className="p-4 text-sm text-muted">Загрузка…</div>
             ) : detailQuery.isError ? (
