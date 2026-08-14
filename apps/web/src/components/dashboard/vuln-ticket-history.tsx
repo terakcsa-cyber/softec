@@ -21,8 +21,15 @@ export type VulnTaskHistoryItem = {
 
 function fmtDateShort(s?: string | null) {
   if (!s) return "—";
-  const d = new Date(s);
-  return Number.isFinite(d.getTime()) ? d.toLocaleDateString() : String(s);
+  const t = s.trim();
+  const bdu = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(t);
+  if (bdu) {
+    const d = new Date(Date.UTC(Number(bdu[3]), Number(bdu[2]) - 1, Number(bdu[1])));
+    if (!Number.isFinite(d.getTime())) return t;
+    return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" });
+  }
+  const d = new Date(t);
+  return Number.isFinite(d.getTime()) ? d.toLocaleDateString("ru-RU") : String(s);
 }
 
 function taskStatusLabel(status?: string | null): string {
