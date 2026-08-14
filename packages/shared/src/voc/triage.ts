@@ -44,3 +44,17 @@ export function vocStatusLabel(s: VocTriageStatus): string {
       return "Не актуально";
   }
 }
+
+/** Карточка линзы «Сейчас»: P1, SLA, watchlist или БДУ P2. */
+export function isVocNowItem(item: {
+  status?: string | null;
+  vocPriority?: string | null;
+  slaBreached?: boolean | null;
+  source?: string | null;
+  vocReasons?: string[] | null;
+}): boolean {
+  if (item.status === "done" || item.status === "dismissed") return false;
+  if (item.vocPriority === "p1" || item.slaBreached) return true;
+  if ((item.vocReasons ?? []).some((r) => r.startsWith("watchlist:"))) return true;
+  return item.source === "bdu" && item.vocPriority === "p2";
+}

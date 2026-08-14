@@ -10,7 +10,8 @@ import {
   buildScoreRequestedEvent,
   interpretBduFixStatus,
   interpretBduExploitStatus,
-  resolveBduHasFix
+  resolveBduHasFix,
+  isVocNowItem
 } from "../dist/index.js";
 
 describe("published-window", () => {
@@ -74,6 +75,15 @@ describe("bdu status parsing", () => {
   it("prefers status text over stale has_fix flag", () => {
     assert.equal(resolveBduHasFix({ fixStatus: "Официальное исправление имеется", hasFix: false }), true);
     assert.equal(resolveBduHasFix({ fixStatus: "Официальное исправление отсутствует", hasFix: true }), false);
+  });
+});
+
+describe("isVocNowItem", () => {
+  it("keeps high BDU in Now and drops done", () => {
+    assert.equal(isVocNowItem({ source: "bdu", vocPriority: "p2", status: "open" }), true);
+    assert.equal(isVocNowItem({ source: "bdu", vocPriority: "p2", status: "done" }), false);
+    assert.equal(isVocNowItem({ source: "cve", vocPriority: "p3", status: "open" }), false);
+    assert.equal(isVocNowItem({ source: "cve", vocPriority: "p1", status: "open" }), true);
   });
 });
 

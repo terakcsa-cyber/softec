@@ -18,6 +18,7 @@ import {
 } from "./voc-api";
 import { clearLegacyProcessedStorage, loadLegacyProcessedRefKeys } from "./voc-triage-migrate";
 import { parseVocRefKey } from "./voc-ref-keys";
+import { markVocRefClosed, markVocRefOpen } from "./voc-session-closed";
 import { useAuth } from "@/contexts/auth-context";
 
 type TriageMap = Map<string, VocTriageStatus>;
@@ -91,6 +92,8 @@ export function VocTriageProvider({ children }: { children: ReactNode }) {
   const patchMutation = useMutation({
     mutationFn: patchVocTriage,
     onMutate: async (body) => {
+      if (body.status === "done" || body.status === "dismissed") markVocRefClosed(body.refKey);
+      else markVocRefOpen(body.refKey);
       await queryClient.cancelQueries({ queryKey: ["voc", "triage", "all"] });
       const prev = queryClient.getQueryData<{ refKey: string; status: VocTriageStatus }[]>([
         "voc",
@@ -117,11 +120,13 @@ export function VocTriageProvider({ children }: { children: ReactNode }) {
       );
       return { prev };
     },
-    onError: (_e, _v, ctx) => {
+    onError: (_e, vars, ctx) => {
+      if (vars.status === "done" || vars.status === "dismissed") markVocRefOpen(vars.refKey);
       if (ctx?.prev) queryClient.setQueryData(["voc", "triage", "all"], ctx.prev);
     },
-    onSettled: () => {
+    onSettled: (_e, err, vars) => {
       void queryClient.invalidateQueries({ queryKey: ["voc", "triage"] });
+      if (vars?.status === "done" || vars?.status === "dismissed") return;
       void queryClient.invalidateQueries({ queryKey: ["voc", "queue"] });
     }
   });

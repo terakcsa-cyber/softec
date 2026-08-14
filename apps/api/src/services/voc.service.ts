@@ -11,6 +11,7 @@ import {
   sqlBduVocWindowWithinHours,
   sqlVulnClassGuessExpr,
   vocRefKey,
+  isVocNowItem,
   type VocPriority,
   type VocSource,
   type VocTriageStatus,
@@ -142,14 +143,13 @@ export class VocService {
     return { items: this.capQueue(filtered, limit, sourceFilter), stats };
   }
 
-  /** В общей ленте CVE с высоким скором не должны вытеснять БДУ ФСТЭК. */
-  private capQueue(items: VocQueueItem[], limit: number, sourceFilter: string): VocQueueItem[] {
+  /** Сначала все карточки «Сейчас», иначе снятие БДУ сразу заполняется следующей БДУ и счётчик 48→47→48. */
+  private capQueue(items: VocQueueItem[], limit: number, _sourceFilter: string): VocQueueItem[] {
     if (items.length <= limit) return items;
-    if (sourceFilter !== "all") return items.slice(0, limit);
-    const bdu = items.filter((i) => i.source === "bdu");
-    const rest = items.filter((i) => i.source !== "bdu");
-    const bduKeep = bdu.slice(0, Math.min(bdu.length, Math.max(24, Math.floor(limit * 0.3))));
-    return [...bduKeep, ...rest.slice(0, Math.max(0, limit - bduKeep.length))].sort((a, b) => {
+    const now = items.filter((i) => isVocNowItem(i));
+    const later = items.filter((i) => !isVocNowItem(i));
+    const kept = now.length >= limit ? now.slice(0, limit) : [...now, ...later.slice(0, limit - now.length)];
+    return kept.sort((a, b) => {
       if (b.vocScore !== a.vocScore) return b.vocScore - a.vocScore;
       return String(b.publishedAt ?? "").localeCompare(String(a.publishedAt ?? ""));
     });

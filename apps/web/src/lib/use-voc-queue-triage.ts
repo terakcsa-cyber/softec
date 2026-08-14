@@ -10,6 +10,7 @@ import {
   type VocTriageRow,
   type VocTriageStatus
 } from "./voc-api";
+import { isVocRefSessionClosed, markVocRefClosed, markVocRefOpen } from "./voc-session-closed";
 
 export type VocTriageOverride = {
   status: VocTriageStatus;
@@ -17,8 +18,13 @@ export type VocTriageOverride = {
 };
 
 function applyOverride(item: VocQueueItem, override?: VocTriageOverride): VocQueueItem {
-  if (!override) return item;
-  return { ...item, status: override.status, claimedByEmail: override.claimedByEmail };
+  if (override) {
+    return { ...item, status: override.status, claimedByEmail: override.claimedByEmail };
+  }
+  if (isVocRefSessionClosed(item.refKey)) {
+    return { ...item, status: "done" };
+  }
+  return item;
 }
 
 export function useVocQueueTriage() {
@@ -45,6 +51,9 @@ export function useVocQueueTriage() {
         claimedByEmail:
           vars.status === "claimed" ? (user?.email ?? "вы") : vars.status === "open" ? null : null
       };
+
+      if (vars.status === "done" || vars.status === "dismissed") markVocRefClosed(vars.refKey);
+      else markVocRefOpen(vars.refKey);
 
       setOverrides((prev) => ({ ...prev, [vars.refKey]: optimistic }));
 
@@ -79,6 +88,7 @@ export function useVocQueueTriage() {
       return { snapshots, triageSnapshots };
     },
     onError: (err, vars, ctx) => {
+      if (vars.status === "done" || vars.status === "dismissed") markVocRefOpen(vars.refKey);
       setOverrides((prev) => {
         const next = { ...prev };
         delete next[vars.refKey];
@@ -98,10 +108,14 @@ export function useVocQueueTriage() {
     },
     onSettled: (_data, err, vars) => {
       setPendingKey(null);
-      void queryClient.invalidateQueries({ queryKey: ["voc", "queue"] });
       void queryClient.invalidateQueries({ queryKey: ["voc", "triage"] });
-      if (err || !vars) return;
-      // «Готово» держим в сессии: live-poll не должен вернуть карточку в «Сейчас».
+      if (err || !vars) {
+        void queryClient.invalidateQueries({ queryKey: ["voc", "queue"] });
+        return;
+      }
+      // Готово/снято: не дёргать очередь сразу — live-poll и кап слота возвращали карточку в «Сейчас».
+      if (vars.status === "done" || vars.status === "dismissed") return;
+      void queryClient.invalidateQueries({ queryKey: ["voc", "queue"] });
       if (vars.status === "open" || vars.status === "claimed") {
         setOverrides((prev) => {
           const next = { ...prev };

@@ -41,6 +41,7 @@ import { vocPriorityLabel, vocPriorityMeta, vocStatusLabel } from "@/lib/voc-lab
 import { vocChipClass, vocIntelContext } from "@/lib/voc-queue-context";
 import { fetchVocWatchlist } from "@/lib/voc-watchlist-api";
 import { applyWatchlistBoostClient, hasWatchlistHit } from "@/lib/voc-watchlist-client";
+import { isVocRefSessionClosed } from "@/lib/voc-session-closed";
 import { VocQueueRow } from "./voc-queue-row";
 import { VocWatchlistPanel } from "./voc-watchlist-panel";
 import { VocWatchlistQuickAdd } from "./voc-watchlist-quick-add";
@@ -85,6 +86,7 @@ function isMineItem(item: VocQueueItem, email?: string | null) {
 }
 
 function isNowItem(item: VocQueueItem) {
+  if (isVocRefSessionClosed(item.refKey)) return false;
   if (item.status === "done" || item.status === "dismissed") return false;
   if (item.vocPriority === "p1" || Boolean(item.slaBreached) || hasWatchlistHit(item)) return true;
   // ФСТЭК БДУ высокого/критичного контура — обязательный приоритет смены для банка
