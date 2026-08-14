@@ -34,10 +34,12 @@ function escalationFromCase(caseRow: VocCaseRow): { kind: "cve" | "bdu"; entityI
 
 export function VocVerificationPanel({
   caseId,
-  onResolved
+  onResolved,
+  variant = "card"
 }: {
   caseId: string;
   onResolved?: () => void;
+  variant?: "card" | "plain";
 }) {
   const queryClient = useQueryClient();
   const [evidenceBody, setEvidenceBody] = useState("");
@@ -116,7 +118,13 @@ export function VocVerificationPanel({
   if (!caseRow) return null;
 
   return (
-    <div className="space-y-3 rounded-xl border border-teal-200/70 bg-teal-50/40 p-3 dark:border-teal-900/40 dark:bg-teal-950/20">
+    <div
+      className={cn(
+        "space-y-3",
+        variant === "card" &&
+          "rounded-xl border border-teal-200/70 bg-teal-50/40 p-3 dark:border-teal-900/40 dark:bg-teal-950/20"
+      )}
+    >
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-[12px] font-semibold text-fg/95">
           <ClipboardList className="h-4 w-4 text-teal-600 dark:text-teal-400" />

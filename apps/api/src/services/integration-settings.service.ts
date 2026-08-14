@@ -450,17 +450,21 @@ export class IntegrationSettingsService {
       max_pub: string | null;
     }>(
       `SELECT
-         COUNT(*)::text AS n,
-         to_char(MAX(updated_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated,
-         MAX(bdu_id) AS max_id,
+         (SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = 'public.bdu_vuln'::regclass)::text AS n,
+         to_char((SELECT MAX(updated_at) FROM bdu_vuln) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated,
+         (SELECT MAX(bdu_id) FROM bdu_vuln) AS max_id,
          to_char(
-           MAX(to_timestamp(publication_date, 'DD.MM.YYYY')) AT TIME ZONE 'UTC',
+           (
+             SELECT MAX(to_timestamp(publication_date, 'DD.MM.YYYY'))
+               FROM bdu_vuln
+              WHERE publication_date ~ '^\\d{2}\\.\\d{2}\\.\\d{4}$'
+           ) AT TIME ZONE 'UTC',
            'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
-         ) AS max_pub
-       FROM bdu_vuln
-      WHERE publication_date ~ '^\\d{2}\\.\\d{2}\\.\\d{4}$'`
+         ) AS max_pub`
     );
-    const links = await this.db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM cve_bdu_link`);
+    const links = await this.db.query<{ n: string }>(
+      `SELECT GREATEST(reltuples, 0)::bigint::text AS n FROM pg_class WHERE oid = 'public.cve_bdu_link'::regclass`
+    );
 
     const pollMs = Number(process.env.BDU_POLL_INTERVAL_MS ?? 30 * 60 * 1000);
     const staleMs = Math.max(pollMs * 2, 6 * 60 * 60 * 1000);

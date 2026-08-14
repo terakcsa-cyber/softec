@@ -14,6 +14,39 @@ export function vocPriorityLabel(p: VocPriority): string {
   }
 }
 
+export function vocPriorityMeta(p: VocPriority) {
+  if (p === "p1") {
+    return {
+      label: "P1 · Критичный",
+      short: "P1",
+      badge: "border-danger/35 bg-danger/10 text-danger",
+      rail: "before:bg-danger"
+    };
+  }
+  if (p === "p2") {
+    return {
+      label: "P2 · Высокий",
+      short: "P2",
+      badge: "border-warn/35 bg-warn/10 text-warn",
+      rail: "before:bg-warn"
+    };
+  }
+  if (p === "p3") {
+    return {
+      label: "P3 · Средний",
+      short: "P3",
+      badge: "border-accent/35 bg-accent/10 text-fg/85",
+      rail: "before:bg-accent"
+    };
+  }
+  return {
+    label: "P4 · Низкий",
+    short: "P4",
+    badge: "border-border bg-slate-100 text-muted dark:bg-white/10",
+    rail: "before:bg-border"
+  };
+}
+
 export function vocStatusLabel(s: VocTriageStatus): string {
   switch (s) {
     case "open":

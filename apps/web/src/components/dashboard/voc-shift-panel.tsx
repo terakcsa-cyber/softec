@@ -84,19 +84,19 @@ export function VocShiftPanel({ className }: { className?: string }) {
       {kpi ? (
         <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
           {[
-            { l: "P1 open", v: kpi.queue.p1Open, kind: "num" as const },
-            { l: "SLA breach", v: kpi.cases.slaBreached, kind: "num" as const },
-            { l: "Закрыто", v: kpi.cases.resolvedInWindow, kind: "num" as const },
+            { l: "P1 открыто", v: kpi.queue.p1Open, kind: "num" as const },
+            { l: "Просрочен SLA", v: kpi.cases.slaBreached, kind: "num" as const },
+            { l: "Закрыто за смену", v: kpi.cases.resolvedInWindow, kind: "num" as const },
             {
-              l: "TFR ср.",
+              l: "Среднее закрытие",
               v: kpi.cases.avgResolutionHours != null ? `${kpi.cases.avgResolutionHours}ч` : "—",
               kind: "text" as const
             },
-            { l: "Backlog", v: kpi.triage.open + kpi.triage.claimed, kind: "num" as const },
-            { l: "Кейсы", v: kpi.cases.active, kind: "num" as const },
-            { l: "Watchlist", v: kpi.queue.watchlistHits, kind: "num" as const },
+            { l: "Backlog triage", v: kpi.triage.open + kpi.triage.claimed, kind: "num" as const },
+            { l: "Кейсы активны", v: kpi.cases.active, kind: "num" as const },
+            { l: "Watchlist hits", v: kpi.queue.watchlistHits, kind: "num" as const },
             {
-              l: "TG шум",
+              l: "Шум TG",
               v: kpi.tg.noiseRatio != null ? `${kpi.tg.noiseRatio}%` : "—",
               kind: "text" as const
             }
@@ -116,7 +116,7 @@ export function VocShiftPanel({ className }: { className?: string }) {
       <div className="mt-4 space-y-2 border-t border-slate-200/80 pt-3 dark:border-white/10">
         <div className="flex items-center gap-2 text-[11px] font-medium">
           <FileText className="h-3.5 w-3.5" />
-          Handover отчёт
+          Handover следующей смене
         </div>
         <textarea
           value={handoverNotes}
@@ -157,7 +157,7 @@ export function VocShiftPanel({ className }: { className?: string }) {
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 text-[11px] font-medium">
             <Bell className="h-3.5 w-3.5" />
-            Alert rules
+            Правила алертов
           </div>
           <button
             type="button"

@@ -94,10 +94,12 @@ type CoverageHealth = {
   };
   lastScoreAt?: string | null;
   lastEnrichAt?: string | null;
+  approximate?: boolean;
 };
 
 type QueueHealth = {
   ok?: boolean;
+  extrasPending?: boolean;
   error?: string;
   queues?: {
     enrich?: { messages: number; consumers: number };
@@ -180,7 +182,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
       const res = await apiFetch("/api/stats/queue", { cache: "no-store" });
       return (await res.json()) as QueueHealth;
     },
-    refetchInterval: 60_000
+    refetchInterval: (q) => (q.state.data?.extrasPending ? 2_000 : 60_000)
   });
 
   const readinessQ = useQuery({
@@ -459,6 +461,23 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
 
       {tab === "queues" && (
         <div className="space-y-4">
+          {queueQ.isLoading && !qh ? (
+            <div className="flex items-center gap-2 text-sm text-muted">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Загрузка очередей…
+            </div>
+          ) : null}
+          {qh?.extrasPending ? (
+            <div className="flex items-center gap-2 text-[11px] text-muted">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              {typeof qh.coverage?.totalCves === "number"
+                ? "Проверяем LLM / NVD / БДУ…"
+                : "Уточняем покрытие и интеграции…"}
+            </div>
+          ) : null}
+          {queueQ.isError || qh?.ok === false ? (
+            <div className="text-sm text-danger">{qh?.error ? String(qh.error) : "Очереди недоступны"}</div>
+          ) : null}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {(
               [
@@ -505,8 +524,13 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
           <div className="grid gap-3 lg:grid-cols-2">
             <CoverageStatusCard
               title="Risk score"
-              ok={Boolean(qh?.coverage?.scoreEnabled) && (qh?.coverage?.scoredMissing ?? 0) === 0}
+              ok={
+                typeof qh?.coverage?.totalCves === "number" &&
+                Boolean(qh?.coverage?.scoreEnabled) &&
+                (qh?.coverage?.scoredMissing ?? 0) === 0
+              }
               warn={
+                typeof qh?.coverage?.totalCves !== "number" ||
                 qh?.coverage?.scoreEnabled === false ||
                 (Boolean(qh?.coverage?.scoreEnabled) &&
                   (qh?.coverage?.scoredMissing ?? 0) > 0 &&
@@ -531,9 +555,14 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
             />
             <CoverageStatusCard
               title="Карточки (текст)"
-              ok={(qh?.coverage?.enrichedMissing ?? 0) === 0 && (qh?.coverage?.totalCves ?? 0) > 0}
+              ok={
+                typeof qh?.coverage?.totalCves === "number" &&
+                (qh?.coverage?.enrichedMissing ?? 0) === 0 &&
+                (qh?.coverage?.totalCves ?? 0) > 0
+              }
               warn={
-                (qh?.coverage?.enrichedMissing ?? 0) > 0 && (qh?.coverage?.enrichBacklogOn ?? false)
+                typeof qh?.coverage?.totalCves !== "number" ||
+                ((qh?.coverage?.enrichedMissing ?? 0) > 0 && (qh?.coverage?.enrichBacklogOn ?? false))
               }
               pct={qh?.coverage?.enrichedPct}
               filled={qh?.coverage?.enrichedCount}
@@ -665,10 +694,6 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
               ) : null}
             </div>
           ) : null}
-
-          {!qh?.ok && (
-            <div className="text-sm text-danger">{qh?.error ? String(qh.error) : "Очереди недоступны"}</div>
-          )}
         </div>
       )}
 

@@ -9,7 +9,7 @@ import { needsOnDemandEnrich, parseAiOutputJson, shouldAutoEnrichOnOpen } from "
 import { defaultAttackFlowSteps, isUsableAttackGraph } from "@/lib/baseline-enrichment";
 import { CVE_POLL_BACKGROUND_ONLY_MS, CVE_POLL_WHILE_ENRICH_MS, ENRICH_UI_WAIT_MS } from "@/lib/enrich-ui-wait";
 import { useLivePollInterval } from "@/lib/live-refresh";
-import { EXPLOIT_RADAR_FILTER_LABELS, type ExploitRadarFilter } from "@/lib/exploit-intel-client";
+import { type ExploitRadarFilter } from "@/lib/exploit-intel-client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Bandage,
@@ -17,20 +17,13 @@ import {
   ClipboardList,
   HeartPulse,
   Inbox,
-  Loader2,
-  Pin,
-  PinOff,
-  RefreshCw,
   Settings,
   ShieldAlert,
   ShieldCheck,
   Target
 } from "lucide-react";
-import * as Tabs from "@radix-ui/react-tabs";
 import * as Dialog from "@radix-ui/react-dialog";
 import { cn } from "../ui/cn";
-import { CveCard } from "./cve-card";
-import { AiSummaryPanel } from "./ai-summary-panel";
 import { OverviewDashboardPanel } from "./overview-dashboard-panel";
 import { SettingsPanel } from "./settings-panel";
 import { SystemHealthPanel } from "./system-health-panel";
@@ -41,8 +34,17 @@ import { computeBduPriority } from "@/lib/bdu-priority";
 import { cveRefKey } from "@/lib/voc-ref-keys";
 import { useVocTriage } from "@/lib/voc-triage-context";
 import { CveDetailPanel } from "./cve-detail-panel";
-import { BduCard, type BduListItem } from "./bdu-card";
+import { type BduListItem } from "./bdu-card";
 import { BduDetailPanel, type BduDetailsPayload } from "./bdu-detail-panel";
+import {
+  findVulnPreviewIndex,
+  vulnPreviewFromEntry,
+  vulnPreviewKey,
+  VulnsModulePanel,
+  type VulnModuleSort,
+  type VulnModuleView,
+  type VulnPreviewRef
+} from "./vulns-module-panel";
 
 /** reactflow ломает SSR/Webpack в Next 15 — только клиент. */
 const AttackGraphPanel = dynamic(
@@ -64,10 +66,7 @@ import {
 } from "./draggable-bdu-modals";
 import { FstecModulePanel } from "../fstec/fstec-module-panel";
 import { PatchManagementPanel } from "./patch-management-panel";
-import { VulnSearchBar } from "./vuln-search-bar";
 import { VulnTaskPanel } from "./vuln-task-panel";
-import { VulnClassFilter } from "./vuln-class-filter";
-import { VulnClassBadge } from "./vuln-class-badge";
 import { isVulnClassId, type VulnClassId } from "@/lib/vuln-class";
 
 type CveListItem = {
@@ -116,8 +115,8 @@ type SavedView = {
   id: string;
   name: string;
   state: {
-    view: "critical_v2" | "critical" | "latest" | "last24h" | "kev" | "exploit" | "all";
-    sort: "rank" | "fresh" | "risk" | "epss" | "cvss" | "exploit" | "priority";
+    view: VulnModuleView;
+    sort: VulnModuleSort;
     limit: 15 | 20;
     kevOnly: boolean;
     minCvss: number | null;
@@ -142,26 +141,6 @@ type ModuleKey =
   | "patches"
   | "systemHealth"
   | "settings";
-type VulnPreviewRef = { kind: "cve" | "bdu"; id: string };
-
-function vulnPreviewKey(ref: VulnPreviewRef): string {
-  return `${ref.kind}:${ref.id}`;
-}
-
-function vulnPreviewFromEntry(entry: { kind: "cve"; item: { cve_id: string } } | { kind: "bdu"; item: { bduId: string } }): VulnPreviewRef {
-  return entry.kind === "cve" ? { kind: "cve", id: entry.item.cve_id } : { kind: "bdu", id: entry.item.bduId };
-}
-
-function findVulnPreviewIndex(
-  entries: Array<{ kind: "cve"; item: { cve_id: string } } | { kind: "bdu"; item: { bduId: string } }>,
-  ref: VulnPreviewRef | null
-): number {
-  if (!ref) return -1;
-  return entries.findIndex((entry) => {
-    const id = entry.kind === "cve" ? entry.item.cve_id : entry.item.bduId;
-    return entry.kind === ref.kind && id === ref.id;
-  });
-}
 
 export function Dashboard() {
   const queryClient = useQueryClient();
@@ -174,13 +153,10 @@ export function Dashboard() {
   const [qDebounced, setQDebounced] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
   const [selectedBdu, setSelectedBdu] = useState<string | null>(null);
-  const [hoveredPreview, setHoveredPreview] = useState<VulnPreviewRef | null>(null);
   const [pinnedPreview, setPinnedPreview] = useState<VulnPreviewRef | null>(null);
-  const [kbdPreview, setKbdPreview] = useState<VulnPreviewRef | null>(null);
-  const hoverDebounceRef = useRef<number | null>(null);
-  const [view, setView] = useState<"critical_v2" | "critical" | "latest" | "last24h" | "kev" | "exploit" | "all">("critical_v2");
+  const [view, setView] = useState<VulnModuleView>("critical_v2");
   const [limit, setLimit] = useState<15 | 20>(20);
-  const [sort, setSort] = useState<"rank" | "fresh" | "risk" | "epss" | "cvss" | "exploit" | "priority">("rank");
+  const [sort, setSort] = useState<VulnModuleSort>("rank");
   const [attentionOnly, setAttentionOnly] = useState(false);
   const [kevOnly, setKevOnly] = useState(false);
   const [minCvss, setMinCvss] = useState<number | null>(null);
@@ -431,28 +407,7 @@ export function Dashboard() {
     setSelected(hit.cve_id);
   }, [qDebounced, listQuery.data]);
 
-  const activePreview = useMemo(
-    () => pinnedPreview ?? kbdPreview ?? hoveredPreview,
-    [pinnedPreview, kbdPreview, hoveredPreview]
-  );
-
-  const activePreviewVulnClass = useMemo(() => {
-    if (!activePreview || activePreview.kind !== "cve") return null;
-    const hit = vulnListEntries.find((e) => e.kind === "cve" && e.item.cve_id === activePreview.id);
-    return hit?.kind === "cve" ? (hit.item.vuln_class ?? null) : null;
-  }, [activePreview, vulnListEntries]);
-
-  const setHoveredDebounced = useCallback((next: VulnPreviewRef | null) => {
-    if (pinnedPreview) return;
-    if (hoverDebounceRef.current != null) {
-      window.clearTimeout(hoverDebounceRef.current);
-      hoverDebounceRef.current = null;
-    }
-    hoverDebounceRef.current = window.setTimeout(() => {
-      setHoveredPreview(next);
-      if (next) setKbdPreview(null);
-    }, 120);
-  }, [pinnedPreview]);
+  const activePreview = pinnedPreview;
 
   const scrollPreviewIntoView = useCallback((ref: VulnPreviewRef) => {
     requestAnimationFrame(() => {
@@ -473,25 +428,20 @@ export function Dashboard() {
   }, []);
 
   useEffect(() => {
-    return () => {
-      if (hoverDebounceRef.current != null) window.clearTimeout(hoverDebounceRef.current);
-    };
-  }, []);
-
-  useEffect(() => {
     if (moduleKey !== "vulns") {
       setPinnedPreview(null);
-      setKbdPreview(null);
-      setHoveredPreview(null);
     }
   }, [moduleKey]);
 
   useEffect(() => {
-    if (selected || selectedBdu) {
+    if (moduleKey !== "vulns" || selected || selectedBdu) return;
+    if (vulnListEntries.length === 0) {
       setPinnedPreview(null);
-      setKbdPreview(null);
+      return;
     }
-  }, [selected, selectedBdu]);
+    if (pinnedPreview && findVulnPreviewIndex(vulnListEntries, pinnedPreview) >= 0) return;
+    setPinnedPreview(vulnPreviewFromEntry(vulnListEntries[0]!));
+  }, [moduleKey, selected, selectedBdu, vulnListEntries, pinnedPreview]);
 
   const exportCsv = () => {
     const rows = (listQuery.data ?? []).map((it) => ({
@@ -585,8 +535,7 @@ export function Dashboard() {
             ? Math.min(vulnListEntries.length - 1, curIdx < 0 ? 0 : curIdx + 1)
             : Math.max(0, curIdx < 0 ? 0 : curIdx - 1);
         const next = vulnPreviewFromEntry(vulnListEntries[nextIdx]!);
-        setKbdPreview(next);
-        setHoveredPreview(null);
+        setPinnedPreview(next);
         scrollPreviewIntoView(next);
         return;
       }
@@ -594,18 +543,6 @@ export function Dashboard() {
       if (e.key === "Enter" && activePreview) {
         e.preventDefault();
         openPreviewFullCard(activePreview);
-        return;
-      }
-
-      if (e.key === "Escape") {
-        if (pinnedPreview) {
-          e.preventDefault();
-          setPinnedPreview(null);
-        } else if (kbdPreview || hoveredPreview) {
-          e.preventDefault();
-          setKbdPreview(null);
-          setHoveredPreview(null);
-        }
       }
     };
 
@@ -617,9 +554,6 @@ export function Dashboard() {
     selectedBdu,
     vulnListEntries,
     activePreview,
-    pinnedPreview,
-    kbdPreview,
-    hoveredPreview,
     scrollPreviewIntoView,
     openPreviewFullCard
   ]);
@@ -1057,7 +991,7 @@ export function Dashboard() {
   });
 
   return (
-    <div className="mx-auto max-w-[1400px]">
+    <div className={cn("mx-auto", moduleKey === "vulns" ? "max-w-[1600px]" : "max-w-[1400px]")}>
       <div className="mt-6 grid min-h-[calc(100vh-48px)] grid-cols-[56px_minmax(0,1fr)] gap-6">
         <aside className="glass sticky top-6 flex h-[calc(100vh-48px)] flex-col items-center gap-2 self-start rounded-2xl p-2">
           <button
@@ -1232,472 +1166,136 @@ export function Dashboard() {
               />
             </div>
           ) : moduleKey === "vulns" ? (
-            <div className="mt-0 grid grid-cols-12 items-start gap-6">
-              {selectedBdu ? (
-                <section className="col-span-12 space-y-4">
-                  <div className="glass rounded-2xl p-3 sm:p-4">
-                    <BduDetailPanel
-                      bduId={selectedBdu}
-                      data={selectedBduDetails}
-                      loading={bduDetailsQuery.isLoading}
-                      aiPending={bduAiSummaryPending}
-                      aiStalled={bduEnrichStalled}
-                      manualEnrichAllowed={manualEnrichAllowed}
-                      onRequestEnrich={(opts) => void requestBduEnrich(selectedBdu, Boolean(opts?.force))}
-                      onClose={() => setSelectedBdu(null)}
-                      onOpenCve={(cveId) => {
-                        setSelectedBdu(null);
-                        setSelected(cveId);
-                      }}
-                      onOpenTask={(taskId: string) => {
-                        setTasksSelectedId(taskId);
-                        setModuleKey("tasks");
-                      }}
-                    />
-                  </div>
-                  <AttackGraphPanel
-                    graph={bduGraph}
-                    attackFlow={bduAttackFlowSteps}
-                    entityId={selectedBdu}
-                  />
-                </section>
-              ) : null}
-              {selected ? (
-                <section className="col-span-12 space-y-4">
-                  <div className="glass rounded-2xl p-3 sm:p-4">
-                    <CveDetailPanel
-                      data={selectedDetails}
-                      loading={detailsQuery.isLoading}
-                      aiPending={aiSummaryPending}
-                      aiStalled={enrichStalled}
-                      manualEnrichAllowed={manualEnrichAllowed}
-                      onRequestEnrich={selected ? (opts) => void requestEnrich(selected, Boolean(opts?.force)) : undefined}
-                      onClose={() => setSelected(null)}
-                      onOpenTask={(taskId: string) => {
-                        setTasksSelectedId(taskId);
-                        setModuleKey("tasks");
-                      }}
-                    />
-                  </div>
-                  <AttackGraphPanel
-                    graph={cveGraph}
-                    attackFlow={cveAttackFlowSteps}
-                    entityId={selected}
-                  />
-                </section>
-              ) : null}
-
-              <section
-                className={cn(
-                  "col-span-12 lg:col-span-4",
-                  (selected || selectedBdu) && "hidden",
-                  "lg:sticky lg:top-4 lg:max-h-[calc(100vh-5.5rem)] lg:self-start"
-                )}
-              >
-                <div className="glass flex max-h-[calc(100vh-5.5rem)] flex-col overflow-hidden rounded-2xl p-4">
-                  <div className="mb-1 flex items-start justify-between gap-2">
-                    <div className="min-w-0 space-y-0.5">
-                      <div className="text-sm font-medium">Уязвимости</div>
-                      <div className="text-[11px] text-muted">
-                        Список, фильтры и карточки CVE. Основной сценарий — полнотекстовый поиск ниже.
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      title="Обновить список и подсказки"
-                      onClick={() => void refreshVulns()}
-                      disabled={vulnsRefreshing}
-                      className={cn(
-                        "inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-fg/90",
-                        "hover:bg-slate-100 dark:border-border dark:bg-black/20 dark:hover:bg-black/35",
-                        vulnsRefreshing && "cursor-wait opacity-80"
-                      )}
-                    >
-                      {vulnsRefreshing ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCw className="h-3.5 w-3.5" />
-                      )}
-                      Обновить
-                    </button>
-                  </div>
-                  <VulnSearchBar
-                    value={q}
-                    onChange={setQ}
-                    hints={
-                      vendorsQuery.data
-                        ? { vendors: vendorsQuery.data.vendors, products: vendorsQuery.data.products }
-                        : null
-                    }
-                    hintsLoading={vendorsQuery.isLoading}
-                    listLoading={listQuery.isFetching}
-                    onClearFilters={() => {
-                      setVendorFilter(null);
-                      setProductFilter(null);
-                      setVulnClasses([]);
+            selectedBdu ? (
+              <div className="space-y-4">
+                <div className="glass rounded-2xl p-3 sm:p-4">
+                  <BduDetailPanel
+                    bduId={selectedBdu}
+                    data={selectedBduDetails}
+                    loading={bduDetailsQuery.isLoading}
+                    aiPending={bduAiSummaryPending}
+                    aiStalled={bduEnrichStalled}
+                    manualEnrichAllowed={manualEnrichAllowed}
+                    onRequestEnrich={(opts) => void requestBduEnrich(selectedBdu, Boolean(opts?.force))}
+                    onClose={() => setSelectedBdu(null)}
+                    onOpenCve={(cveId) => {
+                      setSelectedBdu(null);
+                      setSelected(cveId);
+                    }}
+                    onOpenTask={(taskId: string) => {
+                      setTasksSelectedId(taskId);
+                      setModuleKey("tasks");
                     }}
                   />
-                  <div className="mb-3 flex flex-wrap items-center gap-2">
-                    <button
-                      onClick={() => {
-                        setBulkMode((b) => !b);
-                        setSelectedIds({});
-                      }}
-                      className={cn(
-                        "rounded-lg border px-2 py-1 text-xs hover:bg-slate-200/80 dark:hover:bg-black/30",
-                        bulkMode
-                          ? "border-accent/30 bg-accent/10 text-fg/90"
-                          : "border-slate-200 bg-slate-50 text-fg/90 dark:border-border dark:bg-black/20"
-                      )}
-                    >
-                      Массово
-                    </button>
-                    <button
-                      onClick={exportCsv}
-                      className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
-                    >
-                      Экспорт CSV
-                    </button>
-                    <button
-                      onClick={() => setAttentionOnly((v) => !v)}
-                      className={cn(
-                        "rounded-lg border px-2 py-1 text-xs hover:bg-slate-200/80 dark:hover:bg-black/30",
-                        attentionOnly
-                          ? "border-warn/30 bg-warn/15 text-warn"
-                          : "border-slate-200 bg-slate-50 text-fg/90 dark:border-border dark:bg-black/20"
-                      )}
-                      title="Показать только высокий/критический приоритет (фокус для triage)"
-                    >
-                      Внимание
-                    </button>
-                    <button
-                      onClick={() => setSavedViewsOpen(true)}
-                      className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs text-fg/90 hover:bg-slate-200/80 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
-                    >
-                      Виды
-                    </button>
-                  </div>
-
-                  <div className="mb-3 rounded-xl border border-slate-200/90 bg-slate-50/90 p-3 dark:border-white/[0.06] dark:bg-black/15">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="text-[11px] font-medium text-fg/85">Фильтры</div>
-                      <div className="flex items-center gap-2">
-                        <select
-                          value={sort}
-                          onChange={(e) =>
-                            setSort(
-                              e.target.value as "rank" | "fresh" | "risk" | "epss" | "cvss" | "exploit" | "priority"
-                            )
-                          }
-                          className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-fg/90 dark:border-border dark:bg-black/20"
-                          title="Сортировка"
-                        >
-                          <option value="rank">Ранг</option>
-                          <option value="priority">Приоритет</option>
-                          <option value="risk">Риск</option>
-                          <option value="epss">EPSS</option>
-                          <option value="cvss">CVSS</option>
-                          <option value="exploit">Exploit spike</option>
-                          <option value="fresh">Свежесть</option>
-                        </select>
-                        <button
-                          onClick={() => {
-                            setKevOnly((v) => !v);
-                            if (!kevOnly) setView("kev");
-                          }}
-                          className={cn(
-                            "rounded-full border px-2 py-0.5 text-[11px]",
-                            kevOnly
-                              ? "border-danger/30 bg-danger/15 text-danger"
-                              : "border-slate-200 bg-slate-50 text-muted dark:border-border dark:bg-black/20"
-                          )}
-                          title="Только KEV"
-                        >
-                          KEV
-                        </button>
-                        {exploitFilter ? (
-                          <button
-                            type="button"
-                            onClick={() => setExploitFilter(null)}
-                            className="rounded-full border border-accent/35 bg-accent/10 px-2 py-0.5 text-[11px] text-accent"
-                            title={EXPLOIT_RADAR_FILTER_LABELS[exploitFilter].hint}
-                          >
-                            {EXPLOIT_RADAR_FILTER_LABELS[exploitFilter].title} ×
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <Tabs.Root value={view} onValueChange={(v: string) => setView(v as typeof view)}>
-                      <Tabs.List className="mt-2 grid grid-cols-6 gap-2">
-                        {[
-                          ["critical_v2", "Критичные"],
-                          ["latest", "Свежие"],
-                          ["last24h", "24 ч"],
-                          ["kev", "KEV"],
-                          ["exploit", "Exploit"],
-                          ["all", "Все"]
-                        ].map(([k, label]) => (
-                          <Tabs.Trigger
-                            key={k}
-                            value={k as typeof view}
-                            className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-[11px] data-[state=active]:border-accent/40 data-[state=active]:bg-accent/10 dark:border-border dark:bg-black/20"
-                          >
-                            {label}
-                          </Tabs.Trigger>
-                        ))}
-                      </Tabs.List>
-                    </Tabs.Root>
-
-                    <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                      <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 dark:border-border dark:bg-black/20">
-                        <span className="text-muted">CVSS</span>
-                        <button
-                          onClick={() => setMinCvss(null)}
-                          className={cn(
-                            "rounded-full px-2 py-0.5",
-                            minCvss == null
-                              ? "bg-white text-fg/90 shadow-sm dark:bg-white/10"
-                              : "hover:bg-slate-200/80 dark:hover:bg-white/5"
-                          )}
-                        >
-                          выкл
-                        </button>
-                        <button
-                          onClick={() => setMinCvss(8)}
-                          className={cn(
-                            "rounded-full px-2 py-0.5",
-                            minCvss === 8 ? "bg-accent/15 text-fg/90" : "hover:bg-slate-200/80 dark:hover:bg-white/5"
-                          )}
-                        >
-                          ≥8
-                        </button>
-                        <button
-                          onClick={() => setMinCvss(9)}
-                          className={cn(
-                            "rounded-full px-2 py-0.5",
-                            minCvss === 9 ? "bg-accent/15 text-fg/90" : "hover:bg-slate-200/80 dark:hover:bg-white/5"
-                          )}
-                        >
-                          ≥9
-                        </button>
-                      </div>
-
-                      <div className="flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-1 dark:border-border dark:bg-black/20">
-                        <span className="text-muted">EPSS</span>
-                        <button
-                          onClick={() => setMinEpss(null)}
-                          className={cn(
-                            "rounded-full px-2 py-0.5",
-                            minEpss == null
-                              ? "bg-white text-fg/90 shadow-sm dark:bg-white/10"
-                              : "hover:bg-slate-200/80 dark:hover:bg-white/5"
-                          )}
-                        >
-                          выкл
-                        </button>
-                        <button
-                          onClick={() => setMinEpss(0.2)}
-                          className={cn(
-                            "rounded-full px-2 py-0.5",
-                            minEpss === 0.2 ? "bg-accent/15 text-fg/90" : "hover:bg-slate-200/80 dark:hover:bg-white/5"
-                          )}
-                        >
-                          ≥0.20
-                        </button>
-                        <button
-                          onClick={() => setMinEpss(0.5)}
-                          className={cn(
-                            "rounded-full px-2 py-0.5",
-                            minEpss === 0.5 ? "bg-accent/15 text-fg/90" : "hover:bg-slate-200/80 dark:hover:bg-white/5"
-                          )}
-                        >
-                          ≥0.50
-                        </button>
-                      </div>
-
-                      <VulnClassFilter value={vulnClasses} onChange={setVulnClasses} className="w-full" />
-
-                      {(vendorFilter || productFilter) && (
-                        <div className="flex flex-wrap items-center gap-2">
-                          {vendorFilter ? (
-                            <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-fg/85 shadow-sm dark:border-white/10 dark:bg-white/5">
-                              вендор <span className="font-medium text-fg/90">{vendorFilter}</span>
-                            </span>
-                          ) : null}
-                          {productFilter ? (
-                            <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-fg/85 shadow-sm dark:border-white/10 dark:bg-white/5">
-                              продукт <span className="font-medium text-fg/90">{productFilter}</span>
-                            </span>
-                          ) : null}
-                          <button
-                            className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-fg/80 hover:bg-slate-200/80 dark:border-white/10 dark:bg-black/20 dark:hover:bg-black/30"
-                            onClick={() => {
-                              setVendorFilter(null);
-                              setProductFilter(null);
-                            }}
-                          >
-                            Сбросить
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="mt-1 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-0.5">
-                    <div className="space-y-3 pb-1">
-                    {vulnListEntries.map((entry) => {
-                      const previewRef = vulnPreviewFromEntry(entry);
-                      const previewActive =
-                        activePreview != null &&
-                        activePreview.kind === previewRef.kind &&
-                        activePreview.id === previewRef.id;
-                      return entry.kind === "bdu" ? (
-                        <div key={`bdu-${entry.item.bduId}`} data-vuln-preview-key={vulnPreviewKey(previewRef)}>
-                          <BduCard
-                            item={entry.item}
-                            selected={selectedBdu === entry.item.bduId}
-                            previewActive={previewActive}
-                            onSelect={() => {
-                              setSelected(null);
-                              setSelectedBdu(entry.item.bduId);
-                            }}
-                            onHover={() => setHoveredDebounced(previewRef)}
-                            onUnhover={() => setHoveredDebounced(null)}
-                          />
-                        </div>
-                      ) : (
-                        <div key={entry.item.cve_id} data-vuln-preview-key={vulnPreviewKey(previewRef)}>
-                          <CveCard
-                            item={entry.item}
-                            selected={selected === entry.item.cve_id}
-                            previewActive={previewActive}
-                            onSelect={() => {
-                              setSelectedBdu(null);
-                              setSelected(entry.item.cve_id);
-                            }}
-                            onHover={() => setHoveredDebounced(previewRef)}
-                            onUnhover={() => setHoveredDebounced(null)}
-                            showCheckbox={bulkMode}
-                            checked={Boolean(selectedIds[entry.item.cve_id])}
-                            onToggleChecked={(next) =>
-                              setSelectedIds((m) => {
-                                const n = { ...m };
-                                if (next) n[entry.item.cve_id] = true;
-                                else delete n[entry.item.cve_id];
-                                return n;
-                              })
-                            }
-                          />
-                        </div>
-                      );
-                    })}
-                    {vulnListEntries.length === 0 ? (
-                      <div className="text-sm text-muted">
-                        {qDebounced.trim() ? "Ничего не найдено." : "Для этого вида пока нет записей."}
-                      </div>
-                    ) : null}
-                    </div>
-                  </div>
                 </div>
-              </section>
-
-              <section
-                className={cn(
-                  "col-span-12 lg:col-span-8",
-                  (selected || selectedBdu) && "hidden",
-                  "lg:sticky lg:top-4 lg:max-h-[calc(100vh-5.5rem)] lg:self-start"
-                )}
-              >
-                <div className="glass flex max-h-[calc(100vh-5.5rem)] flex-col overflow-hidden rounded-2xl p-5 sm:p-6">
-                  <div className="shrink-0 flex flex-wrap items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium">Превью</div>
-                      <div className="mt-2 text-sm text-muted">
-                        Наведи курсор или жми ↑↓ — описание и рекомендации справа. Enter — открыть карточку, Esc — сброс.
-                      </div>
-                    </div>
-                    <div className="flex shrink-0 flex-wrap items-center gap-2">
-                      {activePreview ? (
-                        <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-[11px] text-fg/80 dark:border-border dark:bg-black/20">
-                          <span>
-                            {activePreview.kind === "cve" ? "CVE" : "BDU"}:{" "}
-                            <span className="font-mono">{activePreview.id}</span>
-                          </span>
-                          {activePreview.kind === "cve" ? (
-                            <VulnClassBadge vulnClass={activePreviewVulnClass} />
-                          ) : null}
-                        </div>
-                      ) : null}
-                      {activePreview ? (
-                        <button
-                          type="button"
-                          onClick={() => openPreviewFullCard(activePreview)}
-                          className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-fg/90 hover:bg-slate-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/30"
-                        >
-                          Открыть
-                        </button>
-                      ) : null}
-                      <button
-                        type="button"
-                        disabled={!activePreview}
-                        onClick={() => {
-                          if (pinnedPreview) {
-                            setPinnedPreview(null);
-                          } else if (activePreview) {
-                            setPinnedPreview(activePreview);
-                            setKbdPreview(null);
-                            setHoveredPreview(null);
-                          }
-                        }}
-                        className={cn(
-                          "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] transition",
-                          pinnedPreview
-                            ? "border-accent/40 bg-accent/10 text-fg/90"
-                            : "border-slate-200 bg-white text-fg/90 hover:bg-slate-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/30",
-                          !activePreview && "cursor-not-allowed opacity-50"
-                        )}
-                        title={pinnedPreview ? "Открепить превью (Esc)" : "Закрепить текущее превью"}
-                      >
-                        {pinnedPreview ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
-                        {pinnedPreview ? "Открепить" : "Закрепить"}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 min-h-0 flex-1 overflow-y-auto overscroll-contain pr-0.5">
-                    {activePreview?.kind === "cve" ? (
-                      <AiSummaryPanel
-                        data={previewCveQuery.data ?? null}
-                        loading={previewCveQuery.isLoading}
-                        aiPending={false}
-                        aiStalled={previewCveQuery.isError}
-                        manualEnrichAllowed={false}
-                      />
-                    ) : activePreview?.kind === "bdu" ? (
-                      <AiSummaryPanel
-                        data={previewBduQuery.data ?? null}
-                        loading={previewBduQuery.isLoading}
-                        aiPending={false}
-                        aiStalled={previewBduQuery.isError}
-                        manualEnrichAllowed={false}
-                      />
-                    ) : (
-                      <div className="grid grid-cols-2 gap-3 text-[11px]">
-                        <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
-                          <div className="text-muted">Фокус без кликов</div>
-                          <div className="mt-1 text-fg/85">Просматривай много уязвимостей подряд — карточки не прыгают.</div>
-                        </div>
-                        <div className="rounded-xl border border-slate-200/90 bg-slate-50 p-3 dark:border-white/[0.06] dark:bg-black/20">
-                          <div className="text-muted">Клавиатура</div>
-                          <div className="mt-1 text-fg/85">↑↓ — листать список, Enter — открыть, Esc — сброс превью.</div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                <AttackGraphPanel
+                  graph={bduGraph}
+                  attackFlow={bduAttackFlowSteps}
+                  entityId={selectedBdu}
+                />
+              </div>
+            ) : selected ? (
+              <div className="space-y-4">
+                <div className="glass rounded-2xl p-3 sm:p-4">
+                  <CveDetailPanel
+                    data={selectedDetails}
+                    loading={detailsQuery.isLoading}
+                    aiPending={aiSummaryPending}
+                    aiStalled={enrichStalled}
+                    manualEnrichAllowed={manualEnrichAllowed}
+                    onRequestEnrich={(opts) => void requestEnrich(selected, Boolean(opts?.force))}
+                    onClose={() => setSelected(null)}
+                    onOpenTask={(taskId: string) => {
+                      setTasksSelectedId(taskId);
+                      setModuleKey("tasks");
+                    }}
+                  />
                 </div>
-              </section>
-            </div>
+                <AttackGraphPanel
+                  graph={cveGraph}
+                  attackFlow={cveAttackFlowSteps}
+                  entityId={selected}
+                />
+              </div>
+            ) : (
+              <VulnsModulePanel
+                view={view}
+                onViewChange={setView}
+                q={q}
+                onQChange={setQ}
+                sort={sort}
+                onSortChange={setSort}
+                kevOnly={kevOnly}
+                onKevOnlyChange={setKevOnly}
+                attentionOnly={attentionOnly}
+                onAttentionOnlyChange={setAttentionOnly}
+                minCvss={minCvss}
+                onMinCvssChange={setMinCvss}
+                minEpss={minEpss}
+                onMinEpssChange={setMinEpss}
+                vulnClasses={vulnClasses}
+                onVulnClassesChange={setVulnClasses}
+                vendorFilter={vendorFilter}
+                productFilter={productFilter}
+                onClearVendorProduct={() => {
+                  setVendorFilter(null);
+                  setProductFilter(null);
+                }}
+                exploitFilter={exploitFilter}
+                onClearExploitFilter={() => setExploitFilter(null)}
+                hints={
+                  vendorsQuery.data
+                    ? { vendors: vendorsQuery.data.vendors, products: vendorsQuery.data.products }
+                    : null
+                }
+                hintsLoading={vendorsQuery.isLoading}
+                listLoading={listQuery.isFetching}
+                refreshing={vulnsRefreshing}
+                onRefresh={() => void refreshVulns()}
+                bulkMode={bulkMode}
+                onToggleBulk={() => {
+                  setBulkMode((b) => !b);
+                  setSelectedIds({});
+                }}
+                onExportCsv={exportCsv}
+                onOpenSavedViews={() => setSavedViewsOpen(true)}
+                entries={vulnListEntries}
+                qDebounced={qDebounced}
+                activePreview={activePreview}
+                onSelectPreview={setPinnedPreview}
+                onOpenFullCard={openPreviewFullCard}
+                selectedIds={selectedIds}
+                onToggleChecked={(cveId, next) =>
+                  setSelectedIds((m) => {
+                    const n = { ...m };
+                    if (next) n[cveId] = true;
+                    else delete n[cveId];
+                    return n;
+                  })
+                }
+                previewData={
+                  activePreview?.kind === "cve"
+                    ? (previewCveQuery.data ?? null)
+                    : activePreview?.kind === "bdu"
+                      ? (previewBduQuery.data ?? null)
+                      : null
+                }
+                previewLoading={
+                  activePreview?.kind === "cve"
+                    ? previewCveQuery.isLoading
+                    : activePreview?.kind === "bdu"
+                      ? previewBduQuery.isLoading
+                      : false
+                }
+                previewError={
+                  activePreview?.kind === "cve"
+                    ? previewCveQuery.isError
+                    : activePreview?.kind === "bdu"
+                      ? previewBduQuery.isError
+                      : false
+                }
+              />
+            )
           ) : moduleKey === "threat" ? (
             <div className="glass rounded-2xl p-5 sm:p-6">
               <ThreatFeedPanel onOpenCve={openDashboardModal} onFilter={openExploitFilter} />

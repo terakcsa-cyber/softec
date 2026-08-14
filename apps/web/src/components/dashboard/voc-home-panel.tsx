@@ -8,16 +8,17 @@ import { useLiveQueryOptions } from "@/lib/live-refresh";
 import {
   Activity,
   AlertCircle,
-  ChevronRight,
-  Inbox,
-  Loader2,
-  Radio,
-  RefreshCw,
-  ShieldAlert,
-  X,
   Bookmark,
   Briefcase,
-  Clock
+  ChevronRight,
+  Clock,
+  Inbox,
+  Keyboard,
+  Loader2,
+  RefreshCw,
+  ShieldAlert,
+  UserRound,
+  X
 } from "lucide-react";
 import { cn } from "../ui/cn";
 import { apiFetch } from "@/lib/api-fetch";
@@ -36,31 +37,54 @@ import {
   type TgFeedResponse
 } from "@/lib/tg-feed-critical";
 import { scoreTgForVoc } from "@/lib/voc-scoring-client";
-import { vocPriorityLabel, vocStatusLabel } from "@/lib/voc-labels";
+import { vocPriorityLabel, vocPriorityMeta, vocStatusLabel } from "@/lib/voc-labels";
+import { vocChipClass, vocIntelContext } from "@/lib/voc-queue-context";
 import { fetchVocWatchlist } from "@/lib/voc-watchlist-api";
 import { applyWatchlistBoostClient, hasWatchlistHit } from "@/lib/voc-watchlist-client";
 import { VocQueueRow } from "./voc-queue-row";
 import { VocWatchlistPanel } from "./voc-watchlist-panel";
 import { VocWatchlistQuickAdd } from "./voc-watchlist-quick-add";
-import { VocCasesPanel } from "./voc-cases-panel";
+import { VocCasesPanel, type VocCaseFilter } from "./voc-cases-panel";
 import { VocShiftPanel } from "./voc-shift-panel";
-import { VocVerificationPanel } from "./voc-verification-panel";
 import {
   buildCaseRefMap,
   createVocCaseFromRef,
-  fetchVocCases
+  fetchVocCases,
+  type VocCaseRow
 } from "@/lib/voc-case-api";
-import { isSlaBreached, slaRemainingLabel, slaTone } from "@/lib/voc-case-client";
+import { caseIssueKey, isSlaBreached, slaRemainingLabel, slaTone } from "@/lib/voc-case-client";
 
 type SourceTab = "all" | VocSource | "watchlist";
 type StatusTab = "active" | "open" | "claimed" | "done" | "all";
 type SectionTab = "queue" | "cases" | "watchlist" | "shift";
+type WorkLens = "now" | "mine" | "all";
 
 function fmtWhen(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function isMineItem(item: VocQueueItem, email?: string | null) {
+  if (!email) return false;
+  const e = email.toLowerCase();
+  return item.claimedByEmail?.toLowerCase() === e || item.assigneeEmail?.toLowerCase() === e;
+}
+
+function isNowItem(item: VocQueueItem) {
+  if (item.status === "done" || item.status === "dismissed") return false;
+  return item.vocPriority === "p1" || Boolean(item.slaBreached) || hasWatchlistHit(item);
+}
+
+function urgencyScore(item: VocQueueItem) {
+  let n = item.vocScore;
+  if (item.slaBreached) n += 1000;
+  if (item.vocPriority === "p1") n += 400;
+  if (item.vocPriority === "p2") n += 120;
+  if (hasWatchlistHit(item)) n += 180;
+  if (item.status === "open") n += 20;
+  return n;
 }
 
 export function VocHomePanel({
@@ -80,10 +104,13 @@ export function VocHomePanel({
   const [section, setSection] = useState<SectionTab>("queue");
   const [sourceTab, setSourceTab] = useState<SourceTab>("all");
   const [statusTab, setStatusTab] = useState<StatusTab>("active");
+  const [workLens, setWorkLens] = useState<WorkLens>(isPage ? "now" : "all");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [kbdIndex, setKbdIndex] = useState(0);
   const [caseError, setCaseError] = useState<string | null>(null);
   const [casePending, setCasePending] = useState(false);
+  const [openCaseId, setOpenCaseId] = useState<string | null>(null);
+  const [caseFilter, setCaseFilter] = useState<VocCaseFilter>("all");
 
   const liveOpts = useLiveQueryOptions();
   const tgLiveOpts = useLiveQueryOptions(60_000);
@@ -206,7 +233,7 @@ export function VocHomePanel({
     });
   }, [tgRecentItems, queueQuery.data?.items, tgTriageMap, watchlistQuery.data]);
 
-  const items = useMemo(() => {
+  const queueItems = useMemo(() => {
     const base = queueQuery.data?.items ?? [];
     let merged =
       sourceTab === "watchlist"
@@ -217,7 +244,8 @@ export function VocHomePanel({
             ? [...base, ...tgItems]
             : base;
     merged = [...merged].sort((a, b) => {
-      if (b.vocScore !== a.vocScore) return b.vocScore - a.vocScore;
+      const urg = urgencyScore(b) - urgencyScore(a);
+      if (urg !== 0) return urg;
       return String(b.publishedAt ?? "").localeCompare(String(a.publishedAt ?? ""));
     });
     if (statusTab === "active") {
@@ -251,20 +279,25 @@ export function VocHomePanel({
     });
   }, [queueQuery.data?.items, tgItems, sourceTab, statusTab, mergeItems, caseRefMap]);
 
+  const items = useMemo(() => {
+    if (workLens === "mine") return queueItems.filter((i) => isMineItem(i, userEmail));
+    if (workLens === "now") return queueItems.filter(isNowItem);
+    return queueItems;
+  }, [queueItems, workLens, userEmail]);
+
   const stats = useMemo(() => {
-    const s = queueQuery.data?.stats ?? {};
+    const slaCases = (casesQuery.data ?? []).filter((c) => isSlaBreached(c.slaDueAt)).length;
     return {
-      total: items.length,
-      open: items.filter((i) => i.status === "open").length,
-      claimed: items.filter((i) => i.status === "claimed").length,
-      p1: items.filter((i) => i.vocPriority === "p1").length,
+      now: queueItems.filter(isNowItem).length,
+      mine: queueItems.filter((i) => isMineItem(i, userEmail)).length,
+      p1: queueItems.filter((i) => i.vocPriority === "p1" && i.status !== "done" && i.status !== "dismissed").length,
+      sla: slaCases || queueItems.filter((i) => i.slaBreached).length,
+      cases: casesQuery.data?.length ?? 0,
+      watchlist: queueItems.filter((i) => hasWatchlistHit(i) && i.status !== "done").length,
       tg: tgRecentItems.length,
-      watchlist: items.filter((i) => hasWatchlistHit(i)).length,
-      cases: casesQuery.data?.length ?? items.filter((i) => i.caseId).length,
-      apiTotal: s.total ?? 0,
       watchlistRules: (watchlistQuery.data ?? []).filter((r) => r.active).length
     };
-  }, [items, queueQuery.data?.stats, tgRecentItems.length, watchlistQuery.data, casesQuery.data?.length]);
+  }, [queueItems, tgRecentItems.length, watchlistQuery.data, casesQuery.data, userEmail]);
 
   async function handleCreateCase(item: VocQueueItem) {
     setCaseError(null);
@@ -308,6 +341,16 @@ export function VocHomePanel({
       if (item.status === "open") {
         await setStatus(item, "claimed");
       }
+      const createdCase = created.case as VocCaseRow | undefined;
+      if (createdCase?.id) {
+        queryClient.setQueryData<VocCaseRow[]>(["voc", "cases", "active"], (old) => {
+          const list = old ?? [];
+          if (list.some((c) => c.id === createdCase.id)) return list;
+          return [createdCase, ...list];
+        });
+        setOpenCaseId(createdCase.id);
+        if (isPage) setSection("cases");
+      }
       void casesQuery.refetch();
       void queueQuery.refetch();
       void queryClient.invalidateQueries({ queryKey: ["vuln-tasks"] });
@@ -337,14 +380,41 @@ export function VocHomePanel({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (openCaseId) {
+        if (e.key === "Escape") setOpenCaseId(null);
+        return;
+      }
+      if (e.key === "1") {
+        setWorkLens("now");
+        if (isPage) setSection("queue");
+      }
+      if (e.key === "2") {
+        setWorkLens("mine");
+        if (isPage) setSection("queue");
+      }
+      if (e.key === "3") setWorkLens("all");
+      if (isPage && section !== "queue") return;
       if (!items.length) return;
-      if (e.key === "ArrowDown") {
+      if (e.key === "ArrowDown" || e.key === "j" || e.key === "J") {
         e.preventDefault();
         setKbdIndex((i) => Math.min(items.length - 1, i + 1));
       }
-      if (e.key === "ArrowUp") {
+      if (e.key === "ArrowUp" || e.key === "k" || e.key === "K") {
         e.preventDefault();
         setKbdIndex((i) => Math.max(0, i - 1));
+      }
+      if ((e.key === "c" || e.key === "C") && selected?.status === "open") {
+        e.preventDefault();
+        setStatus(selected, "claimed");
+      }
+      if ((e.key === "e" || e.key === "E") && selected) {
+        e.preventDefault();
+        if (selected.caseId) {
+          setOpenCaseId(selected.caseId);
+          if (isPage) setSection("cases");
+        } else {
+          void handleCreateCase(selected);
+        }
       }
       if (e.key === "Enter" && selected) {
         if (selected.source === "cve") onOpenCve?.(selected.refId);
@@ -357,7 +427,7 @@ export function VocHomePanel({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [items.length, selected, onOpenCve, onOpenBdu, onOpenTgLink]);
+  }, [items.length, selected, onOpenCve, onOpenBdu, onOpenTgLink, openCaseId, section, isPage, setStatus]);
 
   const loading =
     queueQuery.isLoading ||
@@ -369,100 +439,136 @@ export function VocHomePanel({
       : tgFeedQuery.error
         ? "Не удалось загрузить TG-ленту"
         : null;
-  const tgStatLoading = tgFeedQuery.isLoading && !tgFeedQuery.data;
-  const statCards = [
-    { label: "В ленте", value: stats.total, icon: Activity },
-    { label: "P1", value: stats.p1, icon: ShieldAlert },
-    { label: "В очереди", value: stats.open, icon: CircleIcon },
-    { label: "В работе", value: stats.claimed, icon: UserIcon },
-    { label: "Кейсы", value: stats.cases, icon: Briefcase },
-    { label: "Watchlist", value: stats.watchlist, icon: Bookmark },
-    {
-      label: "TG 24ч",
-      value: stats.tg,
-      icon: Radio,
-      loading: tgStatLoading,
-      error: tgFeedErrorMessage
-    }
-  ];
+
+  const goQueue = (lens: WorkLens) => {
+    setWorkLens(lens);
+    if (isPage) setSection("queue");
+  };
+
+  const openCaseFromQueue = (caseId: string) => {
+    setOpenCaseId(caseId);
+    if (isPage) setSection("cases");
+  };
 
   return (
-    <section
-      className={cn(
-        isPage
-          ? "space-y-5"
-          : "rounded-2xl border border-indigo-200/70 bg-gradient-to-br from-indigo-50/60 via-white to-slate-50/80 p-5 ring-1 ring-indigo-200/40 dark:border-indigo-900/40 dark:from-indigo-950/30 dark:via-black/20 dark:to-black/30 dark:ring-indigo-800/30"
-      )}
-    >
+    <section className={cn(isPage ? "space-y-5" : "rounded-2xl border border-border bg-white p-5 dark:bg-black/20")}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <div className="flex items-center gap-2 text-base font-semibold tracking-tight text-fg/95">
-            <Inbox className="h-4 w-4 text-indigo-500" />
-            VOC — очередь смены
+            <Inbox className="h-4 w-4 text-accent" />
+            Vulnerability Operations
           </div>
           <p className="mt-1 max-w-3xl text-[12px] leading-relaxed text-muted">
-            {isPage
-              ? "Операционная лента смены: NVD, БДУ и Telegram. Ранжирование — платформа, верификация — вы. ↑↓ навигация, Enter — открыть."
-              : "Единая операционная лента: NVD, БДУ ФСТЭК и Telegram. Платформа ранжирует сигналы — вы верифицируете на инфре. ↑↓ навигация, Enter — открыть карточку."}
+            Смена работает с тем, что горит: P1, SLA и watchlist. Сигнал → кейс → playbook → исход.
+            Клавиши: J/K очередь, C взять, E кейс, Enter карточка, 1/2/3 линзы.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            void queueQuery.refetch();
-            void tgFeedQuery.refetch();
-            void tgTriageQuery.refetch();
-            void watchlistQuery.refetch();
-            void casesQuery.refetch();
-          }}
-          disabled={refreshing}
-          className={cn(
-            "inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px]",
-            "hover:bg-slate-50 dark:border-white/10 dark:bg-black/30 dark:hover:bg-black/45",
-            refreshing && "opacity-80"
-          )}
-        >
-          {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-          Обновить
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="hidden items-center gap-1 text-[10px] text-muted lg:inline-flex">
+            <Keyboard className="h-3.5 w-3.5" />
+            J K C E
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              void queueQuery.refetch();
+              void tgFeedQuery.refetch();
+              void tgTriageQuery.refetch();
+              void watchlistQuery.refetch();
+              void casesQuery.refetch();
+            }}
+            disabled={refreshing}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-xl border border-border bg-white px-3 py-2 text-[11px]",
+              "hover:bg-slate-50 dark:bg-black/30 dark:hover:bg-black/45",
+              refreshing && "opacity-80"
+            )}
+          >
+            {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            Обновить
+          </button>
+        </div>
       </div>
 
-      {(!isPage || section === "queue") ? (
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-7">
-        {statCards.map((c, i) => (
-          <motion.div
-            key={c.label}
-            initial={{ opacity: 0, y: 6 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.03 * i }}
-            className="rounded-xl border border-slate-200/90 bg-white/80 px-3 py-2 dark:border-white/10 dark:bg-black/25"
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {(
+          [
+            {
+              id: "now" as const,
+              label: "Сейчас",
+              hint: "P1 · SLA · watchlist",
+              value: stats.now,
+              icon: ShieldAlert,
+              danger: stats.sla > 0 || stats.p1 > 0,
+              onClick: () => goQueue("now")
+            },
+            {
+              id: "mine" as const,
+              label: "Мои",
+              hint: "взятые вами",
+              value: stats.mine,
+              icon: UserRound,
+              danger: false,
+              onClick: () => goQueue("mine")
+            },
+            {
+              id: "sla" as const,
+              label: "SLA",
+              hint: "просроченные кейсы",
+              value: stats.sla,
+              icon: Clock,
+              danger: stats.sla > 0,
+              onClick: () => {
+                setCaseFilter("sla");
+                if (isPage) setSection("cases");
+              }
+            },
+            {
+              id: "cases" as const,
+              label: "Кейсы",
+              hint: "открытые",
+              value: stats.cases,
+              icon: Briefcase,
+              danger: false,
+              onClick: () => {
+                setCaseFilter("all");
+                if (isPage) setSection("cases");
+              }
+            }
+          ] as const
+        ).map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            onClick={c.onClick}
+            className={cn(
+              "rounded-xl border px-3 py-2.5 text-left transition",
+              workLens === c.id && section === "queue"
+                ? "border-accent/45 bg-accent/10"
+                : "border-border bg-white hover:bg-slate-50/80 dark:bg-black/25 dark:hover:bg-white/[0.03]",
+              c.danger && "border-danger/35"
+            )}
           >
             <div className="flex items-center gap-1.5 text-[10px] text-muted">
               <c.icon className="h-3 w-3" />
               {c.label}
             </div>
-            <div className="mt-0.5 text-xl font-semibold">
-              {c.error ? (
-                <span className="text-sm font-semibold text-danger">Ошибка</span>
-              ) : c.loading ? (
-                <span className="inline-block animate-pulse tabular-nums text-muted">…</span>
-              ) : (
-                <LiveNumber value={c.value} />
-              )}
+            <div className={cn("mt-0.5 text-xl font-semibold tabular-nums", c.danger && "text-danger")}>
+              <LiveNumber value={c.value} />
             </div>
-          </motion.div>
+            <div className="text-[10px] text-muted">{c.hint}</div>
+          </button>
         ))}
       </div>
-      ) : null}
 
       {isPage ? (
-        <div className="flex flex-wrap gap-2 border-b border-slate-200/80 pb-3 dark:border-white/10">
+        <div className="flex flex-wrap gap-2 border-b border-border pb-3">
           {(
             [
               ["queue", "Очередь", Activity],
               ["cases", "Кейсы", Briefcase],
               ["watchlist", "Watchlist", Bookmark],
-              ["shift", "Смена / KPI", Clock]
+              ["shift", "Смена", Clock]
             ] as const
           ).map(([key, label, Icon]) => (
             <button
@@ -472,8 +578,8 @@ export function VocHomePanel({
               className={cn(
                 "inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-[12px] font-medium transition",
                 section === key
-                  ? "border-indigo-400/45 bg-indigo-500/15 text-fg/95"
-                  : "border-slate-200 bg-white text-muted hover:text-fg/85 dark:border-white/10 dark:bg-black/25"
+                  ? "border-accent/45 bg-accent/12 text-fg/95"
+                  : "border-border bg-white text-muted hover:text-fg/85 dark:bg-black/25"
               )}
             >
               <Icon className="h-3.5 w-3.5" />
@@ -488,6 +594,10 @@ export function VocHomePanel({
           <VocCasesPanel
             className="mt-4"
             currentUserEmail={userEmail}
+            openCaseId={openCaseId}
+            onOpenCaseIdChange={setOpenCaseId}
+            onOpenCve={onOpenCve}
+            onOpenBdu={onOpenBdu}
             onSelectRefKey={(refKey) => {
               const idx = items.findIndex((i) => i.refKey === refKey);
               if (idx >= 0) {
@@ -505,9 +615,15 @@ export function VocHomePanel({
         <VocCasesPanel
           className="mt-1"
           currentUserEmail={userEmail}
+          openCaseId={openCaseId}
+          onOpenCaseIdChange={setOpenCaseId}
+          initialFilter={caseFilter}
+          onOpenCve={onOpenCve}
+          onOpenBdu={onOpenBdu}
           onSelectRefKey={(refKey) => {
             setSection("queue");
-            const idx = items.findIndex((i) => i.refKey === refKey);
+            setWorkLens("all");
+            const idx = queueItems.findIndex((i) => i.refKey === refKey);
             if (idx >= 0) {
               setKbdIndex(idx);
               setSelectedKey(refKey);
@@ -548,7 +664,29 @@ export function VocHomePanel({
       <div className="mt-4 flex flex-wrap gap-2">
         {(
           [
-            ["all", "Все"],
+            ["now", "Сейчас"],
+            ["mine", "Мои"],
+            ["all", "Вся очередь"]
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setWorkLens(key)}
+            className={cn(
+              "rounded-full border px-3 py-1 text-[11px] font-semibold transition",
+              workLens === key
+                ? "border-accent/40 bg-accent/12 text-fg/95"
+                : "border-border bg-white text-muted hover:text-fg/80 dark:bg-black/30"
+            )}
+          >
+            {label}
+          </button>
+        ))}
+        <span className="mx-1 hidden h-6 w-px bg-border sm:inline" />
+        {(
+          [
+            ["all", "Все источники"],
             ["watchlist", "Watchlist"],
             ["cve", "CVE"],
             ["bdu", "БДУ"],
@@ -562,14 +700,14 @@ export function VocHomePanel({
             className={cn(
               "rounded-full border px-3 py-1 text-[11px] font-medium transition",
               sourceTab === key
-                ? "border-indigo-400/40 bg-indigo-500/15 text-fg/95"
-                : "border-slate-200 bg-white text-muted hover:text-fg/80 dark:border-white/10 dark:bg-black/30"
+                ? "border-border bg-slate-100 text-fg/95 dark:bg-white/10"
+                : "border-border bg-white text-muted hover:text-fg/80 dark:bg-black/30"
             )}
           >
             {label}
           </button>
         ))}
-        <span className="mx-1 hidden h-6 w-px bg-slate-200 sm:inline dark:bg-white/10" />
+        <span className="mx-1 hidden h-6 w-px bg-border sm:inline" />
         {(
           [
             ["active", "Активные"],
@@ -587,7 +725,7 @@ export function VocHomePanel({
               "rounded-full border px-3 py-1 text-[11px] transition",
               statusTab === key
                 ? "border-accent/35 bg-accent/10 text-fg/90"
-                : "border-slate-200 bg-white text-muted dark:border-white/10 dark:bg-black/30"
+                : "border-border bg-white text-muted dark:bg-black/30"
             )}
           >
             {label}
@@ -609,10 +747,25 @@ export function VocHomePanel({
               ))}
             </div>
           ) : items.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-slate-300 px-4 py-10 text-center text-sm text-muted dark:border-white/10">
-              {sourceTab === "watchlist" && stats.watchlistRules === 0
-                ? "Добавьте правила в watchlist смены выше — здесь появятся совпадения за 7 дней."
-                : "Нет событий по выбранным фильтрам. Попробуйте «Все» или другой источник."}
+            <div className="rounded-2xl border border-dashed border-border px-4 py-10 text-center text-sm text-muted">
+              {workLens === "now" ? (
+                <div className="space-y-3">
+                  <div>Сейчас чисто: нет P1, просроченного SLA и попаданий в watchlist.</div>
+                  <button
+                    type="button"
+                    onClick={() => setWorkLens("all")}
+                    className="rounded-lg border border-border px-3 py-1.5 text-[12px] font-medium text-fg/85 hover:bg-slate-50 dark:hover:bg-white/5"
+                  >
+                    Показать всю очередь
+                  </button>
+                </div>
+              ) : workLens === "mine" ? (
+                "Нет сигналов, взятых вами. Возьмите из «Сейчас» или очереди."
+              ) : sourceTab === "watchlist" && stats.watchlistRules === 0 ? (
+                "Добавьте правила во Watchlist — здесь появятся совпадения за 7 дней."
+              ) : (
+                "Нет событий по выбранным фильтрам."
+              )}
             </div>
           ) : (
             <AnimatePresence initial={false} mode="popLayout">
@@ -646,101 +799,23 @@ export function VocHomePanel({
           )}
         </div>
 
-        <div className="rounded-2xl border border-slate-200/90 bg-white/90 p-4 dark:border-white/10 dark:bg-black/30">
+        <div className="rounded-xl border border-border bg-white p-4 dark:bg-[#0d1524]">
           {selected ? (
-            <div className="space-y-3">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="text-[11px] font-medium uppercase tracking-wider text-muted">Превью</div>
-                  <div className="mt-1 font-mono text-lg font-semibold tracking-tight">{selected.title}</div>
-                  <div className="mt-1 text-[11px] text-muted">{fmtWhen(selected.publishedAt)}</div>
+            <div className="space-y-4">
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">Сигнал смены</div>
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <span className={cn("rounded-md border px-1.5 py-0.5 text-[11px] font-semibold", vocPriorityMeta(selected.vocPriority).badge)}>
+                    {vocPriorityLabel(selected.vocPriority)}
+                  </span>
+                  <span className="font-mono text-[12px] font-semibold tabular-nums text-fg/70">{selected.vocScore}</span>
+                  <span className="text-[11px] text-muted">{vocStatusLabel(selected.status)}</span>
                 </div>
-                <span className="rounded-lg border border-indigo-400/30 bg-indigo-500/10 px-2 py-1 font-mono text-xs font-bold">
-                  {vocPriorityLabel(selected.vocPriority)} · {selected.vocScore}
-                </span>
+                <h2 className="mt-2 text-[16px] font-semibold leading-snug tracking-tight">{selected.title}</h2>
+                <div className="mt-1 text-[11px] text-muted">{fmtWhen(selected.publishedAt)}</div>
               </div>
-              <p className="text-[12px] leading-relaxed text-fg/85">{selected.subtitle || "—"}</p>
-              <div className="flex flex-wrap gap-1.5">
-                {selected.vocReasons.map((r) => (
-                  <span
-                    key={r}
-                    className="rounded-full border border-accent/25 bg-accent/10 px-2 py-0.5 text-[10px] text-fg/85"
-                  >
-                    {r}
-                  </span>
-                ))}
-              </div>
-              <div className="flex flex-wrap items-center gap-2 pt-1">
-                <span className="rounded-full border border-slate-200 px-2 py-0.5 text-[10px] dark:border-white/10">
-                  {vocStatusLabel(selected.status)}
-                </span>
-                {selected.claimedByEmail ? (
-                  <span className="text-[10px] text-muted">· triage: {selected.claimedByEmail}</span>
-                ) : null}
-                {selected.caseId ? (
-                  <span
-                    className={cn(
-                      "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px]",
-                      slaTone(selected.slaDueAt, selected.slaBreached)
-                    )}
-                  >
-                    <Clock className="h-3 w-3" />
-                    SLA {slaRemainingLabel(selected.slaDueAt)}
-                    {(selected.linkedRefsCount ?? 0) > 1 ? ` · ${selected.linkedRefsCount} сигн.` : ""}
-                  </span>
-                ) : null}
-                {selected.assigneeEmail ? (
-                  <span className="text-[10px] text-muted">· {selected.assigneeEmail}</span>
-                ) : null}
-                {typeof selected.payload.vp_vendor === "string" && selected.payload.vp_vendor ? (
-                  <VocWatchlistQuickAdd kind="vendor" value={selected.payload.vp_vendor} compact />
-                ) : null}
-                {typeof selected.payload.vp_product === "string" && selected.payload.vp_product ? (
-                  <VocWatchlistQuickAdd
-                    kind="product"
-                    value={String(selected.payload.vp_product)}
-                    compact
-                  />
-                ) : null}
-              </div>
-              <div className="flex flex-wrap gap-2 border-t border-slate-200/80 pt-3 dark:border-white/10">
-                {!selected.caseId ? (
-                  <button
-                    type="button"
-                    disabled={casePending}
-                    onClick={() => void handleCreateCase(selected)}
-                    className="inline-flex items-center gap-1 rounded-xl border border-violet-400/40 bg-violet-500/15 px-3 py-2 text-[11px] font-medium"
-                  >
-                    {casePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Briefcase className="h-3.5 w-3.5" />}
-                    Создать кейс
-                  </button>
-                ) : (
-                  <span className="rounded-xl border border-violet-400/30 bg-violet-500/10 px-3 py-2 text-[11px] text-violet-800 dark:text-violet-200">
-                    Кейс #{selected.caseId.slice(0, 8)}
-                    {selected.taskId ? ` · задача ${selected.taskId.slice(0, 8)}` : " · без задачи"}
-                  </span>
-                )}
-                {selected.caseId && !selected.taskId ? (
-                  <button
-                    type="button"
-                    disabled={casePending}
-                    onClick={() => void handleCreateCase(selected)}
-                    className="inline-flex items-center gap-1 rounded-xl border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-[11px] font-medium"
-                  >
-                    {casePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Briefcase className="h-3.5 w-3.5" />}
-                    Создать задачу
-                  </button>
-                ) : null}
-                {selected.caseId ? (
-                  <VocVerificationPanel
-                    caseId={selected.caseId}
-                    onResolved={() => {
-                      void setStatus(selected, "done");
-                      void casesQuery.refetch();
-                      void queueQuery.refetch();
-                    }}
-                  />
-                ) : null}
+
+              <div className="flex flex-col gap-2">
                 {selected.status === "open" ? (
                   <button
                     type="button"
@@ -749,9 +824,134 @@ export function VocHomePanel({
                       if (!selected.caseId) void handleCreateCase(selected);
                       else void setStatus(selected, "claimed");
                     }}
-                    className="rounded-xl border border-indigo-400/40 bg-indigo-500/15 px-3 py-2 text-[11px] font-medium"
+                    className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-accent/40 bg-accent/12 px-3 py-2 text-[12px] font-semibold"
                   >
-                    {selected.caseId ? "Взять в работу" : "В работу + кейс/задача"}
+                    {casePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Briefcase className="h-3.5 w-3.5" />}
+                    {selected.caseId ? "Взять в работу" : "В работу — создать кейс"}
+                  </button>
+                ) : null}
+                {selected.caseId ? (
+                  <button
+                    type="button"
+                    onClick={() => openCaseFromQueue(selected.caseId!)}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-border px-3 py-2 text-[12px] font-medium hover:bg-slate-50 dark:hover:bg-white/5"
+                  >
+                    <Briefcase className="h-3.5 w-3.5" />
+                    Открыть кейс {caseIssueKey(selected.caseId)}
+                  </button>
+                ) : selected.status !== "open" ? (
+                  <button
+                    type="button"
+                    disabled={casePending}
+                    onClick={() => void handleCreateCase(selected)}
+                    className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-border px-3 py-2 text-[12px] font-medium"
+                  >
+                    {casePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Briefcase className="h-3.5 w-3.5" />}
+                    Создать кейс
+                  </button>
+                ) : null}
+                {selected.source === "cve" ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenCve?.(selected.refId)}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-border px-3 py-2 text-[12px] hover:bg-slate-50 dark:hover:bg-white/5"
+                  >
+                    Открыть CVE <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+                {selected.source === "bdu" ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenBdu?.(selected.refId)}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-border px-3 py-2 text-[12px] hover:bg-slate-50 dark:hover:bg-white/5"
+                  >
+                    Открыть БДУ <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+                {selected.source === "tg" && typeof selected.payload.link === "string" ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenTgLink?.(String(selected.payload.link))}
+                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-border px-3 py-2 text-[12px]"
+                  >
+                    Открыть в Telegram <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+              </div>
+
+              {(() => {
+                const intel = vocIntelContext(selected);
+                if (intel) {
+                  return (
+                    <>
+                      {intel.vendor || intel.product ? (
+                        <div className="text-[12px] text-muted">
+                          {[intel.vendor, intel.product].filter(Boolean).join(" / ")}
+                        </div>
+                      ) : null}
+                      {intel.description ? (
+                        <p className="text-[12px] leading-relaxed text-fg/85">{intel.description}</p>
+                      ) : null}
+                      {intel.chips.length ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {intel.chips.map((chip) => (
+                            <span
+                              key={chip.key}
+                              className={cn("rounded-md border px-2 py-0.5 text-[10px] font-medium", vocChipClass(chip.tone))}
+                            >
+                              {chip.label}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </>
+                  );
+                }
+                return (
+                  <>
+                    {selected.subtitle ? (
+                      <p className="text-[12px] leading-relaxed text-fg/85">{selected.subtitle}</p>
+                    ) : null}
+                    <div className="flex flex-wrap gap-1.5">
+                      {selected.vocReasons.map((r) => (
+                        <span key={r} className="rounded-md border border-border px-2 py-0.5 text-[10px] text-muted">
+                          {r}
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                );
+              })()}
+
+              <div className="flex flex-wrap items-center gap-2">
+                {selected.caseId ? (
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px]",
+                      slaTone(selected.slaDueAt, selected.slaBreached)
+                    )}
+                  >
+                    <Clock className="h-3 w-3" />
+                    SLA {slaRemainingLabel(selected.slaDueAt)}
+                  </span>
+                ) : null}
+                {typeof selected.payload.vp_vendor === "string" && selected.payload.vp_vendor ? (
+                  <VocWatchlistQuickAdd kind="vendor" value={selected.payload.vp_vendor} compact />
+                ) : null}
+                {typeof selected.payload.vp_product === "string" && selected.payload.vp_product ? (
+                  <VocWatchlistQuickAdd kind="product" value={String(selected.payload.vp_product)} compact />
+                ) : null}
+              </div>
+
+              <div className="flex flex-wrap gap-2 border-t border-border pt-3">
+                {selected.caseId && !selected.taskId ? (
+                  <button
+                    type="button"
+                    disabled={casePending}
+                    onClick={() => void handleCreateCase(selected)}
+                    className="rounded-md border border-warn/40 bg-warn/10 px-2.5 py-1.5 text-[11px] font-medium"
+                  >
+                    Создать задачу
                   </button>
                 ) : null}
                 {selected.status === "claimed" &&
@@ -760,7 +960,7 @@ export function VocHomePanel({
                     type="button"
                     disabled={pendingKey === selected.refKey}
                     onClick={() => setStatus(selected, "open")}
-                    className="rounded-xl border border-slate-200 px-3 py-2 text-[11px] dark:border-white/10"
+                    className="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-muted"
                   >
                     Отпустить
                   </button>
@@ -770,54 +970,25 @@ export function VocHomePanel({
                     type="button"
                     disabled={pendingKey === selected.refKey}
                     onClick={() => setStatus(selected, "done")}
-                    className="rounded-xl border border-ok/35 bg-ok/10 px-3 py-2 text-[11px] text-ok"
+                    className="rounded-md border border-ok/35 bg-ok/10 px-2.5 py-1.5 text-[11px] text-ok"
                   >
-                    Готово
+                    Снять с ленты
                   </button>
                 ) : (
                   <button
                     type="button"
                     disabled={pendingKey === selected.refKey}
                     onClick={() => setStatus(selected, "open")}
-                    className="rounded-xl border border-slate-200 px-3 py-2 text-[11px] dark:border-white/10"
+                    className="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-muted"
                   >
                     Вернуть в очередь
                   </button>
                 )}
               </div>
-              <div className="flex flex-wrap gap-2 pt-1">
-                {selected.source === "cve" ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenCve?.(selected.refId)}
-                    className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] hover:bg-slate-100 dark:border-white/10 dark:bg-black/20"
-                  >
-                    Открыть CVE <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                ) : null}
-                {selected.source === "bdu" ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenBdu?.(selected.refId)}
-                    className="inline-flex items-center gap-1 rounded-xl border border-teal-400/30 bg-teal-500/10 px-3 py-2 text-[11px] hover:bg-teal-500/15"
-                  >
-                    Открыть БДУ <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                ) : null}
-                {selected.source === "tg" && typeof selected.payload.link === "string" ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenTgLink?.(String(selected.payload.link))}
-                    className="inline-flex items-center gap-1 rounded-xl border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-[11px]"
-                  >
-                    Открыть в Telegram <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                ) : null}
-              </div>
             </div>
           ) : (
             <div className="flex h-full min-h-[12rem] items-center justify-center text-sm text-muted">
-              Выберите событие в очереди
+              Выберите сигнал — справа действия смены
             </div>
           )}
         </div>
@@ -825,22 +996,5 @@ export function VocHomePanel({
         </>
       )}
     </section>
-  );
-}
-
-function CircleIcon(props: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className={props.className} aria-hidden>
-      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" />
-    </svg>
-  );
-}
-
-function UserIcon(props: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className={props.className} aria-hidden>
-      <circle cx="12" cy="8" r="3" stroke="currentColor" strokeWidth="2" />
-      <path d="M5 20c1.5-3 4-4.5 7-4.5s5.5 1.5 7 4.5" stroke="currentColor" strokeWidth="2" />
-    </svg>
   );
 }

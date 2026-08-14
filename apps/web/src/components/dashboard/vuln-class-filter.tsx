@@ -7,18 +7,22 @@ import { vulnClassChipClasses } from "./vuln-class-badge";
 export function VulnClassFilter({
   value,
   onChange,
-  className
+  className,
+  compact = false
 }: {
   value: VulnClassId[];
   onChange: (next: VulnClassId[]) => void;
   className?: string;
+  compact?: boolean;
 }) {
   const selected = value.length;
 
   return (
     <div
       className={cn(
-        "rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-50/90 to-white/70 p-2 dark:border-white/10 dark:from-white/[0.04] dark:to-black/20",
+        compact
+          ? "space-y-1.5"
+          : "rounded-2xl border border-slate-200/90 bg-gradient-to-br from-slate-50/90 to-white/70 p-2 dark:border-white/10 dark:from-white/[0.04] dark:to-black/20",
         className
       )}
     >

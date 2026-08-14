@@ -440,6 +440,7 @@ export class VocService {
       vp_vendor: string | null;
       vp_product: string | null;
       short_description: string | null;
+      enrich_summary: string | null;
       vuln_class: string | null;
     }>(
       `WITH recent_cve AS MATERIALIZED (
@@ -463,7 +464,14 @@ export class VocService {
                 c.raw->'descriptions'->0->>'value',
                 c.raw->'cve'->'descriptions'->0->>'value',
                 ''
-              ) for 180), '') AS short_description,
+              ) for 220), '') AS short_description,
+              NULLIF(substring(
+                CASE
+                  WHEN COALESCE(ea1.output_json->>'summary', '') LIKE 'LLM not configured%' THEN ''
+                  ELSE COALESCE(ea1.output_json->>'summary', '')
+                END
+                for 240
+              ), '') AS enrich_summary,
               ${vulnClassGuessSql} AS vuln_class
          FROM recent_cve c
     LEFT JOIN LATERAL (
@@ -541,7 +549,8 @@ export class VocService {
           vuln_class: row.vuln_class,
           vp_vendor: row.vp_vendor,
           vp_product: row.vp_product,
-          short_description: row.short_description
+          short_description: row.short_description,
+          enrich_summary: row.enrich_summary
         }
       };
     });
@@ -652,7 +661,8 @@ export class VocService {
           has_exploit: row.has_exploit,
           linked_hot: linkedHot,
           linked_count: linkedCount,
-          publication_date: row.publication_date
+          publication_date: row.publication_date,
+          cve_ids: [...linked].slice(0, 4)
         }
       };
     }).slice(0, limit);
@@ -726,6 +736,7 @@ export class VocService {
       vp_vendor: string | null;
       vp_product: string | null;
       short_description: string | null;
+      enrich_summary: string | null;
       vuln_class: string | null;
     }>(
       `SELECT c.cve_id, c.published_at,
@@ -741,7 +752,14 @@ export class VocService {
                 c.raw->'descriptions'->0->>'value',
                 c.raw->'cve'->'descriptions'->0->>'value',
                 ''
-              ) for 180), '') AS short_description,
+              ) for 220), '') AS short_description,
+              NULLIF(substring(
+                CASE
+                  WHEN COALESCE(ea1.output_json->>'summary', '') LIKE 'LLM not configured%' THEN ''
+                  ELSE COALESCE(ea1.output_json->>'summary', '')
+                END
+                for 240
+              ), '') AS enrich_summary,
               ${vulnClassGuessSql} AS vuln_class
          FROM cve c
     LEFT JOIN LATERAL (
@@ -749,6 +767,11 @@ export class VocService {
        WHERE vp.cve_id = c.cve_id
        ORDER BY vp.vendor_key ASC LIMIT 1
     ) vp1 ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT ea.output_json FROM enrichment_ai ea
+       WHERE ea.cve_id = c.cve_id
+       ORDER BY ea.created_at DESC LIMIT 1
+    ) ea1 ON TRUE
     LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
     LEFT JOIN epss_score es ON es.cve_id = c.cve_id
     LEFT JOIN kev k ON k.cve_id = c.cve_id
@@ -813,6 +836,7 @@ export class VocService {
           vp_vendor: row.vp_vendor,
           vp_product: row.vp_product,
           short_description: row.short_description,
+          enrich_summary: row.enrich_summary,
           watchlist_match: true
         }
       };

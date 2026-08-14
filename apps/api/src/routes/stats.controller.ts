@@ -50,6 +50,109 @@ type LlmHealth = {
 
 let llmHealthCache: { key: string; ts: number; value: LlmHealth } | null = null;
 
+type QueuePipelineFlags = {
+  textEngine: string;
+  scoreEnabled: boolean;
+  scoreViaQueue: boolean;
+  enrichViaQueue: boolean;
+  scoreBacklogOn: boolean;
+  enrichBacklogOn: boolean;
+};
+
+type QueueCoverageHealth = QueuePipelineFlags & {
+  totalCves: number;
+  scoredCount: number;
+  scoredMissing: number;
+  scoredPct: number;
+  enrichedCount: number;
+  enrichedMissing: number;
+  enrichedPct: number;
+  hot24: {
+    total: number;
+    scored: number;
+    scoredMissing: number;
+    scoredPct: number;
+    enriched: number;
+    enrichedMissing: number;
+    enrichedPct: number;
+  };
+  lastScoreAt: string | null;
+  lastEnrichAt: string | null;
+  approximate?: boolean;
+};
+
+type QueueExtrasPayload = {
+  llm?: LlmHealth;
+  nvd?: unknown;
+  bdu?: unknown;
+  coverage: QueueCoverageHealth;
+};
+
+const QUEUE_EXTRAS_TTL_MS = 30_000;
+const QUEUE_EXTRAS_FIRST_WAIT_MS = 400;
+
+let queueExtrasCache: { ts: number; value: QueueExtrasPayload } | null = null;
+let queueExtrasInflight: Promise<QueueExtrasPayload> | null = null;
+
+function coveragePct(n: number, d: number) {
+  return d > 0 ? Math.round((n / d) * 1000) / 10 : 0;
+}
+
+function extrasComplete(value: QueueExtrasPayload | null | undefined) {
+  return Boolean(value?.coverage && value.llm && value.nvd && value.bdu);
+}
+
+function buildQueueCoverage(
+  flags: QueuePipelineFlags,
+  cov:
+    | {
+        total?: string;
+        scored?: string;
+        enriched?: string;
+        hot_total?: string;
+        hot_scored?: string;
+        hot_enriched?: string;
+        last_score?: string | null;
+        last_enrich?: string | null;
+      }
+    | undefined
+): QueueCoverageHealth {
+  const totalCves = Number(cov?.total ?? 0);
+  const scoredCount = Number(cov?.scored ?? 0);
+  const enrichedCount = Number(cov?.enriched ?? 0);
+  const hotTotal = Number(cov?.hot_total ?? 0);
+  const hotScored = Number(cov?.hot_scored ?? 0);
+  const hotEnriched = Number(cov?.hot_enriched ?? 0);
+  return {
+    ...flags,
+    totalCves,
+    scoredCount,
+    scoredMissing: Math.max(0, totalCves - scoredCount),
+    scoredPct: coveragePct(scoredCount, totalCves),
+    enrichedCount,
+    enrichedMissing: Math.max(0, totalCves - enrichedCount),
+    enrichedPct: coveragePct(enrichedCount, totalCves),
+    hot24: {
+      total: hotTotal,
+      scored: hotScored,
+      scoredMissing: Math.max(0, hotTotal - hotScored),
+      scoredPct: coveragePct(hotScored, hotTotal),
+      enriched: hotEnriched,
+      enrichedMissing: Math.max(0, hotTotal - hotEnriched),
+      enrichedPct: coveragePct(hotEnriched, hotTotal)
+    },
+    lastScoreAt: cov?.last_score ?? null,
+    lastEnrichAt: cov?.last_enrich ?? null,
+    approximate: true
+  };
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function vendorMergeKey(vendor: string): string {
   return vendor.trim().toLowerCase();
 }
@@ -889,25 +992,52 @@ export class StatsController {
     return this.opsRepair.runHot24(user.email);
   }
 
-  @Get("queue")
-  async queueHealth() {
-    try {
-      const [enrich, score, dlqEnrich, dlqScore] = await Promise.all([
-        this.queue.getQueueDepth("ai.enrich"),
-        this.queue.getQueueDepth("ai.score"),
-        this.queue.getQueueDepth("dlq.ai.enrich"),
-        this.queue.getQueueDepth("dlq.ai.score")
-      ]);
+  private startQueueExtras(flags: QueuePipelineFlags): Promise<QueueExtrasPayload> {
+    if (!queueExtrasInflight) {
+      queueExtrasInflight = this.computeQueueExtras(flags)
+        .then((value) => {
+          queueExtrasCache = { ts: Date.now(), value };
+          return value;
+        })
+        .finally(() => {
+          queueExtrasInflight = null;
+        });
+    }
+    return queueExtrasInflight;
+  }
 
-      const textEngine = getTextEngineSettingsFromEnv().textEngine;
-      const scoreEnabled = isAiScoreEnabled();
-      const scoreViaQueue = shouldScoreViaQueue();
-      const enrichViaQueue = shouldEnrichViaQueue(textEngine);
-      const scoreBacklogOn = scoreEnabled && process.env.BACKLOG_SCORE_SWEEP !== "false";
-      const enrichBacklogOn =
-        process.env.TEXT_ENGINE_BG_ENRICH !== "false" && process.env.BACKLOG_AI_SWEEP !== "false";
+  private async resolveQueueExtras(flags: QueuePipelineFlags): Promise<{
+    pending: boolean;
+    value: QueueExtrasPayload | null;
+  }> {
+    const cached = queueExtrasCache;
+    const fresh = Boolean(cached && Date.now() - cached.ts < QUEUE_EXTRAS_TTL_MS);
+    if (cached && extrasComplete(cached.value) && fresh) {
+      return { pending: false, value: cached.value };
+    }
+    const alreadyRunning = Boolean(queueExtrasInflight);
+    this.startQueueExtras(flags);
+    if (cached) {
+      return { pending: !extrasComplete(cached.value), value: cached.value };
+    }
+    if (alreadyRunning) {
+      const current = queueExtrasCache?.value ?? null;
+      return { pending: !extrasComplete(current), value: current };
+    }
+    const deadline = Date.now() + QUEUE_EXTRAS_FIRST_WAIT_MS;
+    while (Date.now() < deadline) {
+      const current = queueExtrasCache?.value ?? null;
+      if (current?.coverage) {
+        return { pending: !extrasComplete(current), value: current };
+      }
+      await sleep(40);
+    }
+    const current = queueExtrasCache?.value ?? null;
+    return { pending: !extrasComplete(current), value: current };
+  }
 
-      const [llm, nvd, bdu, coverageRow] = await Promise.all([
+  private async computeQueueExtras(flags: QueuePipelineFlags): Promise<QueueExtrasPayload> {
+      const [llm, nvd, bdu, coverage] = await Promise.all([
         (async (): Promise<LlmHealth> => {
         const cfg = await this.integration.getEffectiveLlmConfig();
         const requiresApiKey = llmEndpointRequiresApiKey(cfg.endpoint);
@@ -943,7 +1073,7 @@ export class StatsController {
 
         const started = Date.now();
         const ac = new AbortController();
-        const defaultTimeoutMs = 12_000;
+        const defaultTimeoutMs = 4_000;
         const timeoutMs = Math.max(
           800,
           Math.min(30_000, Number(process.env.LLM_HEALTH_TIMEOUT_MS ?? defaultTimeoutMs))
@@ -1021,46 +1151,36 @@ export class StatsController {
       })(),
         this.integration.probeNvdHealth(),
         this.integration.probeBduHealth(),
-        this.db.query<{
-          total: string;
-          scored: string;
-          enriched: string;
-          hot_total: string;
-          hot_scored: string;
-          hot_enriched: string;
-          last_score: string | null;
-          last_enrich: string | null;
-        }>(
-          `SELECT
-             (SELECT COUNT(*)::text FROM cve) AS total,
-             (SELECT COUNT(*)::text FROM risk_score) AS scored,
-             (SELECT COUNT(DISTINCT cve_id)::text
-                FROM enrichment_ai e
-               WHERE e.output_text IS DISTINCT FROM 'LLM not configured.'
-                 AND COALESCE(e.output_json->>'summary', '') NOT LIKE 'LLM not configured%'
-                 AND NOT (e.output_json @> '{"_enrich_error": true}'::jsonb)
-                 AND (
-                   $1::text <> 'translate'
-                   OR COALESCE(e.output_json->>'_display_source', '') IN ('translated', 'baseline_ru')
-                   OR e.model = 'translate'
-                   OR e.prompt_version = 'translate-v1'
-                 )
-             ) AS enriched,
+        this.db
+          .query<{
+            total: string;
+            scored: string;
+            enriched: string;
+            hot_total: string;
+            hot_scored: string;
+            hot_enriched: string;
+            last_score: string | null;
+            last_enrich: string | null;
+          }>(
+            `SELECT
+             (SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = 'public.cve'::regclass)::text AS total,
+             (SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = 'public.risk_score'::regclass)::text AS scored,
+             (SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = 'public.enrichment_ai'::regclass)::text AS enriched,
              (SELECT COUNT(*)::text
                 FROM cve c
-               WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} IS NOT NULL
-                 AND ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '24 hours'
+               WHERE c.published_at IS NOT NULL
+                 AND c.published_at >= now() - interval '24 hours'
              ) AS hot_total,
              (SELECT COUNT(*)::text
                 FROM cve c
-               WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} IS NOT NULL
-                 AND ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '24 hours'
+               WHERE c.published_at IS NOT NULL
+                 AND c.published_at >= now() - interval '24 hours'
                  AND EXISTS (SELECT 1 FROM risk_score rs WHERE rs.cve_id = c.cve_id)
              ) AS hot_scored,
              (SELECT COUNT(*)::text
                 FROM cve c
-               WHERE ${SQL_EFFECTIVE_PUBLISHED_AT} IS NOT NULL
-                 AND ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '24 hours'
+               WHERE c.published_at IS NOT NULL
+                 AND c.published_at >= now() - interval '24 hours'
                  AND EXISTS (
                    SELECT 1
                      FROM enrichment_ai e
@@ -1078,54 +1198,58 @@ export class StatsController {
              ) AS hot_enriched,
              (SELECT to_char(MAX(computed_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
                 FROM risk_score) AS last_score,
-             (SELECT to_char(MAX(created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                FROM enrichment_ai) AS last_enrich`,
-          [textEngine]
-        )
+             (SELECT to_char(MAX(e.created_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                FROM enrichment_ai e
+                JOIN cve c ON c.cve_id = e.cve_id
+               WHERE c.published_at IS NOT NULL
+                 AND c.published_at >= now() - interval '24 hours') AS last_enrich`,
+            [flags.textEngine]
+          )
+          .then((coverageRow) => {
+            const coverage = buildQueueCoverage(flags, coverageRow.rows[0]);
+            queueExtrasCache = {
+              ts: Date.now(),
+              value: { ...queueExtrasCache?.value, coverage }
+            };
+            return coverage;
+          })
       ]);
 
-      const cov = coverageRow.rows[0];
-      const totalCves = Number(cov?.total ?? 0);
-      const scoredCount = Number(cov?.scored ?? 0);
-      const enrichedCount = Number(cov?.enriched ?? 0);
-      const hotTotal = Number(cov?.hot_total ?? 0);
-      const hotScored = Number(cov?.hot_scored ?? 0);
-      const hotEnriched = Number(cov?.hot_enriched ?? 0);
-      const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 1000) / 10 : 0);
+      return { llm, nvd, bdu, coverage };
+  }
+
+  @Get("queue")
+  async queueHealth() {
+    try {
+      const [enrich, score, dlqEnrich, dlqScore] = await Promise.all([
+        this.queue.getQueueDepth("ai.enrich"),
+        this.queue.getQueueDepth("ai.score"),
+        this.queue.getQueueDepth("dlq.ai.enrich"),
+        this.queue.getQueueDepth("dlq.ai.score")
+      ]);
+
+      const textEngine = getTextEngineSettingsFromEnv().textEngine;
+      const flags: QueuePipelineFlags = {
+        textEngine,
+        scoreEnabled: isAiScoreEnabled(),
+        scoreViaQueue: shouldScoreViaQueue(),
+        enrichViaQueue: shouldEnrichViaQueue(textEngine),
+        scoreBacklogOn: isAiScoreEnabled() && process.env.BACKLOG_SCORE_SWEEP !== "false",
+        enrichBacklogOn:
+          process.env.TEXT_ENGINE_BG_ENRICH !== "false" && process.env.BACKLOG_AI_SWEEP !== "false"
+      };
+
+      const extras = await this.resolveQueueExtras(flags);
 
       return {
         ok: true,
         checkedAt: new Date().toISOString(),
+        extrasPending: extras.pending,
         queues: { enrich, score, dlqEnrich, dlqScore },
-        llm,
-        nvd,
-        bdu,
-        coverage: {
-          textEngine,
-          scoreEnabled,
-          scoreViaQueue,
-          enrichViaQueue,
-          scoreBacklogOn,
-          enrichBacklogOn,
-          totalCves,
-          scoredCount,
-          scoredMissing: Math.max(0, totalCves - scoredCount),
-          scoredPct: pct(scoredCount, totalCves),
-          enrichedCount,
-          enrichedMissing: Math.max(0, totalCves - enrichedCount),
-          enrichedPct: pct(enrichedCount, totalCves),
-          hot24: {
-            total: hotTotal,
-            scored: hotScored,
-            scoredMissing: Math.max(0, hotTotal - hotScored),
-            scoredPct: pct(hotScored, hotTotal),
-            enriched: hotEnriched,
-            enrichedMissing: Math.max(0, hotTotal - hotEnriched),
-            enrichedPct: pct(hotEnriched, hotTotal)
-          },
-          lastScoreAt: cov?.last_score ?? null,
-          lastEnrichAt: cov?.last_enrich ?? null
-        }
+        llm: extras.value?.llm,
+        nvd: extras.value?.nvd,
+        bdu: extras.value?.bdu,
+        coverage: extras.value?.coverage ?? flags
       };
     } catch (e) {
       return {

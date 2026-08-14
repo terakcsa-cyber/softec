@@ -11,7 +11,8 @@ export function AiSummaryPanel({
   aiPending,
   aiStalled,
   manualEnrichAllowed = false,
-  onRequestEnrich
+  onRequestEnrich,
+  embedded = false
 }: {
   data: unknown | null;
   loading: boolean;
@@ -23,6 +24,8 @@ export function AiSummaryPanel({
   manualEnrichAllowed?: boolean;
   /** `force: true` — перегенерировать сводку даже если уже есть строка (ошибка/заглушка). */
   onRequestEnrich?: (opts?: { force?: boolean }) => void;
+  /** Без внешней glass-карточки, одна колонка — для бокового инспектора. */
+  embedded?: boolean;
 }) {
   const d = (data ?? null) as null | {
     cve?: { cve_id?: string | null; raw?: unknown } | null;
@@ -69,7 +72,7 @@ export function AiSummaryPanel({
   const canRefresh = Boolean(manualEnrichAllowed && onRequestEnrich && entityId && data);
 
   return (
-    <div className="glass rounded-2xl p-5">
+    <div className={embedded ? "space-y-3" : "glass rounded-2xl p-5"}>
       <div className="flex items-center justify-between gap-2">
         <div className="text-sm font-medium">ИИ‑сводка</div>
         <div className="flex items-center gap-2">
@@ -99,8 +102,8 @@ export function AiSummaryPanel({
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-12 gap-4">
-        <div className="col-span-12 xl:col-span-7">
+      <div className={cn("mt-4 grid gap-4", embedded ? "grid-cols-1" : "grid-cols-12")}>
+        <div className={embedded ? "" : "col-span-12 xl:col-span-7"}>
           <div
             className={cn(
               "rounded-xl border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none",
@@ -159,7 +162,7 @@ export function AiSummaryPanel({
           </div>
         </div>
 
-        <div className="col-span-12 xl:col-span-5 space-y-3">
+        <div className={cn("space-y-3", embedded ? "" : "col-span-12 xl:col-span-5")}>
           <div className="rounded-xl border border-border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none">
             <div className="text-xs text-muted">Эксплуатация / применимость</div>
             <div className="mt-2 text-sm text-fg/90">
