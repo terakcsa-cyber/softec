@@ -30,16 +30,16 @@ export function sqlBduFstecAttentionWithinHours(alias: string, hours: number): s
 }
 
 /**
- * VOC: публикация или last_upd ФСТЭК за последние N часов (календарные дни).
- * Выгрузка БДУ не ежедневная — для очереди смены окно шире, чем лента дашборда 24ч.
+ * VOC: только дата публикации паспорта БДУ (не last_upd, не ingest updated_at).
+ * Окно — календарные дни, максимум 7 включая сегодня.
  */
 export function sqlBduVocWindowWithinHours(alias: string, hours: number): string {
-  const h = Math.max(24, Math.min(336, Math.floor(hours)));
-  const col = (name: string) => `(
-    ${alias}.${name} ~ '${BDU_DD_MM_YYYY_SQL_REGEX}'
-    AND to_timestamp(${alias}.${name}, 'DD.MM.YYYY')::date >= (now() - interval '${h} hours')::date
+  const days = Math.max(1, Math.min(7, Math.ceil(Math.max(1, hours) / 24)));
+  return `(
+    ${alias}.publication_date ~ '${BDU_DD_MM_YYYY_SQL_REGEX}'
+    AND to_timestamp(${alias}.publication_date, 'DD.MM.YYYY')::date
+      BETWEEN (CURRENT_DATE - ${days - 1}) AND CURRENT_DATE
   )`;
-  return `(${col("publication_date")} OR ${col("last_upd_date")})`;
 }
 
 /** Парсинг publication_date из БДУ (DD.MM.YYYY). */

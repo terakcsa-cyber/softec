@@ -570,7 +570,7 @@ export class VocService {
   }
 
   private async fetchHotBdu(limit: number, watchlist: VocWatchlistRule[]): Promise<VocQueueItem[]> {
-    const windowHours = Math.max(24, Math.min(336, Number(process.env.VOC_BDU_WINDOW_HOURS ?? 168)));
+    const windowHours = Math.max(24, Math.min(168, Number(process.env.VOC_BDU_WINDOW_HOURS ?? 168)));
     const minEpss = 0.5;
     const minCvss = 9.0;
     const hotLinkedSql = `EXISTS (
@@ -603,7 +603,7 @@ export class VocService {
             OR b.severity_level >= 3
             OR ${hotLinkedSql}
           )
-        ORDER BY b.severity_level DESC, b.has_exploit DESC, b.cvss_score DESC NULLS LAST, b.publication_date DESC NULLS LAST
+        ORDER BY to_timestamp(b.publication_date, 'DD.MM.YYYY') DESC NULLS LAST, b.severity_level DESC, b.has_exploit DESC, b.cvss_score DESC NULLS LAST
         LIMIT $1`,
       [Math.max(limit, 80)]
     );
@@ -910,7 +910,7 @@ export class VocService {
   private async fetchWatchlistBdu(limit: number, watchlist: VocWatchlistRule[]): Promise<VocQueueItem[]> {
     const match = this.buildBduWatchlistWhere(watchlist);
     if (!match) return [];
-    const windowHours = Math.max(24, Math.min(336, Number(process.env.VOC_WATCHLIST_WINDOW_HOURS ?? 168)));
+    const windowHours = Math.max(24, Math.min(168, Number(process.env.VOC_BDU_WINDOW_HOURS ?? 168)));
     const params = [...match.params, limit];
     const limitIdx = params.length;
 
@@ -939,7 +939,7 @@ export class VocService {
         FROM bdu_vuln b
         WHERE ${sqlBduVocWindowWithinHours("b", windowHours)}
           AND ${match.clause}
-        ORDER BY b.severity_level DESC, b.cvss_score DESC NULLS LAST, b.publication_date DESC NULLS LAST
+        ORDER BY to_timestamp(b.publication_date, 'DD.MM.YYYY') DESC NULLS LAST, b.severity_level DESC, b.cvss_score DESC NULLS LAST
         LIMIT $${limitIdx}`,
       params
     );
