@@ -62,8 +62,13 @@ export function vocIntelContext(item: VocQueueItem): VocIntelContext | null {
   const description = str(p.name) || str(item.subtitle);
   const cvss = num(p.cvss_score);
   const chips: VocContextChip[] = [];
+  const level = num(p.severity_level);
+  if (level != null && level >= 4) chips.push({ key: "fstec", label: "ФСТЭК крит", tone: "danger" });
+  else if (level != null && level >= 3) chips.push({ key: "fstec", label: "ФСТЭК высокий", tone: "warn" });
+  else chips.push({ key: "fstec", label: "ФСТЭК", tone: "warn" });
   if (cvss != null) chips.push({ key: "cvss", label: `CVSS ${cvss.toFixed(1)}`, tone: cvss >= 9 ? "danger" : cvss >= 7 ? "warn" : "muted" });
   if (p.has_exploit) chips.push({ key: "exploit", label: "Exploit", tone: "danger" });
+  if (p.has_fix === false) chips.push({ key: "nofix", label: "нет исправления", tone: "warn" });
   if (p.linked_hot) chips.push({ key: "hot", label: "горячий CVE", tone: "warn" });
   const linked = num(p.linked_count);
   if (linked != null && linked > 0) chips.push({ key: "cves", label: `CVE ${linked}`, tone: "muted" });

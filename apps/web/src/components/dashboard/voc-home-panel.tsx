@@ -74,7 +74,9 @@ function isMineItem(item: VocQueueItem, email?: string | null) {
 
 function isNowItem(item: VocQueueItem) {
   if (item.status === "done" || item.status === "dismissed") return false;
-  return item.vocPriority === "p1" || Boolean(item.slaBreached) || hasWatchlistHit(item);
+  if (item.vocPriority === "p1" || Boolean(item.slaBreached) || hasWatchlistHit(item)) return true;
+  // ФСТЭК БДУ высокого/критичного контура — обязательный приоритет смены для банка
+  return item.source === "bdu" && item.vocPriority === "p2";
 }
 
 function urgencyScore(item: VocQueueItem) {
@@ -104,7 +106,7 @@ export function VocHomePanel({
   const [section, setSection] = useState<SectionTab>("queue");
   const [sourceTab, setSourceTab] = useState<SourceTab>("all");
   const [statusTab, setStatusTab] = useState<StatusTab>("active");
-  const [workLens, setWorkLens] = useState<WorkLens>(isPage ? "now" : "all");
+  const [workLens, setWorkLens] = useState<WorkLens>("all");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [kbdIndex, setKbdIndex] = useState(0);
   const [caseError, setCaseError] = useState<string | null>(null);
@@ -284,6 +286,15 @@ export function VocHomePanel({
     if (workLens === "now") return queueItems.filter(isNowItem);
     return queueItems;
   }, [queueItems, workLens, userEmail]);
+
+  const sourceCounts = useMemo(
+    () => ({
+      cve: queueItems.filter((i) => i.source === "cve").length,
+      bdu: queueItems.filter((i) => i.source === "bdu").length,
+      tg: queueItems.filter((i) => i.source === "tg").length
+    }),
+    [queueItems]
+  );
 
   const stats = useMemo(() => {
     const slaCases = (casesQuery.data ?? []).filter((c) => isSlaBreached(c.slaDueAt)).length;
@@ -692,7 +703,10 @@ export function VocHomePanel({
             ["bdu", "БДУ"],
             ["tg", "Telegram"]
           ] as const
-        ).map(([key, label]) => (
+        ).map(([key, label]) => {
+          const count =
+            key === "cve" ? sourceCounts.cve : key === "bdu" ? sourceCounts.bdu : key === "tg" ? sourceCounts.tg : null;
+          return (
           <button
             key={key}
             type="button"
@@ -705,8 +719,12 @@ export function VocHomePanel({
             )}
           >
             {label}
+            {count != null && sourceTab === "all" && count > 0 ? (
+              <span className="ml-1 tabular-nums text-muted">{count}</span>
+            ) : null}
           </button>
-        ))}
+          );
+        })}
         <span className="mx-1 hidden h-6 w-px bg-border sm:inline" />
         {(
           [

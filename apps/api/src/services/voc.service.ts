@@ -6,7 +6,7 @@ import {
   isSlaBreached,
   scoreBduForVoc,
   scoreCveForVoc,
-  sqlBduFstecAttentionWithinHours,
+  sqlBduVocWindowWithinHours,
   sqlVulnClassGuessExpr,
   vocRefKey,
   type VocPriority,
@@ -137,7 +137,20 @@ export class VocService {
       open_cases: merged.filter((i) => i.caseId).length
     };
 
-    return { items: filtered.slice(0, limit), stats };
+    return { items: this.capQueue(filtered, limit, sourceFilter), stats };
+  }
+
+  /** В общей ленте CVE с высоким скором не должны вытеснять БДУ ФСТЭК. */
+  private capQueue(items: VocQueueItem[], limit: number, sourceFilter: string): VocQueueItem[] {
+    if (items.length <= limit) return items;
+    if (sourceFilter !== "all") return items.slice(0, limit);
+    const bdu = items.filter((i) => i.source === "bdu");
+    const rest = items.filter((i) => i.source !== "bdu");
+    const bduKeep = bdu.slice(0, Math.min(bdu.length, Math.max(24, Math.floor(limit * 0.3))));
+    return [...bduKeep, ...rest.slice(0, Math.max(0, limit - bduKeep.length))].sort((a, b) => {
+      if (b.vocScore !== a.vocScore) return b.vocScore - a.vocScore;
+      return String(b.publishedAt ?? "").localeCompare(String(a.publishedAt ?? ""));
+    });
   }
 
   async upsertTriage(
@@ -557,9 +570,18 @@ export class VocService {
   }
 
   private async fetchHotBdu(limit: number, watchlist: VocWatchlistRule[]): Promise<VocQueueItem[]> {
-    const windowHours = Math.max(1, Math.min(168, Number(process.env.BDU_ATTENTION_WINDOW_HOURS ?? 24)));
+    const windowHours = Math.max(24, Math.min(336, Number(process.env.VOC_BDU_WINDOW_HOURS ?? 168)));
     const minEpss = 0.5;
     const minCvss = 9.0;
+    const hotLinkedSql = `EXISTS (
+      SELECT 1
+        FROM cve_bdu_link l
+        JOIN cve c ON c.cve_id = l.cve_id
+   LEFT JOIN kev k ON k.cve_id = c.cve_id
+   LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+       WHERE l.bdu_id = b.bdu_id
+         AND (k.cve_id IS NOT NULL OR es.score >= ${minEpss} OR c.cvss_base >= ${minCvss})
+    )`;
 
     const candidates = await this.db.query<{
       bdu_id: string;
@@ -567,14 +589,23 @@ export class VocService {
       publication_date: string | null;
       cvss_score: number | null;
       has_exploit: boolean;
+      has_fix: boolean;
+      severity_level: number;
       cve_ids: string[] | null;
     }>(
-      `SELECT b.bdu_id, b.name, b.publication_date, b.cvss_score, b.has_exploit, b.cve_ids
+      `SELECT b.bdu_id, b.name, b.publication_date, b.cvss_score, b.has_exploit, b.has_fix,
+              b.severity_level, b.cve_ids
          FROM bdu_vuln b
-        WHERE ${sqlBduFstecAttentionWithinHours("b", windowHours)}
-        ORDER BY b.cvss_score DESC NULLS LAST, b.has_exploit DESC, b.publication_date DESC NULLS LAST
+        WHERE ${sqlBduVocWindowWithinHours("b", windowHours)}
+          AND (
+            b.has_exploit
+            OR COALESCE(b.cvss_score, 0) >= 7
+            OR b.severity_level >= 3
+            OR ${hotLinkedSql}
+          )
+        ORDER BY b.severity_level DESC, b.has_exploit DESC, b.cvss_score DESC NULLS LAST, b.publication_date DESC NULLS LAST
         LIMIT $1`,
-      [Math.max(limit * 4, 500)]
+      [Math.max(limit, 80)]
     );
 
     if (candidates.rows.length === 0) return [];
@@ -623,49 +654,82 @@ export class VocService {
       for (const row of hotRows.rows) hotCves.add(row.cve_id.toUpperCase());
     }
 
-    return candidates.rows.flatMap((row) => {
-      const linked = linkedByBdu.get(row.bdu_id) ?? new Set<string>();
-      const linkedHot = [...linked].some((cveId) => hotCves.has(cveId));
-      const linkedCount = linkCountByBdu.get(row.bdu_id) ?? 0;
-      if (!row.has_exploit && (row.cvss_score == null || row.cvss_score < minCvss) && !linkedHot) {
-        return [];
+    return candidates.rows
+      .map((row) => {
+        const linked = linkedByBdu.get(row.bdu_id) ?? new Set<string>();
+        const linkedHot = [...linked].some((cveId) => hotCves.has(cveId));
+        const linkedCount = Math.max(linkCountByBdu.get(row.bdu_id) ?? 0, linked.size);
+        return this.toBduQueueItem(
+          {
+            bdu_id: row.bdu_id,
+            name: row.name,
+            publication_date: row.publication_date,
+            cvss_score: row.cvss_score,
+            has_exploit: row.has_exploit,
+            has_fix: row.has_fix,
+            severity_level: row.severity_level,
+            linked_hot: linkedHot,
+            linked_count: linkedCount,
+            cve_ids: [...linked].slice(0, 4)
+          },
+          watchlist
+        );
+      })
+      .slice(0, limit);
+  }
+
+  private toBduQueueItem(
+    row: {
+      bdu_id: string;
+      name: string;
+      publication_date: string | null;
+      cvss_score: number | null;
+      has_exploit: boolean;
+      has_fix?: boolean | null;
+      severity_level?: number | null;
+      linked_hot: boolean;
+      linked_count: number;
+      cve_ids?: string[];
+      watchlist_match?: boolean;
+    },
+    watchlist: VocWatchlistRule[]
+  ): VocQueueItem {
+    const scored = scoreBduForVoc({
+      bduId: row.bdu_id,
+      hasExploit: row.has_exploit,
+      cvssScore: row.cvss_score,
+      linkedCveCount: row.linked_count,
+      hasHotLinkedCve: row.linked_hot,
+      severityLevel: row.severity_level,
+      hasFix: row.has_fix
+    });
+    const boosted = applyWatchlistBoost(scored, { text: `${row.bdu_id} ${row.name}` }, watchlist);
+    return {
+      refKey: vocRefKey("bdu", row.bdu_id),
+      source: "bdu" as const,
+      refId: row.bdu_id,
+      vocScore: boosted.score,
+      vocPriority: boosted.priority,
+      vocReasons: boosted.reasons,
+      title: `BDU:${row.bdu_id}`,
+      subtitle: row.name || "",
+      publishedAt: row.publication_date,
+      status: "open" as const,
+      claimedByEmail: null,
+      updatedAt: null,
+      payload: {
+        name: row.name,
+        cvss_score: row.cvss_score,
+        has_exploit: row.has_exploit,
+        has_fix: row.has_fix ?? null,
+        severity_level: row.severity_level ?? 0,
+        linked_hot: row.linked_hot,
+        linked_count: row.linked_count,
+        publication_date: row.publication_date,
+        cve_ids: row.cve_ids ?? [],
+        ...(row.watchlist_match ? { watchlist_match: true } : {})
       }
-      const scored = scoreBduForVoc({
-        bduId: row.bdu_id,
-        hasExploit: row.has_exploit,
-        cvssScore: row.cvss_score,
-        linkedCveCount: linkedCount,
-        hasHotLinkedCve: linkedHot
-      });
-      const boosted = applyWatchlistBoost(
-        scored,
-        { text: `${row.bdu_id} ${row.name}` },
-        watchlist
-      );
-      return {
-        refKey: vocRefKey("bdu", row.bdu_id),
-        source: "bdu" as const,
-        refId: row.bdu_id,
-        vocScore: boosted.score,
-        vocPriority: boosted.priority,
-        vocReasons: boosted.reasons,
-        title: `BDU:${row.bdu_id}`,
-        subtitle: row.name || "",
-        publishedAt: row.publication_date,
-        status: "open" as const,
-        claimedByEmail: null,
-        updatedAt: null,
-        payload: {
-          name: row.name,
-          cvss_score: row.cvss_score,
-          has_exploit: row.has_exploit,
-          linked_hot: linkedHot,
-          linked_count: linkedCount,
-          publication_date: row.publication_date,
-          cve_ids: [...linked].slice(0, 4)
-        }
-      };
-    }).slice(0, limit);
+    };
   }
 
   private buildCveWatchlistWhere(
@@ -856,52 +920,39 @@ export class VocService {
       publication_date: string | null;
       cvss_score: number | null;
       has_exploit: boolean;
+      has_fix: boolean;
+      severity_level: number;
       linked_hot: boolean;
       linked_count: number;
     }>(
-      `SELECT b.bdu_id, b.name, b.publication_date, b.cvss_score, b.has_exploit,
-              false AS linked_hot,
+      `SELECT b.bdu_id, b.name, b.publication_date, b.cvss_score, b.has_exploit, b.has_fix, b.severity_level,
+              EXISTS (
+                SELECT 1
+                  FROM cve_bdu_link l
+                  JOIN cve c ON c.cve_id = l.cve_id
+             LEFT JOIN kev k ON k.cve_id = c.cve_id
+             LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+                 WHERE l.bdu_id = b.bdu_id
+                   AND (k.cve_id IS NOT NULL OR es.score >= 0.5 OR c.cvss_base >= 9)
+              ) AS linked_hot,
               (SELECT count(DISTINCT l.cve_id)::int FROM cve_bdu_link l WHERE l.bdu_id = b.bdu_id) AS linked_count
         FROM bdu_vuln b
-        WHERE ${sqlBduFstecAttentionWithinHours("b", windowHours)}
+        WHERE ${sqlBduVocWindowWithinHours("b", windowHours)}
           AND ${match.clause}
-        ORDER BY b.cvss_score DESC NULLS LAST, b.publication_date DESC NULLS LAST
+        ORDER BY b.severity_level DESC, b.cvss_score DESC NULLS LAST, b.publication_date DESC NULLS LAST
         LIMIT $${limitIdx}`,
       params
     );
 
-    return r.rows.map((row) => {
-      const scored = scoreBduForVoc({
-        bduId: row.bdu_id,
-        hasExploit: row.has_exploit,
-        cvssScore: row.cvss_score,
-        linkedCveCount: row.linked_count,
-        hasHotLinkedCve: row.linked_hot
-      });
-      const boosted = applyWatchlistBoost(scored, { text: `${row.bdu_id} ${row.name}` }, watchlist);
-      return {
-        refKey: vocRefKey("bdu", row.bdu_id),
-        source: "bdu" as const,
-        refId: row.bdu_id,
-        vocScore: boosted.score,
-        vocPriority: boosted.priority,
-        vocReasons: boosted.reasons,
-        title: `BDU:${row.bdu_id}`,
-        subtitle: row.name || "",
-        publishedAt: row.publication_date,
-        status: "open" as const,
-        claimedByEmail: null,
-        updatedAt: null,
-        payload: {
-          name: row.name,
-          cvss_score: row.cvss_score,
-          has_exploit: row.has_exploit,
-          linked_hot: row.linked_hot,
-          linked_count: row.linked_count,
-          publication_date: row.publication_date,
+    return r.rows.map((row) =>
+      this.toBduQueueItem(
+        {
+          ...row,
+          cve_ids: [],
           watchlist_match: true
-        }
-      };
-    });
+        },
+        watchlist
+      )
+    );
   }
 }

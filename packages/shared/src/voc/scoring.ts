@@ -77,7 +77,22 @@ export type VocBduSignals = {
   cvssScore?: number | null;
   linkedCveCount?: number;
   hasHotLinkedCve?: boolean;
+  severityLevel?: number | null;
+  hasFix?: boolean | null;
 };
+
+/** БДУ, которые обязаны попасть в VOC: высокий/крит ФСТЭК, CVSS≥7, эксплойт или горячий CVE. */
+export function isVocAttentionBdu(bdu: {
+  hasExploit?: boolean;
+  cvssScore?: number | null;
+  severityLevel?: number | null;
+  hasHotLinkedCve?: boolean;
+}): boolean {
+  if (bdu.hasExploit || bdu.hasHotLinkedCve) return true;
+  const cvss = typeof bdu.cvssScore === "number" && Number.isFinite(bdu.cvssScore) ? bdu.cvssScore : null;
+  if (cvss != null && cvss >= 7) return true;
+  return (bdu.severityLevel ?? 0) >= 3;
+}
 
 export function scoreBduForVoc(bdu: VocBduSignals): VocScoreResult {
   let score = 0;
@@ -87,11 +102,26 @@ export function scoreBduForVoc(bdu: VocBduSignals): VocScoreResult {
     reasons.push(r);
   };
 
-  if (bdu.hasExploit) add(32, "эксплойт (БДУ)");
+  add(22, "регулятор ФСТЭК");
+  add(14, "окно внимания ФСТЭК");
+
+  const level = typeof bdu.severityLevel === "number" && Number.isFinite(bdu.severityLevel) ? bdu.severityLevel : 0;
+  if (level >= 4) add(34, "критический (ФСТЭК)");
+  else if (level >= 3) add(30, "высокий (ФСТЭК)");
+
+  if (bdu.hasExploit) add(28, "эксплойт (БДУ)");
   const cvss = typeof bdu.cvssScore === "number" && Number.isFinite(bdu.cvssScore) ? bdu.cvssScore : null;
-  if (cvss != null && cvss >= 9) add(24, `CVSS ${cvss.toFixed(1)}`);
-  if (bdu.hasHotLinkedCve) add(20, "горячий связанный CVE");
-  else if ((bdu.linkedCveCount ?? 0) > 0) add(10, "связь с CVE");
+  if (cvss != null) {
+    if (cvss >= 9) add(20, `CVSS ${cvss.toFixed(1)}`);
+    else if (cvss >= 8) add(12, `CVSS ${cvss.toFixed(1)}`);
+    else if (cvss >= 7) add(8, `CVSS ${cvss.toFixed(1)}`);
+  }
+  if (bdu.hasHotLinkedCve) add(16, "горячий связанный CVE");
+  else if ((bdu.linkedCveCount ?? 0) > 0) add(8, "связь с CVE");
+
+  if (bdu.hasFix === false && (level >= 3 || (cvss != null && cvss >= 7))) {
+    add(10, "нет исправления (ФСТЭК)");
+  }
 
   const final = clamp(Math.round(score), 0, 100);
   return { score: final, priority: vocPriorityFromScore(final), reasons: reasons.slice(0, 8) };
