@@ -257,6 +257,7 @@ export function VocHomePanel({
           : sourceTab === "all"
             ? [...base, ...tgItems]
             : base;
+    merged = mergeItems(merged);
     merged = [...merged].sort((a, b) => {
       const urg = urgencyScore(b) - urgencyScore(a);
       if (urg !== 0) return urg;
@@ -271,7 +272,7 @@ export function VocHomePanel({
     } else if (statusTab === "done") {
       merged = merged.filter((i) => i.status === "done" || i.status === "dismissed");
     }
-    return mergeItems(merged).map((item) => {
+    return merged.map((item) => {
       if (item.caseId) {
         return {
           ...item,

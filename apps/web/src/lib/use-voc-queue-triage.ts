@@ -7,6 +7,7 @@ import {
   patchVocTriage,
   type VocQueueItem,
   type VocQueueResponse,
+  type VocTriageRow,
   type VocTriageStatus
 } from "./voc-api";
 
@@ -48,7 +49,9 @@ export function useVocQueueTriage() {
       setOverrides((prev) => ({ ...prev, [vars.refKey]: optimistic }));
 
       await queryClient.cancelQueries({ queryKey: ["voc", "queue"] });
+      await queryClient.cancelQueries({ queryKey: ["voc", "triage"] });
       const snapshots = queryClient.getQueriesData<VocQueueResponse>({ queryKey: ["voc", "queue"] });
+      const triageSnapshots = queryClient.getQueriesData<VocTriageRow[]>({ queryKey: ["voc", "triage"] });
 
       for (const [key, data] of snapshots) {
         if (!data) continue;
@@ -60,7 +63,20 @@ export function useVocQueueTriage() {
         });
       }
 
-      return { snapshots };
+      const triageRow: VocTriageRow = {
+        refKey: vars.refKey,
+        status: vars.status,
+        claimedByEmail: optimistic.claimedByEmail,
+        updatedAt: new Date().toISOString()
+      };
+      for (const [key, rows] of triageSnapshots) {
+        if (!rows) continue;
+        const idx = rows.findIndex((row) => row.refKey === vars.refKey);
+        const next = idx >= 0 ? rows.map((row, i) => (i === idx ? { ...row, ...triageRow } : row)) : [...rows, triageRow];
+        queryClient.setQueryData(key, next);
+      }
+
+      return { snapshots, triageSnapshots };
     },
     onError: (err, vars, ctx) => {
       setOverrides((prev) => {
@@ -73,19 +89,26 @@ export function useVocQueueTriage() {
           queryClient.setQueryData(key, data);
         }
       }
+      if (ctx?.triageSnapshots) {
+        for (const [key, data] of ctx.triageSnapshots) {
+          queryClient.setQueryData(key, data);
+        }
+      }
       setError(err instanceof Error ? err.message : "Ошибка triage");
     },
-    onSuccess: (_data, vars) => {
-      setOverrides((prev) => {
-        const next = { ...prev };
-        delete next[vars.refKey];
-        return next;
-      });
-    },
-    onSettled: () => {
+    onSettled: (_data, err, vars) => {
       setPendingKey(null);
       void queryClient.invalidateQueries({ queryKey: ["voc", "queue"] });
       void queryClient.invalidateQueries({ queryKey: ["voc", "triage"] });
+      if (err || !vars) return;
+      // «Готово» держим в сессии: live-poll не должен вернуть карточку в «Сейчас».
+      if (vars.status === "open" || vars.status === "claimed") {
+        setOverrides((prev) => {
+          const next = { ...prev };
+          delete next[vars.refKey];
+          return next;
+        });
+      }
     }
   });
 
