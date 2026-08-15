@@ -991,9 +991,9 @@ export function Dashboard() {
   });
 
   return (
-    <div className="mx-auto w-[min(80vw,100%)]">
-      <div className="mt-6 grid min-h-[calc(100vh-48px)] grid-cols-[56px_minmax(0,1fr)] gap-6">
-        <aside className="glass sticky top-6 flex h-[calc(100vh-48px)] flex-col items-center gap-2 self-start rounded-2xl p-2">
+    <div className="mx-auto flex h-full min-h-0 w-[min(80vw,100%)] flex-col">
+      <div className="grid min-h-0 flex-1 grid-cols-[56px_minmax(0,1fr)] gap-6">
+        <aside className="glass flex h-full min-h-0 flex-col items-center gap-2 rounded-2xl p-2">
           <button
             onClick={() => {
               switchModule("dashboard");
@@ -1116,7 +1116,7 @@ export function Dashboard() {
           </div>
         </aside>
 
-        <main className="min-w-0">
+        <main className="min-h-0 min-w-0 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
           {moduleKey === "dashboard" ? (
             <div className="glass rounded-2xl p-5 sm:p-6">
               <OverviewDashboardPanel
