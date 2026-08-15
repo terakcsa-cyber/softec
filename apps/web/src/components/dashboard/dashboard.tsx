@@ -991,7 +991,7 @@ export function Dashboard() {
   });
 
   return (
-    <div className={cn("mx-auto", moduleKey === "vulns" ? "max-w-[1600px]" : "max-w-[1400px]")}>
+    <div className="mx-auto w-[min(80vw,100%)]">
       <div className="mt-6 grid min-h-[calc(100vh-48px)] grid-cols-[56px_minmax(0,1fr)] gap-6">
         <aside className="glass sticky top-6 flex h-[calc(100vh-48px)] flex-col items-center gap-2 self-start rounded-2xl p-2">
           <button
