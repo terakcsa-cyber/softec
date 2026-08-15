@@ -277,7 +277,15 @@ export function PlatformUpdatePanel({ embedded = false }: { embedded?: boolean }
         </div>
       ) : null}
 
-      {statusQ.isLoading ? <p className="text-sm text-muted">Загрузка…</p> : null}
+      {statusQ.isLoading ? (
+        <div className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="h-20 animate-pulse rounded-xl border border-slate-200 bg-slate-50 dark:border-border dark:bg-white/[0.04]" />
+            <div className="h-20 animate-pulse rounded-xl border border-slate-200 bg-slate-50 dark:border-border dark:bg-white/[0.04]" />
+          </div>
+          <p className="text-sm text-muted">Читаем локальный checkout…</p>
+        </div>
+      ) : null}
       {statusQ.isError ? (
         <p className="text-sm text-red-700 dark:text-red-300">
           {statusQ.error instanceof Error ? statusQ.error.message : "Ошибка загрузки"}
@@ -310,6 +318,11 @@ export function PlatformUpdatePanel({ embedded = false }: { embedded?: boolean }
                 {st.remote.branch}
                 {st.remote.url ? ` · ${st.remote.url}` : ""}
               </div>
+              {!st.checkedAt ? (
+                <div className="mt-1 text-[11px] text-muted">
+                  Пока локальный ref. Нажмите «Проверить обновления», чтобы сверить GitHub.
+                </div>
+              ) : null}
             </div>
           </div>
 

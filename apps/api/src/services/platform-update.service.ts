@@ -134,7 +134,7 @@ export class PlatformUpdateService {
   private applyLockUntil = 0;
 
   async getStatus(): Promise<PlatformUpdateStatus> {
-    if (this.lastCheck && this.lastCheckedAt) {
+    if (this.lastCheck) {
       const job = await this.readJob();
       const cfg = this.config();
       // Refresh "current" from mounted git so UI doesn't stick on bake-time PLATFORM_GIT_SHA.
@@ -144,7 +144,8 @@ export class PlatformUpdateService {
       );
       return { ...this.lastCheck, current, updateAvailable, job };
     }
-    return this.check({ soft: true });
+    // Opening the page must not git-fetch: from the API container that often hangs on SSH/GitHub.
+    return this.snapshot({ fetchRemote: false });
   }
 
   async getStorage(): Promise<PlatformStorageStatus> {
@@ -345,6 +346,11 @@ export class PlatformUpdateService {
   }
 
   async check(opts?: { soft?: boolean }): Promise<PlatformUpdateStatus> {
+    return this.snapshot({ fetchRemote: opts?.soft !== true });
+  }
+
+  private async snapshot(opts?: { fetchRemote?: boolean }): Promise<PlatformUpdateStatus> {
+    const fetchRemote = opts?.fetchRemote === true;
     const cfg = this.config();
     const safetyNotesRu = [
       "Volumes Postgres/Redis/RabbitMQ не удаляются (запрещён down -v / --fresh).",
@@ -368,20 +374,22 @@ export class PlatformUpdateService {
 
     try {
       if (cfg.repoDir && (await this.isGitRepo(cfg.repoDir))) {
-        await this.execCapture("git", ["-C", cfg.repoDir, "fetch", "--prune", "origin", branch], {
-          timeoutMs: 120_000,
-          allowFail: opts?.soft === true
-        });
+        if (fetchRemote) {
+          await this.execCapture("git", ["-C", cfg.repoDir, "fetch", "--prune", "origin", branch], {
+            timeoutMs: 20_000,
+            allowFail: false
+          });
+        }
         remoteSha = (
           await this.execCapture("git", ["-C", cfg.repoDir, "rev-parse", `origin/${branch}`], {
-            timeoutMs: 15_000,
+            timeoutMs: 8_000,
             allowFail: true
           })
         )?.trim() || null;
         if (current.sha && remoteSha && current.sha !== remoteSha) {
           commitsAhead = await this.listCommitsAhead(cfg.repoDir, current.sha, `origin/${branch}`);
         }
-      } else if (remoteUrl) {
+      } else if (remoteUrl && fetchRemote) {
         remoteSha = await this.lsRemoteSha(remoteUrl, branch);
         if (current.sha && remoteSha && current.sha !== remoteSha) {
           commitsAhead = [
@@ -397,7 +405,7 @@ export class PlatformUpdateService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.log.warn(`Update check failed: ${msg}`);
-      if (!opts?.soft) {
+      if (fetchRemote) {
         throw new ServiceUnavailableException(`Не удалось проверить обновления: ${msg}`);
       }
       blockers.push(`Проверка remote не удалась: ${msg}`);
@@ -422,7 +430,7 @@ export class PlatformUpdateService {
       commitsAheadCount: commitsAhead.length,
       apply: applyGate,
       job: await this.readJob(),
-      checkedAt: new Date().toISOString(),
+      checkedAt: fetchRemote ? new Date().toISOString() : this.lastCheckedAt,
       safetyNotesRu,
       config: {
         repoDir: cfg.repoDir,
@@ -435,7 +443,7 @@ export class PlatformUpdateService {
     };
 
     this.lastCheck = status;
-    this.lastCheckedAt = status.checkedAt;
+    if (fetchRemote && status.checkedAt) this.lastCheckedAt = status.checkedAt;
     return status;
   }
 
@@ -575,7 +583,7 @@ export class PlatformUpdateService {
         `{{range .Mounts}}{{if eq .Destination "${dest}"}}{{.Source}}{{end}}{{end}}`,
         cid
       ],
-      { allowFail: true, timeoutMs: 10_000 }
+      { allowFail: true, timeoutMs: 4_000 }
     );
     const src = out?.split("\n").map((l) => l.trim()).find(Boolean) || null;
     return src && src.startsWith("/") ? src : null;
@@ -711,7 +719,7 @@ export class PlatformUpdateService {
 
   private async lsRemoteSha(remoteUrl: string, branch: string): Promise<string | null> {
     const out = await this.execCapture("git", ["ls-remote", remoteUrl, `refs/heads/${branch}`], {
-      timeoutMs: 60_000,
+      timeoutMs: 20_000,
       allowFail: true
     });
     if (!out) return null;
@@ -903,7 +911,7 @@ export class PlatformUpdateService {
   }
 
   private async commandOk(cmd: string, args: string[]): Promise<boolean> {
-    const out = await this.execCapture(cmd, args, { allowFail: true, timeoutMs: 10_000 });
+    const out = await this.execCapture(cmd, args, { allowFail: true, timeoutMs: 4_000 });
     return out != null;
   }
 
@@ -913,8 +921,15 @@ export class PlatformUpdateService {
     opts?: { timeoutMs?: number; allowFail?: boolean }
   ): Promise<string | null> {
     const timeoutMs = opts?.timeoutMs ?? 60_000;
+    const env = { ...process.env };
+    if (cmd === "git") {
+      env.GIT_TERMINAL_PROMPT = "0";
+      env.GIT_ASKPASS = env.GIT_ASKPASS || "true";
+      env.GIT_SSH_COMMAND =
+        env.GIT_SSH_COMMAND || "ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new";
+    }
     return new Promise((resolvePromise, reject) => {
-      const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], env });
       let stdout = "";
       let stderr = "";
       const timer = setTimeout(() => {
