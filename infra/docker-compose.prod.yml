@@ -1,9 +1,16 @@
 name: vuln-intel-prod
 
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "3"
+
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    logging: *default-logging
     # Docker default /dev/shm is 64MB — Postgres parallel/hash ops hit ENOSPC (code 53100).
     shm_size: "256mb"
     command:
@@ -35,6 +42,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    logging: *default-logging
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
@@ -47,6 +55,7 @@ services:
   rabbitmq:
     image: rabbitmq:3-management-alpine
     restart: unless-stopped
+    logging: *default-logging
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:?set RABBITMQ_DEFAULT_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:?set RABBITMQ_DEFAULT_PASS}
@@ -68,6 +77,7 @@ services:
         PLATFORM_GIT_BRANCH: ${PLATFORM_GIT_BRANCH:-}
         PLATFORM_GIT_TAG: ${PLATFORM_GIT_TAG:-}
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - path: ${APP_ENV_FILE:-../.env.production}
         required: false
@@ -120,6 +130,7 @@ services:
       context: ..
       dockerfile: apps/web/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - path: ${APP_ENV_FILE:-../.env.production}
         required: false
@@ -144,6 +155,7 @@ services:
     build:
       context: ./tls-proxy
     restart: unless-stopped
+    logging: *default-logging
     environment:
       TLS_CERTS_DIR: /certs
     volumes:
@@ -171,6 +183,7 @@ services:
       context: ..
       dockerfile: apps/ingest/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
     env_file:
       - path: ${APP_ENV_FILE:-../.env.production}
         required: false
@@ -192,6 +205,7 @@ services:
       context: ./translate-proxy
     image: vuln-intel-translate-proxy:local
     restart: unless-stopped
+    logging: *default-logging
     expose:
       - "5000"
     environment:
@@ -215,6 +229,7 @@ services:
     # Exit 0 when both workers idle (inline defaults); do not loop-restart.
     # Keep process: AI_KEEP_IDLE_PROCESS=true. Crash (exit≠0) still restarts.
     restart: on-failure
+    logging: *default-logging
     env_file:
       - path: ${APP_ENV_FILE:-../.env.production}
         required: false

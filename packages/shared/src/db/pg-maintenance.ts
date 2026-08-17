@@ -16,6 +16,8 @@ export type PgMaintenanceResult = {
     idempotencyKey: number;
     refreshToken: number;
     enrichmentAi: number;
+    enrichmentBdu: number;
+    epssHistory: number;
   };
   vacuumed: string[];
   dryRun: boolean;
@@ -29,6 +31,10 @@ export type PgMaintenanceOptions = {
   auditRetentionDays?: number;
   /** Keep latest N enrichment_ai rows per cve_id (default 2). */
   enrichmentKeepPerCve?: number;
+  /** Keep latest N enrichment_bdu rows per bdu_id (default 2). */
+  enrichmentKeepPerBdu?: number;
+  /** Keep epss_score_history newer than this many days (default 120; spike uses 7d). */
+  epssHistoryRetentionDays?: number;
   /** Delete revoked/expired refresh tokens older than this many days (default 14). */
   refreshTokenRetentionDays?: number;
   /** Run VACUUM (ANALYZE) on hot tables (default true). */
@@ -41,6 +47,8 @@ const HOT_TABLES = [
   "idempotency_key",
   "refresh_token",
   "enrichment_ai",
+  "enrichment_bdu",
+  "epss_score_history",
   "risk_score",
   "cve",
   "epss_score"
@@ -58,6 +66,8 @@ export async function runPgMaintenance(
   const dryRun = opts.dryRun === true;
   const auditDays = clampInt(Number(opts.auditRetentionDays ?? 90), 7, 3650, 90);
   const enrichKeep = clampInt(Number(opts.enrichmentKeepPerCve ?? 2), 1, 20, 2);
+  const enrichBduKeep = clampInt(Number(opts.enrichmentKeepPerBdu ?? 2), 1, 20, 2);
+  const epssHistDays = clampInt(Number(opts.epssHistoryRetentionDays ?? 120), 14, 3650, 120);
   const refreshDays = clampInt(Number(opts.refreshTokenRetentionDays ?? 14), 1, 365, 14);
   const doVacuum = opts.vacuum !== false;
   const log = opts.log ?? (() => undefined);
@@ -67,7 +77,9 @@ export async function runPgMaintenance(
     auditLog: 0,
     idempotencyKey: 0,
     refreshToken: 0,
-    enrichmentAi: 0
+    enrichmentAi: 0,
+    enrichmentBdu: 0,
+    epssHistory: 0
   };
 
   // --- audit_log ---
@@ -181,6 +193,70 @@ export async function runPgMaintenance(
         pruned.enrichmentAi = del.rowCount ?? n;
       } else {
         pruned.enrichmentAi = n;
+      }
+    }
+  }
+
+  // --- enrichment_bdu history (keep latest N per BDU) ---
+  {
+    const countR = await db.query(
+      `SELECT COUNT(*)::text AS n
+         FROM (
+           SELECT id
+             FROM (
+               SELECT id,
+                      row_number() OVER (PARTITION BY bdu_id ORDER BY created_at DESC NULLS LAST) AS rn
+                 FROM enrichment_bdu
+             ) t
+            WHERE rn > $1
+         ) x`,
+      [enrichBduKeep]
+    );
+    const n = Number(countR.rows[0]?.n ?? 0);
+    if (n > 0) {
+      log(`[pg-maint] enrichment_bdu old versions=${n} keepPerBdu=${enrichBduKeep} dryRun=${dryRun}`);
+      if (!dryRun) {
+        const del = await db.query(
+          `DELETE FROM enrichment_bdu e
+            USING (
+              SELECT id
+                FROM (
+                  SELECT id,
+                         row_number() OVER (PARTITION BY bdu_id ORDER BY created_at DESC NULLS LAST) AS rn
+                    FROM enrichment_bdu
+                ) t
+               WHERE rn > $1
+            ) d
+            WHERE e.id = d.id`,
+          [enrichBduKeep]
+        );
+        pruned.enrichmentBdu = del.rowCount ?? n;
+      } else {
+        pruned.enrichmentBdu = n;
+      }
+    }
+  }
+
+  // --- epss_score_history (spike uses ~7d; keep a longer window) ---
+  {
+    const countR = await db.query(
+      `SELECT COUNT(*)::text AS n
+         FROM epss_score_history
+        WHERE scored_at < CURRENT_DATE - ($1::text || ' days')::interval`,
+      [String(epssHistDays)]
+    );
+    const n = Number(countR.rows[0]?.n ?? 0);
+    if (n > 0) {
+      log(`[pg-maint] epss_score_history prune candidates=${n} retentionDays=${epssHistDays} dryRun=${dryRun}`);
+      if (!dryRun) {
+        const del = await db.query(
+          `DELETE FROM epss_score_history
+            WHERE scored_at < CURRENT_DATE - ($1::text || ' days')::interval`,
+          [String(epssHistDays)]
+        );
+        pruned.epssHistory = del.rowCount ?? n;
+      } else {
+        pruned.epssHistory = n;
       }
     }
   }

@@ -37,11 +37,13 @@ export class PlatformUpdateController {
     body?: {
       keepBackups?: number;
       pruneDocker?: boolean;
+      mode?: "backups" | "machine";
     }
   ) {
     return this.updates.cleanupStorage({
       keepBackups: typeof body?.keepBackups === "number" ? body.keepBackups : undefined,
-      pruneDocker: body?.pruneDocker === true
+      pruneDocker: body?.pruneDocker === true,
+      mode: body?.mode === "machine" ? "machine" : "backups"
     });
   }
 }

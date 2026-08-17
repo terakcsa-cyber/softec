@@ -1,5 +1,5 @@
 import { Module } from "@nestjs/common";
-import { APP_GUARD } from "@nestjs/core";
+import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
 import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard.js";
 import { RolesGuard } from "../auth/roles.guard.js";
@@ -25,6 +25,9 @@ import { QueueModule } from "./queue.module.js";
 import { BduEnrichRunnerService } from "../services/bdu-enrich-runner.service.js";
 import { CveEnrichRunnerService } from "../services/cve-enrich-runner.service.js";
 import { RedisEnrichCacheService } from "../services/redis-enrich-cache.service.js";
+import { ReadCacheService } from "../services/read-cache.service.js";
+import { DataRevisionService } from "../services/data-revision.service.js";
+import { ReadCacheInterceptor } from "../services/read-cache.interceptor.js";
 import { SchemaService } from "../services/schema.service.js";
 import { CveVendorIndexService } from "../services/cve-vendor-index.service.js";
 import { CveNvdImportService } from "../services/cve-nvd-import.service.js";
@@ -39,6 +42,7 @@ import { ReconciliationService } from "../services/reconciliation.service.js";
 import { OpsRepairService } from "../services/ops-repair.service.js";
 import { TextEngineBgSweepService } from "../services/text-engine-bg-sweep.service.js";
 import { PgMaintenanceService } from "../services/pg-maintenance.service.js";
+import { DiskHousekeepingService } from "../services/disk-housekeeping.service.js";
 import { VocController } from "../routes/voc.controller.js";
 import { IntegrationSettingsService } from "../services/integration-settings.service.js";
 import { WebTlsService } from "../services/web-tls.service.js";
@@ -83,11 +87,14 @@ import { MetricsPollerService } from "../services/metrics-poller.service.js";
     OpsRepairService,
     TextEngineBgSweepService,
     PgMaintenanceService,
+    DiskHousekeepingService,
     MetricsPollerService,
     FstecBulletinService,
     MpvmSyncService,
     TelegramPostService,
     RedisEnrichCacheService,
+    ReadCacheService,
+    DataRevisionService,
     IntegrationSettingsService,
     WebTlsService,
     LocalHttpsProxyService,
@@ -107,7 +114,8 @@ import { MetricsPollerService } from "../services/metrics-poller.service.js";
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
-    { provide: APP_GUARD, useClass: WriteRoleGuard }
+    { provide: APP_GUARD, useClass: WriteRoleGuard },
+    { provide: APP_INTERCEPTOR, useClass: ReadCacheInterceptor }
   ]
 })
 export class AppModule {}

@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from "@nestjs/common";
-import { runPgMaintenance } from "@vuln-intel/shared";
+import { runPgMaintenance, type PgMaintenanceResult } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
 
 /**
@@ -34,20 +34,27 @@ export class PgMaintenanceService implements OnModuleInit, OnModuleDestroy {
     if (this.timer) clearInterval(this.timer);
   }
 
+  async runNow(): Promise<PgMaintenanceResult> {
+    return runPgMaintenance(this.db, {
+      auditRetentionDays: Number(process.env.AUDIT_LOG_RETENTION_DAYS ?? 90),
+      enrichmentKeepPerCve: Number(process.env.ENRICHMENT_AI_KEEP_PER_CVE ?? 2),
+      enrichmentKeepPerBdu: Number(process.env.ENRICHMENT_BDU_KEEP_PER_ID ?? 2),
+      epssHistoryRetentionDays: Number(process.env.EPSS_HISTORY_RETENTION_DAYS ?? 120),
+      refreshTokenRetentionDays: Number(process.env.REFRESH_TOKEN_RETENTION_DAYS ?? 14),
+      vacuum: process.env.PG_MAINTENANCE_VACUUM !== "false",
+      log: (msg) => this.logger.log(msg)
+    });
+  }
+
   private async tick() {
     if (this.running) return;
     this.running = true;
     try {
-      const result = await runPgMaintenance(this.db, {
-        auditRetentionDays: Number(process.env.AUDIT_LOG_RETENTION_DAYS ?? 90),
-        enrichmentKeepPerCve: Number(process.env.ENRICHMENT_AI_KEEP_PER_CVE ?? 2),
-        refreshTokenRetentionDays: Number(process.env.REFRESH_TOKEN_RETENTION_DAYS ?? 14),
-        vacuum: process.env.PG_MAINTENANCE_VACUUM !== "false",
-        log: (msg) => this.logger.log(msg)
-      });
+      const result = await this.runNow();
       this.logger.log(
         `done pruned audit=${result.pruned.auditLog} idem=${result.pruned.idempotencyKey} ` +
           `refresh=${result.pruned.refreshToken} enrich=${result.pruned.enrichmentAi} ` +
+          `enrichBdu=${result.pruned.enrichmentBdu} epssHist=${result.pruned.epssHistory} ` +
           `vacuum=${result.vacuumed.length}`
       );
       try {

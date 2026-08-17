@@ -6,10 +6,12 @@ import {
   ServiceUnavailableException
 } from "@nestjs/common";
 import { spawn } from "node:child_process";
-import { access, mkdir, readFile, readdir, stat, statfs, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, stat, statfs, truncate, unlink, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { constants as fsConstants } from "node:fs";
+import { pruneBduStaging } from "@vuln-intel/shared";
+import { PgMaintenanceService } from "./pg-maintenance.service.js";
 
 export type UpdateCommitInfo = {
   sha: string;
@@ -107,12 +109,20 @@ export type PlatformStorageStatus = {
   notesRu: string[];
 };
 
+export type CleanupStep = {
+  id: string;
+  ok: boolean;
+  detail: string;
+};
+
 export type PlatformCleanupResult = {
+  mode: "backups" | "daily" | "machine";
   deleted: Array<{ name: string; sizeBytes: number }>;
   kept: Array<{ name: string; sizeBytes: number }>;
   freedBytes: number;
   dockerPruned: boolean;
   dockerPruneLog: string | null;
+  steps: CleanupStep[];
   storage: PlatformStorageStatus;
 };
 
@@ -133,6 +143,8 @@ export class PlatformUpdateService {
   private lastCheck: PlatformUpdateStatus | null = null;
   private applyLockUntil = 0;
 
+  constructor(private readonly pgMaint: PgMaintenanceService) {}
+
   async getStatus(): Promise<PlatformUpdateStatus> {
     if (this.lastCheck) {
       const job = await this.readJob();
@@ -152,9 +164,10 @@ export class PlatformUpdateService {
     const cfg = this.config();
     const keepDefault = this.backupKeepDefault();
     const notesRu: string[] = [
-      "Очистка удаляет только старые *.sql.gz в backups/, оставляя N свежих.",
-      "Volumes Postgres/Redis/RabbitMQ и файлы .env никогда не трогаются.",
-      "Опциональный Docker prune — только dangling images и build cache, без -a и без volumes."
+      "«Очистить старое» удаляет только лишние *.sql.gz в backups/, оставляя N свежих.",
+      "«Очистить тачку» дополнительно снимает неиспользуемые Docker-образы, builder cache, stopped containers, git gc, staging BDU и prune таблиц БД.",
+      "Раз в сутки API сам делает мягкую уборку: образы без контейнера старше 7 дней, builder cache, BDU staging. Логи контейнеров крутятся (20 МБ × 3).",
+      "Volumes Postgres/Redis/RabbitMQ и файлы .env никогда не трогаются. docker volume prune не вызывается."
     ];
 
     const mounts: DiskMountInfo[] = [];
@@ -222,13 +235,123 @@ export class PlatformUpdateService {
   async cleanupStorage(opts?: {
     keepBackups?: number;
     pruneDocker?: boolean;
+    mode?: "backups" | "machine";
   }): Promise<PlatformCleanupResult> {
+    const mode = opts?.mode === "machine" ? "machine" : "backups";
     const cfg = this.config();
     if (!cfg.repoDir) {
       throw new BadRequestException("Нет PLATFORM_REPO_DIR / git checkout — очистка backups недоступна.");
     }
-    const backupsDir = join(cfg.repoDir, "backups");
-    const keep = Math.max(1, Math.min(50, Math.floor(opts?.keepBackups ?? this.backupKeepDefault())));
+    const steps: CleanupStep[] = [];
+    const backups = await this.pruneBackupFiles(cfg.repoDir, opts?.keepBackups);
+    steps.push({
+      id: "backups",
+      ok: true,
+      detail: backups.deleted.length
+        ? `удалено ${backups.deleted.length} (−${backups.freedBytes} B), оставлено ${backups.kept.length}`
+        : `старых бэкапов нет, оставлено ${backups.kept.length}`
+    });
+
+    let dockerPruned = false;
+    let dockerPruneLog: string | null = null;
+    const wantDocker = mode === "machine" || opts?.pruneDocker === true;
+    if (wantDocker) {
+      const docker = await this.pruneDockerLayer({
+        level: mode === "machine" ? "machine" : "dangling"
+      });
+      dockerPruned = docker.ok;
+      dockerPruneLog = docker.log;
+      steps.push({ id: "docker", ok: docker.ok, detail: docker.log.slice(0, 2000) });
+    }
+
+    if (mode === "machine") {
+      const git = await this.gitGc({ aggressive: true });
+      steps.push({ id: "git", ok: git.ok, detail: git.detail });
+      try {
+        await pruneBduStaging();
+        steps.push({ id: "bdu-staging", ok: true, detail: "временные файлы BDU удалены" });
+      } catch (err) {
+        steps.push({
+          id: "bdu-staging",
+          ok: false,
+          detail: err instanceof Error ? err.message : String(err)
+        });
+      }
+      try {
+        const pg = await this.pgMaint.runNow();
+        steps.push({
+          id: "postgres",
+          ok: true,
+          detail:
+            `prune audit=${pg.pruned.auditLog} enrich=${pg.pruned.enrichmentAi} ` +
+            `bdu=${pg.pruned.enrichmentBdu} epssHist=${pg.pruned.epssHistory} vacuum=${pg.vacuumed.length}`
+        });
+      } catch (err) {
+        steps.push({
+          id: "postgres",
+          ok: false,
+          detail: err instanceof Error ? err.message : String(err)
+        });
+      }
+    }
+
+    const storage = await this.getStorage();
+    return {
+      mode,
+      deleted: backups.deleted,
+      kept: backups.kept,
+      freedBytes: backups.freedBytes,
+      dockerPruned,
+      dockerPruneLog,
+      steps,
+      storage
+    };
+  }
+
+  /** Conservative daily pass: unused images ≥7d, builder cache, staging, git --auto. No backup deletes. */
+  async housekeepDaily(): Promise<PlatformCleanupResult> {
+    const steps: CleanupStep[] = [];
+    const job = await this.readJob();
+    const updateBusy = Boolean(job && !["idle", "done", "failed"].includes(job.phase));
+    const docker = updateBusy
+      ? { ok: true, log: `пропуск Docker prune: идёт обновление (${job?.phase})` }
+      : await this.pruneDockerLayer({ level: "daily" });
+    steps.push({ id: "docker", ok: docker.ok, detail: docker.log.slice(0, 2000) });
+    const git = await this.gitGc({ aggressive: false });
+    steps.push({ id: "git", ok: git.ok, detail: git.detail });
+    try {
+      await pruneBduStaging();
+      steps.push({ id: "bdu-staging", ok: true, detail: "временные файлы BDU удалены" });
+    } catch (err) {
+      steps.push({
+        id: "bdu-staging",
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err)
+      });
+    }
+    const storage = await this.getStorage();
+    return {
+      mode: "daily",
+      deleted: [],
+      kept: storage.backups.files.map((f) => ({ name: f.name, sizeBytes: f.sizeBytes })),
+      freedBytes: 0,
+      dockerPruned: docker.ok,
+      dockerPruneLog: docker.log,
+      steps,
+      storage
+    };
+  }
+
+  private async pruneBackupFiles(
+    repoDir: string,
+    keepBackups?: number
+  ): Promise<{
+    deleted: Array<{ name: string; sizeBytes: number }>;
+    kept: Array<{ name: string; sizeBytes: number }>;
+    freedBytes: number;
+  }> {
+    const backupsDir = join(repoDir, "backups");
+    const keep = Math.max(1, Math.min(50, Math.floor(keepBackups ?? this.backupKeepDefault())));
     const files = await this.listBackupFiles(backupsDir);
     const keepSet = new Set(files.slice(0, keep).map((f) => f.name));
     const toDelete = files.filter((f) => !keepSet.has(f.name));
@@ -236,7 +359,6 @@ export class PlatformUpdateService {
     const deleted: Array<{ name: string; sizeBytes: number }> = [];
     for (const f of toDelete) {
       const full = join(backupsDir, f.name);
-      // Safety: only basename *.sql.gz inside backups/
       if (f.name.includes("/") || f.name.includes("\\") || f.name.includes("..")) continue;
       if (!/\.sql\.gz$/i.test(f.name)) continue;
       try {
@@ -246,41 +368,93 @@ export class PlatformUpdateService {
         this.log.warn(`Failed to delete backup ${f.name}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-
-    let dockerPruned = false;
-    let dockerPruneLog: string | null = null;
-    if (opts?.pruneDocker) {
-      const dockerOk = await this.commandOk("docker", ["version"]);
-      if (!dockerOk) {
-        throw new BadRequestException(
-          "Docker CLI недоступен. Подключите infra/docker-compose.update-helper.yml для prune."
-        );
-      }
-      const parts: string[] = [];
-      // No `docker system prune -a`, no volumes — only dangling + builder cache.
-      const img = await this.execCapture("docker", ["image", "prune", "-f"], {
-        allowFail: true,
-        timeoutMs: 120_000
-      });
-      if (img?.trim()) parts.push(img.trim());
-      const builder = await this.execCapture("docker", ["builder", "prune", "-f"], {
-        allowFail: true,
-        timeoutMs: 180_000
-      });
-      if (builder?.trim()) parts.push(builder.trim());
-      dockerPruned = true;
-      dockerPruneLog = parts.join("\n") || "Docker prune выполнен (dangling images + builder cache).";
-    }
-
-    const storage = await this.getStorage();
     return {
       deleted,
       kept: files.filter((f) => keepSet.has(f.name)).map((f) => ({ name: f.name, sizeBytes: f.sizeBytes })),
-      freedBytes: deleted.reduce((n, f) => n + f.sizeBytes, 0),
-      dockerPruned,
-      dockerPruneLog,
-      storage
+      freedBytes: deleted.reduce((n, f) => n + f.sizeBytes, 0)
     };
+  }
+
+  /**
+   * Never: volume prune, system prune --volumes, compose down -v.
+   * dangling: unused dangling images + builder cache (old UI checkbox).
+   * daily: unused images older than 7 days + builder cache older than 3 days.
+   * machine: all unused images now (running containers keep their images).
+   */
+  private async pruneDockerLayer(opts: {
+    level: "dangling" | "daily" | "machine";
+  }): Promise<{ ok: boolean; log: string }> {
+    const dockerOk = await this.commandOk("docker", ["version"]);
+    if (!dockerOk) {
+      return { ok: false, log: "Docker CLI недоступен. Подключите docker.sock / update-helper." };
+    }
+    const parts: string[] = [];
+    const run = async (args: string[], timeoutMs: number) => {
+      const out = await this.execCapture("docker", args, { allowFail: true, timeoutMs });
+      if (out?.trim()) parts.push(out.trim());
+    };
+    if (opts.level !== "dangling") {
+      await run(["container", "prune", "-f"], 60_000);
+    }
+    if (opts.level === "machine") {
+      await run(["image", "prune", "-af"], 360_000);
+      await run(["builder", "prune", "-af"], 360_000);
+      await this.truncateDockerJsonLogs(50 * 1024 * 1024);
+      await run(["network", "prune", "-f"], 60_000);
+    } else if (opts.level === "daily") {
+      await run(["image", "prune", "-af", "--filter", "until=168h"], 180_000);
+      await run(["builder", "prune", "-af", "--filter", "until=72h"], 180_000);
+      await this.truncateDockerJsonLogs(100 * 1024 * 1024);
+      await run(["network", "prune", "-f"], 60_000);
+    } else {
+      await run(["image", "prune", "-f"], 120_000);
+      await run(["builder", "prune", "-f"], 180_000);
+    }
+    const df = await this.execCapture("docker", ["system", "df"], { allowFail: true, timeoutMs: 20_000 });
+    if (df?.trim()) parts.push(df.trim());
+    const fallback =
+      opts.level === "machine"
+        ? "Docker: unused images + builder + stopped containers (volumes не тронуты)."
+        : opts.level === "daily"
+          ? "Docker: stale unused images + builder cache (volumes не тронуты)."
+          : "Docker prune выполнен (dangling images + builder cache).";
+    return { ok: true, log: parts.join("\n") || fallback };
+  }
+
+  private async gitGc(opts: { aggressive: boolean }): Promise<{ ok: boolean; detail: string }> {
+    const repoDir = this.config().repoDir;
+    if (!repoDir) return { ok: true, detail: "нет checkout — git gc пропущен" };
+    const args = opts.aggressive
+      ? ["-C", repoDir, "gc", "--prune=now", "--quiet"]
+      : ["-C", repoDir, "gc", "--auto", "--quiet"];
+    const out = await this.execCapture("git", args, { allowFail: true, timeoutMs: 180_000 });
+    if (out == null) return { ok: false, detail: "git gc не удался" };
+    return { ok: true, detail: opts.aggressive ? "git gc --prune=now" : "git gc --auto" };
+  }
+
+  private async truncateDockerJsonLogs(maxBytes: number): Promise<void> {
+    const idsOut = await this.execCapture("docker", ["ps", "-aq"], { allowFail: true, timeoutMs: 15_000 });
+    if (!idsOut?.trim()) return;
+    const ids = idsOut
+      .split(/\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const id of ids) {
+      const path = await this.execCapture("docker", ["inspect", "--format", "{{.LogPath}}", id], {
+        allowFail: true,
+        timeoutMs: 8_000
+      });
+      const logPath = path?.trim();
+      if (!logPath) continue;
+      try {
+        const st = await stat(logPath);
+        if (!st.isFile() || st.size <= maxBytes) continue;
+        await truncate(logPath, 0);
+        this.log.log(`truncated docker json log ${id} (${st.size} bytes)`);
+      } catch {
+        // Host path is usually invisible from the API container — skip.
+      }
+    }
   }
 
   private backupKeepDefault(): number {

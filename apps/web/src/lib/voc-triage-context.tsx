@@ -52,8 +52,7 @@ export function VocTriageProvider({ children }: { children: ReactNode }) {
   const triageQuery = useQuery({
     queryKey: ["voc", "triage", "all"],
     queryFn: () => fetchVocTriageAll(600),
-    staleTime: 25_000,
-    refetchInterval: 90_000
+    staleTime: 25_000
   });
 
   const statusMap = useMemo(() => rowsToMap(triageQuery.data ?? []), [triageQuery.data]);

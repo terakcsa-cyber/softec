@@ -242,13 +242,20 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 | `PG_MAINTENANCE` | true | Периодический prune + `VACUUM ANALYZE` в API |
 | `AUDIT_LOG_RETENTION_DAYS` | 90 | Удалять старый `audit_log` |
 | `ENRICHMENT_AI_KEEP_PER_CVE` | 2 | Сколько версий `enrichment_ai` оставлять на CVE |
+| `ENRICHMENT_BDU_KEEP_PER_ID` | 2 | Сколько версий `enrichment_bdu` оставлять на BDU |
+| `EPSS_HISTORY_RETENTION_DAYS` | 120 | История EPSS (spike смотрит ~7 дней) |
 | `REFRESH_TOKEN_RETENTION_DAYS` | 14 | Удалять revoked/expired refresh tokens |
+| `DISK_HOUSEKEEPING` | true | Ежедневная уборка Docker/git/BDU staging (без volumes) |
 | `BACKLOG_SCORE_SWEEP_INTERVAL_MS` | 12000 | Интервал backlog score |
 | `AI_SCORE_SKIP_FRESH_HOURS` | 2 | Пропуск дублей NVD score (только queue path) |
 | `DLQ_BOOT_RETRY` | false | Авто-replay DLQ при старте (prod: false) |
 | `DLQ_BOOT_RETRY_LIMIT` | 200 | Лимит на очередь |
 
 > **`risk_score`:** по умолчанию **inline** (без Rabbit). Очередь `ai.score` — только `AI_SCORE_VIA_QUEUE=true`. Отключение расчёта: `AI_SCORE_ENABLED=false`. Readiness **не** считает `dlq.ai.score`, пока scoring inline/выключен.
+
+### Dashboard cache
+
+Redis (`REDIS_URL`) уже есть для AI-enrich. API кеширует GET списков/сводок (CVE, BDU, VOC, Threat, FSTEC, задачи, advisory) с ключом по **ревизии БД**: пока watermark не сдвинулся, Postgres не трогаем. UI раз в ~12с спрашивает только `GET /api/stats/revision` и refetch полного payload, если слайс (cves/bdu/voc/…) реально изменился. Исключения: поиск `?q=`, Settings/Health, внешние Telegram/ФСТЭК RSS (~60с). F5 рисует последний snapshot из sessionStorage. `API_READ_CACHE=false` выключает серверный кеш.
 
 ### Text engine / LLM
 
@@ -554,10 +561,27 @@ FSTEC_FEED_SOURCE=tg   # или rss
 - истёкшие `idempotency_key`
 - revoked/expired `refresh_token` старше `REFRESH_TOKEN_RETENTION_DAYS` (14)
 - лишние версии `enrichment_ai` (оставить `ENRICHMENT_AI_KEEP_PER_CVE`, default 2)
+- лишние версии `enrichment_bdu` (оставить `ENRICHMENT_BDU_KEEP_PER_ID`, default 2)
+- `epss_score_history` старше `EPSS_HISTORY_RETENTION_DAYS` (120)
 
 Ручной прогон: `pnpm pg:maint`. Отключить: `PG_MAINTENANCE=false`.
 
 В compose для Postgres включены более частые autovacuum scale factors + `wal_compression=on` (нужен recreate контейнера postgres при деплое).
+
+### Диск хоста / Docker
+
+Под капотом API раз в сутки (через ~5 мин после старта) делает **мягкую** уборку: stopped containers, неиспользуемые образы старше 7 дней, builder cache старше 3 дней, `git gc --auto`, временные файлы BDU. **Никогда** `docker volume prune` / `compose down -v` / `.env`.
+
+Логи контейнеров в prod/staging compose: `json-file`, `max-size: 20m`, `max-file: 3` (вступает после recreate при деплое).
+
+В UI **Настройки → Обновления**:
+
+- **Очистить старое** — лишние `backups/*.sql.gz` (оставить N свежих) и опционально dangling images/build cache.
+- **Очистить тачку** — то же плюс все **неиспользуемые** образы (запущенные контейнеры остаются), полный builder cache, сети, git gc, staging, prune+VACUUM БД.
+
+С хоста: `pnpm disk:clean` или `sh scripts/host-disk-cleanup.sh --mode machine` (как root ещё vacuum journald и truncate огромных json-логов, если путь виден).
+
+Отключить автоуборку: `DISK_HOUSEKEEPING=false`.
 
 ### Postgres dump
 
@@ -597,7 +621,7 @@ gunzip -c backup.sql.gz | docker compose --env-file .env.production -f infra/doc
 
 1. **Проверить обновления** — сверка текущего SHA с git remote (`origin` / `PLATFORM_UPDATE_REPO_URL`).
 2. При наличии коммитов ahead — **Применить обновление** (включено по умолчанию в prod compose).
-3. **Диск и бэкапы** — прогресс-бар + **Очистить старое** (лишние `backups/*.sql.gz`, опционально dangling Docker images/build cache, без volumes).
+3. **Диск и бэкапы** — прогресс-бар, **Очистить старое** (лишние `backups/*.sql.gz`, опционально dangling Docker images/build cache) и **Очистить тачку** (unused images, builder, stopped containers, git gc, BDU staging, prune БД). Volumes и `.env` не трогаются.
 
 Безопасность apply:
 

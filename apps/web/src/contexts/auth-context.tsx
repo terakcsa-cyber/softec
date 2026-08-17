@@ -17,6 +17,7 @@ import {
 } from "@/lib/auth-storage";
 import { AUTH_BFF_PREFIX } from "@/lib/auth-bff";
 import { refreshSession } from "@/lib/api-fetch";
+import { clearPersistedQueryCache } from "@/lib/query-persist";
 
 export type AuthUser = {
   id: string;
@@ -110,6 +111,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     if (res.status === 401 || res.status === 403) {
       clearStoredTokens();
+      clearPersistedQueryCache();
       setUser(null);
       return;
     }
@@ -305,6 +307,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
     }
     clearStoredTokens();
+    clearPersistedQueryCache();
     setUser(null);
   }, []);
 

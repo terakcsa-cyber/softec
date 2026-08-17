@@ -20,6 +20,7 @@
     "vulncheck:kev-ingest": "node --env-file=.env scripts/vulncheck-kev-ingest-now.mjs",
     "epss:sync": "node --env-file=.env scripts/epss-sync-now.mjs",
     "pg:maint": "node --env-file=.env scripts/pg-maintenance.mjs",
+    "disk:clean": "sh scripts/host-disk-cleanup.sh --mode machine",
     "rescore:hot24": "node --env-file=.env scripts/rescore-hot24-now.mjs",
     "bdu:sync": "node --env-file=.env scripts/bdu-sync-now.mjs",
     "ai:bulk-enrich": "node --env-file=.env scripts/ai-bulk-enrich.mjs",

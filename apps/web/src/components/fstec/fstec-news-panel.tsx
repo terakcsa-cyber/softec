@@ -58,8 +58,8 @@ export function FstecNewsPanel({ onOpenCve, onOpenBdu }: FstecNewsPanelProps) {
       }
       return body;
     },
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
     refetchIntervalInBackground: true
   });
 

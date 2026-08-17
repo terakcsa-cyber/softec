@@ -13,7 +13,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
-import { useLivePollInterval } from "@/lib/live-refresh";
 import {
   EXPLOIT_RADAR_FILTER_LABELS,
   EXPLOIT_SIGNAL_TYPES,
@@ -262,7 +261,6 @@ export function ThreatFeedPanel({
   onOpenCve?: (cveId: string) => void;
   onFilter?: (filter: ExploitRadarFilter) => void;
 }) {
-  const pollMs = useLivePollInterval();
   const queryClient = useQueryClient();
   const [offset, setOffset] = useState(0);
   const [windowPreset, setWindowPreset] = useState<WindowPreset>("168");
@@ -351,8 +349,6 @@ export function ThreatFeedPanel({
       return (await res.json()) as ThreatFeedResponse;
     },
     staleTime: 15_000,
-    refetchInterval: pollMs,
-    refetchIntervalInBackground: false
   });
 
   const data = feedQuery.data;

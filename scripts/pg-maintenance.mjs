@@ -15,6 +15,8 @@ async function main() {
     const result = await runPgMaintenance(pool, {
       auditRetentionDays: Number(process.env.AUDIT_LOG_RETENTION_DAYS ?? 90),
       enrichmentKeepPerCve: Number(process.env.ENRICHMENT_AI_KEEP_PER_CVE ?? 2),
+      enrichmentKeepPerBdu: Number(process.env.ENRICHMENT_BDU_KEEP_PER_ID ?? 2),
+      epssHistoryRetentionDays: Number(process.env.EPSS_HISTORY_RETENTION_DAYS ?? 120),
       refreshTokenRetentionDays: Number(process.env.REFRESH_TOKEN_RETENTION_DAYS ?? 14),
       vacuum: process.env.PG_MAINTENANCE_VACUUM !== "false",
       dryRun: process.env.PG_MAINTENANCE_DRY_RUN === "true",

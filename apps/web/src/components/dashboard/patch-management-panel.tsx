@@ -87,8 +87,8 @@ export function PatchManagementPanel({
       if (!res.ok) throw new Error(body.error ?? "feed");
       return body as PatchFeedResponse;
     },
-    staleTime: 30_000,
-    refetchInterval: 30_000,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
     refetchIntervalInBackground: true
   });
 

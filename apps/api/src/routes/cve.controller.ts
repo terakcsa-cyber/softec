@@ -167,6 +167,42 @@ export class CveController {
     @Query("hasPublicExploit") hasPublicExploitRaw?: string,
     @Query("newVckev7d") newVckev7dRaw?: string
   ) {
+    return this.listFromDb(
+      q,
+      limitRaw,
+      viewRaw,
+      sortRaw,
+      minCvssRaw,
+      minEpssRaw,
+      kevOnlyRaw,
+      vendorRaw,
+      productRaw,
+      vulnClassRaw,
+      vckevOnlyRaw,
+      epssSpikeRaw,
+      hasPocRaw,
+      hasPublicExploitRaw,
+      newVckev7dRaw
+    );
+  }
+
+  private async listFromDb(
+    q?: string,
+    limitRaw?: string,
+    viewRaw?: string,
+    sortRaw?: string,
+    minCvssRaw?: string,
+    minEpssRaw?: string,
+    kevOnlyRaw?: string,
+    vendorRaw?: string,
+    productRaw?: string,
+    vulnClassRaw?: string | string[],
+    vckevOnlyRaw?: string,
+    epssSpikeRaw?: string,
+    hasPocRaw?: string,
+    hasPublicExploitRaw?: string,
+    newVckev7dRaw?: string
+  ) {
     const limit = Math.max(1, Math.min(200, Number(limitRaw ?? 50)));
     const view = (viewRaw ?? "latest").toLowerCase();
     const sort = (sortRaw ?? (view === "critical" ? "rank" : "fresh")).toLowerCase();

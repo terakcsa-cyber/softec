@@ -4,7 +4,7 @@ import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "@/components/ui/cn";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { HardDrive, RefreshCw, Trash2 } from "lucide-react";
+import { HardDrive, RefreshCw, Sparkles, Trash2 } from "lucide-react";
 
 type UpdateCommit = {
   sha: string;
@@ -86,11 +86,13 @@ type StorageStatus = {
 };
 
 type CleanupResult = {
+  mode?: "backups" | "daily" | "machine";
   deleted: Array<{ name: string; sizeBytes: number }>;
   kept: Array<{ name: string; sizeBytes: number }>;
   freedBytes: number;
   dockerPruned: boolean;
   dockerPruneLog: string | null;
+  steps?: Array<{ id: string; ok: boolean; detail: string }>;
   storage: StorageStatus;
 };
 
@@ -225,13 +227,14 @@ export function PlatformUpdatePanel({ embedded = false }: { embedded?: boolean }
   });
 
   const cleanup = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (mode: "backups" | "machine") => {
       const res = await apiFetch("/api/settings/updates/cleanup", {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify({
+          mode,
           keepBackups: storageQ.data?.backups.keepDefault ?? 3,
-          pruneDocker
+          pruneDocker: mode === "machine" ? true : pruneDocker
         }),
         cache: "no-store"
       });
@@ -240,14 +243,30 @@ export function PlatformUpdatePanel({ embedded = false }: { embedded?: boolean }
     },
     onSuccess: async (data) => {
       setErr(null);
-      const parts = [
-        data.deleted.length
-          ? `Удалено бэкапов: ${data.deleted.length} (−${formatBytes(data.freedBytes)})`
-          : "Старых бэкапов для удаления нет",
-        `оставлено ${data.kept.length}`
-      ];
-      if (data.dockerPruned) parts.push("Docker prune выполнен");
-      setMsg(parts.join(" · "));
+      if (data.mode === "machine") {
+        const okSteps = (data.steps ?? []).filter((s) => s.ok).length;
+        const failed = (data.steps ?? []).filter((s) => !s.ok);
+        const total = data.steps?.length ?? 0;
+        const parts = [
+          failed.length
+            ? `Уборка с ошибками: ${failed.map((s) => s.id).join(", ")} (${okSteps}/${total})`
+            : `Тачка почищена (${okSteps}/${total} шагов)`,
+          data.deleted.length
+            ? `бэкапы −${formatBytes(data.freedBytes)}`
+            : "старых бэкапов не было"
+        ];
+        if (data.dockerPruned) parts.push("Docker unused images сняты");
+        setMsg(parts.join(" · "));
+      } else {
+        const parts = [
+          data.deleted.length
+            ? `Удалено бэкапов: ${data.deleted.length} (−${formatBytes(data.freedBytes)})`
+            : "Старых бэкапов для удаления нет",
+          `оставлено ${data.kept.length}`
+        ];
+        if (data.dockerPruned) parts.push("Docker prune выполнен");
+        setMsg(parts.join(" · "));
+      }
       await qc.setQueryData(["settings", "updates", "storage"], data.storage);
       await qc.invalidateQueries({ queryKey: ["settings", "updates", "storage"] });
     },
@@ -429,7 +448,7 @@ export function PlatformUpdatePanel({ embedded = false }: { embedded?: boolean }
                 <p className="mt-1 text-xs text-muted">
                   Место на ФС без SSH. Очистка удаляет только старые dump’ы в{" "}
                   <code className="font-mono">backups/</code>, оставляя{" "}
-                  {storage?.backups.keepDefault ?? 3} свежих.
+                  {storage?.backups.keepDefault ?? 3} свежих. Вторая кнопка — полная безопасная уборка Docker/git/БД.
                 </p>
               </div>
               <button
@@ -540,14 +559,52 @@ export function PlatformUpdatePanel({ embedded = false }: { embedded?: boolean }
                     ? `Удалить старые бэкапы (оставить ${keep} свежих) и выполнить Docker prune без volumes?`
                     : `Удалить старые SQL-бэкапы в backups/, оставив ${keep} самых свежих? Volumes и .env не трогаются.`;
                   if (!window.confirm(confirmMsg)) return;
-                  cleanup.mutate();
+                  cleanup.mutate("backups");
                 }}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-warn/35 bg-warn/10 px-3 py-2 text-sm font-medium text-fg/90 transition hover:bg-warn/15 disabled:opacity-50"
               >
                 <Trash2 className="h-4 w-4" aria-hidden />
                 Очистить старое
               </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  const keep = storage?.backups.keepDefault ?? 3;
+                  if (
+                    !window.confirm(
+                      `Полная уборка тачки:\n` +
+                        `• старые SQL-бэкапы (оставить ${keep} свежих)\n` +
+                        `• неиспользуемые Docker-образы (запущенные контейнеры остаются)\n` +
+                        `• builder cache, stopped containers, висячие сети\n` +
+                        `• git gc, временные BDU-файлы, prune таблиц БД + VACUUM\n\n` +
+                        `НЕ удаляются: volumes Postgres/Redis/RabbitMQ, .env, данные каталога.\n\nПродолжить?`
+                    )
+                  ) {
+                    return;
+                  }
+                  cleanup.mutate("machine");
+                }}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-accent/35 bg-accent/10 px-3 py-2 text-sm font-medium text-fg/90 transition hover:bg-accent/15 disabled:opacity-50"
+              >
+                <Sparkles className="h-4 w-4" aria-hidden />
+                Очистить тачку
+              </button>
             </div>
+            {cleanup.data?.steps && cleanup.data.steps.length > 0 ? (
+              <ul className="mt-3 max-h-36 space-y-1 overflow-y-auto rounded-lg border border-border/70 bg-slate-50/60 px-2.5 py-2 text-[11px] dark:bg-black/20">
+                {cleanup.data.steps.map((s) => (
+                  <li key={s.id} className="flex items-start gap-2">
+                    <span className={s.ok ? "text-ok" : "text-danger"}>{s.ok ? "ok" : "fail"}</span>
+                    <span className="min-w-0">
+                      <span className="font-mono text-fg/80">{s.id}</span>
+                      <span className="mx-1 text-muted">·</span>
+                      <span className="whitespace-pre-wrap break-words text-muted">{s.detail}</span>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </div>
 
           <div className="rounded-xl border border-slate-200 px-4 py-3 dark:border-border">

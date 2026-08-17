@@ -19,6 +19,7 @@ import { DbService } from "../services/db.service.js";
 import { QueueService } from "../services/queue.service.js";
 import { IntegrationSettingsService } from "../services/integration-settings.service.js";
 import { ThreatFeedService } from "../services/threat-feed.service.js";
+import { DataRevisionService } from "../services/data-revision.service.js";
 import { ThreatDigestPdfService } from "../services/threat-digest-pdf.service.js";
 import { ThreatIntelRefreshService } from "../services/threat-intel-refresh.service.js";
 import { ReconciliationService } from "../services/reconciliation.service.js";
@@ -263,7 +264,8 @@ export class StatsController {
     private readonly reconciliation: ReconciliationService,
     private readonly opsRepair: OpsRepairService,
     private readonly telegram: TelegramPostService,
-    private readonly cveEnrichRunner: CveEnrichRunnerService
+    private readonly cveEnrichRunner: CveEnrichRunnerService,
+    private readonly revisions: DataRevisionService
   ) {}
 
   private isAdmin(user: AuthUser): boolean {
@@ -279,8 +281,17 @@ export class StatsController {
     if (!this.isAdmin(user)) throw new ForbiddenException("admin only");
   }
 
+  @Get("revision")
+  async revision() {
+    return this.revisions.snapshot();
+  }
+
   @Get("summary")
   async summary() {
+    return this.computeSummary();
+  }
+
+  private async computeSummary() {
     const total = await this.db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM cve`);
     const maxPublished = await this.db.query<{ ts: string | null }>(
       `SELECT to_char(MAX(published_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ts FROM cve`
@@ -800,6 +811,10 @@ export class StatsController {
   async vendors(@Query("windowHours") windowHoursRaw?: string, @Query("limit") limitRaw?: string) {
     const windowHours = Math.max(1, Math.min(24 * 30, Number(windowHoursRaw ?? 24)));
     const limit = Math.max(3, Math.min(50, Number(limitRaw ?? 12)));
+    return this.computeVendors(windowHours, limit);
+  }
+
+  private async computeVendors(windowHours: number, limit: number) {
 
     const sampled = await this.db.query<{ n: string }>(
       `SELECT COUNT(*)::text AS n

@@ -272,7 +272,8 @@ export function OverviewDashboardPanel({
       if (!res.ok) throw new Error(await res.text().catch(() => res.statusText));
       return (await res.json()) as ReadinessPayload;
     },
-    ...live
+    ...live,
+    refetchInterval: 60_000
   });
 
   const exploitQ = useQuery({

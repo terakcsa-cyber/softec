@@ -24,12 +24,11 @@ export function useLivePollInterval(
   return visible ? activeMs : backgroundMs;
 }
 
-/** Общие опции react-query для «живых» панелей */
-export function useLiveQueryOptions(activeMs: number = LIVE_POLL_MS) {
-  const refetchInterval = useLivePollInterval(activeMs);
+/** Общие опции react-query для панелей с данными: не поллить сами, ждём data-revision. */
+export function useLiveQueryOptions(_activeMs: number = LIVE_POLL_MS) {
   return {
-    staleTime: 8_000,
-    refetchInterval,
+    staleTime: 30_000,
+    refetchInterval: false as const,
     refetchIntervalInBackground: false
   } as const;
 }

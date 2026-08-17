@@ -7,8 +7,7 @@ import { apiFetch } from "@/lib/api-fetch";
 import { needsOnDemandBduEnrich, parseAiOutputJson as parseBduAiOutputJson, shouldAutoEnrichBduOnOpen } from "@/lib/bdu-enrich-ui";
 import { needsOnDemandEnrich, parseAiOutputJson, shouldAutoEnrichOnOpen } from "@/lib/cve-enrich-ui";
 import { defaultAttackFlowSteps, isUsableAttackGraph } from "@/lib/baseline-enrichment";
-import { CVE_POLL_BACKGROUND_ONLY_MS, CVE_POLL_WHILE_ENRICH_MS, ENRICH_UI_WAIT_MS } from "@/lib/enrich-ui-wait";
-import { useLivePollInterval } from "@/lib/live-refresh";
+import { CVE_POLL_WHILE_ENRICH_MS, ENRICH_UI_WAIT_MS } from "@/lib/enrich-ui-wait";
 import { type ExploitRadarFilter } from "@/lib/exploit-intel-client";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -193,8 +192,6 @@ export function Dashboard() {
     return () => window.clearTimeout(id);
   }, [q]);
 
-  const livePollMs = useLivePollInterval();
-
   /** After opening a CVE, POST /enrich once; poll until AI row exists or timeout. */
   const [enrichPosted, setEnrichPosted] = useState(false);
   /** CVE, для которого реально ждём LLM (не путать с текущим selected в списке). */
@@ -250,8 +247,8 @@ export function Dashboard() {
         };
       };
     },
-    staleTime: 8_000,
-    refetchInterval: moduleKey === "dashboard" ? livePollMs : false,
+    staleTime: 30_000,
+    refetchInterval: false,
     refetchIntervalInBackground: false
   });
 
@@ -277,16 +274,16 @@ export function Dashboard() {
         products: { vendor: string; product: string; count: number }[];
       };
     },
-    staleTime: 8_000,
-    refetchInterval: moduleKey === "dashboard" || moduleKey === "vulns" ? livePollMs : false,
+    staleTime: 30_000,
+    refetchInterval: false,
     refetchIntervalInBackground: false
   });
 
   const topPriorityQuery = useQuery({
     queryKey: ["cves", "dashboard", "topPriority", "latest", "rank", 80],
     enabled: moduleKey === "dashboard",
-    staleTime: 8_000,
-    refetchInterval: moduleKey === "dashboard" ? livePollMs : false,
+    staleTime: 30_000,
+    refetchInterval: false,
     refetchIntervalInBackground: false,
     queryFn: async () => {
       const url = new URL(`/api/cves`, window.location.origin);
@@ -494,7 +491,7 @@ export function Dashboard() {
         if (deadline != null && Date.now() > deadline) return false;
         return CVE_POLL_WHILE_ENRICH_MS;
       }
-      if (!manual) return CVE_POLL_BACKGROUND_ONLY_MS;
+      if (!manual) return false;
       return false;
     },
     refetchIntervalInBackground: false

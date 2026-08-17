@@ -129,7 +129,6 @@ export function VocHomePanel({
   const [caseFilter, setCaseFilter] = useState<VocCaseFilter>("all");
 
   const liveOpts = useLiveQueryOptions();
-  const tgLiveOpts = useLiveQueryOptions(60_000);
   const queryClient = useQueryClient();
 
   const queueQuery = useQuery({
@@ -151,7 +150,8 @@ export function VocHomePanel({
       if (!res.ok) throw new Error(body.error ?? "TG feed");
       return body;
     },
-    ...tgLiveOpts
+    staleTime: 60_000,
+    refetchInterval: 60_000
   });
 
   const watchlistQuery = useQuery({
@@ -172,7 +172,7 @@ export function VocHomePanel({
     queryKey: ["voc", "triage", "tg"],
     queryFn: () => fetchVocTriageBySource("tg", 240),
     enabled: sourceTab === "all" || sourceTab === "tg" || sourceTab === "watchlist",
-    ...tgLiveOpts
+    ...liveOpts
   });
 
   const tgTriageMap = useMemo(() => {

@@ -180,7 +180,7 @@ export function LiveFeedNotifier() {
     };
 
     void poll();
-    const id = window.setInterval(() => void poll(), 30_000);
+    const id = window.setInterval(() => void poll(), 60_000);
     return () => {
       cancelled = true;
       window.clearInterval(id);

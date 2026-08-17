@@ -115,7 +115,7 @@ export function FstecBulletinsPanel({ onOpenBdu }: FstecBulletinsPanelProps) {
       if (!res.ok) throw new Error(body.error ?? `Ошибка ${res.status}`);
       return body.items ?? [];
     },
-    refetchInterval: 8_000
+    staleTime: 30_000
   });
 
   const detailQ = useQuery({
