@@ -563,7 +563,7 @@ normalize_env_file() {
   local epss_poll
   epss_poll="$(read_env_value EPSS_POLL_INTERVAL_MS "$ENV_FILE" || true)"
   if [[ -z "$epss_poll" ]]; then
-    write_env_value EPSS_POLL_INTERVAL_MS "86400000" "$ENV_FILE"
+    write_env_value EPSS_POLL_INTERVAL_MS "21600000" "$ENV_FILE"
   fi
 
   # TLS / Let's Encrypt publish defaults (tls-proxy in compose).

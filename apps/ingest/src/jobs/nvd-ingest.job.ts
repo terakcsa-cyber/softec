@@ -33,6 +33,8 @@ import {
   shouldScoreViaQueue,
   shouldSkipEnrichPublishForDepth,
   upsertRiskScoreForCve,
+  upsertNvdExploitSignalsFromRaw,
+  refreshExploitIntelForCveIds,
   NVD_CATALOG_FLOOR_ISO,
   NVD_CATALOG_SCAN_MODE,
   NVD_CATALOG_SETTINGS_KEY,
@@ -75,6 +77,9 @@ export class NvdIngestJob implements OnModuleInit {
   /** Empty backlog ticks → exponential backoff so catch-up does not thrash forever. */
   private enrichBacklogEmptyStreak = 0;
   private scoreBacklogEmptyStreak = 0;
+  /** CVE ids that got new NVD exploit/PoC refs this cycle — refresh intel in page batches. */
+  private pendingIntelCveIds = new Set<string>();
+  private catalogBackfillCached: { atMs: number; active: boolean } | null = null;
 
   constructor(
     @Inject(DbService) private readonly db: DbService,
@@ -302,6 +307,28 @@ export class NvdIngestJob implements OnModuleInit {
     return process.env.NVD_FANOUT_SCORE_HOT_ONLY !== "false";
   }
 
+  private async isCatalogBackfillActiveCached(): Promise<boolean> {
+    const now = Date.now();
+    if (this.catalogBackfillCached && now - this.catalogBackfillCached.atMs < 30_000) {
+      return this.catalogBackfillCached.active;
+    }
+    const active = catalogBackfillActive(await this.readCatalogState());
+    this.catalogBackfillCached = { atMs: now, active };
+    return active;
+  }
+
+  private async flushPendingExploitIntel() {
+    if (!this.pendingIntelCveIds.size) return;
+    const ids = [...this.pendingIntelCveIds];
+    this.pendingIntelCveIds.clear();
+    await refreshExploitIntelForCveIds(this.db, ids).catch((err) => {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[ingest:nvd] exploit-intel refresh failed n=${ids.length}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    });
+  }
+
   private fingerprintNvdApiKey(key?: string): string | null {
     if (!key?.trim()) return null;
     return createHash("sha256").update(key.trim()).digest("hex").slice(0, 16);
@@ -452,6 +479,7 @@ export class NvdIngestJob implements OnModuleInit {
           console.error(`[ingest:nvd] failed cve=${cveId}`, e);
         }
       }
+      await this.flushPendingExploitIntel();
 
       startIndex += vulnerabilities.length;
       if (startIndex >= totalResults) break;
@@ -763,6 +791,16 @@ export class NvdIngestJob implements OnModuleInit {
     // Pipeline-level vendor/product index: always keep it in sync with CVE raw.
     await this.upsertVendorProductIndex(input.cveId, input.raw);
 
+    try {
+      const { signalCount } = await upsertNvdExploitSignalsFromRaw(this.db, input.cveId, input.raw);
+      if (signalCount > 0) this.pendingIntelCveIds.add(input.cveId);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[ingest:nvd] exploit-refs extract failed cve=${input.cveId}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+
     const idempotencyKey = await sha256Hex(
       stableJsonStringify({
         t: "ingest",
@@ -799,8 +837,11 @@ export class NvdIngestJob implements OnModuleInit {
     }
 
     // Risk score: inline upsert by default (no Rabbit). Queue only if AI_SCORE_VIA_QUEUE=true.
+    // Hot-only during catalog backfill; after that lastModified updates rescore the touched CVE.
     const scoreHotOnly = this.scoreFanoutHotOnly();
-    if (isAiScoreEnabled() && (!scoreHotOnly || isPublishedWithinHours(publishedAtIso))) {
+    const inHotWindow = isPublishedWithinHours(publishedAtIso);
+    const backfill = await this.isCatalogBackfillActiveCached();
+    if (isAiScoreEnabled() && (!scoreHotOnly || inHotWindow || !backfill)) {
       if (shouldScoreViaQueue()) {
         this.queue.publish("vuln.events", "vuln.score.requested.v1", {
           id: uuidv4(),
@@ -961,6 +1002,7 @@ export class NvdIngestJob implements OnModuleInit {
           console.error(`[ingest:nvd] ${logTag} failed cve=${cveId}`, e);
         }
       }
+      await this.flushPendingExploitIntel();
 
       startIndex += vulnerabilities.length;
       if (startIndex >= totalResults) break;

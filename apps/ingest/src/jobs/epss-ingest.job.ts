@@ -1,19 +1,10 @@
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
-import {
-  applyRiskScoresForCveIds,
-  buildScoreEventsForCveIds,
-  ingestEpssFeed,
-  publishScoreEvents
-} from "@vuln-intel/shared";
+import { epssUtcYmd, ingestEpssFeed } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
-import { QueueService } from "../services/queue.service.js";
 
 @Injectable()
 export class EpssIngestJob implements OnModuleInit {
-  constructor(
-    @Inject(DbService) private readonly db: DbService,
-    @Inject(QueueService) private readonly queue: QueueService
-  ) {}
+  constructor(@Inject(DbService) private readonly db: DbService) {}
 
   async onModuleInit() {
     if (process.env.EPSS_INGEST_ENABLED === "false") return;
@@ -48,52 +39,36 @@ export class EpssIngestJob implements OnModuleInit {
         await new Promise((r) => setTimeout(r, retryMs));
         continue;
       }
-      const sleep = Math.max(60_000, intervalMs - (Date.now() - startedAt));
+      // While the corpus is a calendar day behind, retry at most every 6h even if poll is 24h.
+      const catchUpMs = 6 * 60 * 60 * 1000;
+      const behind = await this.isBehindUtcToday();
+      const sleep = behind
+        ? Math.min(Math.max(60_000, intervalMs), catchUpMs)
+        : Math.max(60_000, intervalMs - (Date.now() - startedAt));
       await new Promise((r) => setTimeout(r, sleep));
     }
   }
 
   private async runOnce() {
-    const force =
-      process.env.EPSS_FORCE_FULL === "1" ||
-      process.env.EPSS_FORCE_FULL === "true" ||
-      (await this.isStale(36));
+    const force = process.env.EPSS_FORCE_FULL === "1" || process.env.EPSS_FORCE_FULL === "true";
     const result = await ingestEpssFeed(this.db, { auditMeta: { via: "epss-job" }, force });
-    const rescored = result.changedCveIds.slice(0, Number(process.env.EPSS_RESCORE_LIMIT ?? 20_000));
-    let scored = 0;
-    if (rescored.length) {
-      scored = await applyRiskScoresForCveIds(this.db, rescored, {
-        concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
-        buildQueueEvents: () =>
-          buildScoreEventsForCveIds(rescored, {
-            producer: { service: "ingest", version: "0.0.1" },
-            tag: "epss",
-            tsBucket: "iso"
-          }),
-        publishViaQueue: (events) =>
-          publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
-      });
-    }
 
     // eslint-disable-next-line no-console
     console.log(
-      `[ingest:epss] ok rows=${result.rows} upserted=${result.upserted} rescored=${scored}` +
-        ` skippedFresh=${Boolean(result.skippedFresh)} scoreDate=${result.scoreDate ?? "?"} ` +
-        `exploitIntel=${result.exploitIntelRefreshed ?? 0} source=${result.sourceUrl}`
+      `[ingest:epss] ok rows=${result.rows} upserted=${result.upserted}` +
+        ` riskScores=${result.riskScoresUpserted ?? 0} skippedFresh=${Boolean(result.skippedFresh)}` +
+        ` scoreDate=${result.scoreDate ?? "?"} exploitIntel=${result.exploitIntelRefreshed ?? 0}` +
+        ` source=${result.sourceUrl}`
     );
   }
 
-  /** Force full ingest if last watermark/ingest is older than `hours`. */
-  private async isStale(hours: number): Promise<boolean> {
+  /** True when MAX(epss_score.scored_at) is before today's UTC date. */
+  private async isBehindUtcToday(): Promise<boolean> {
     try {
-      const r = await this.db.query<{ ts: Date | null }>(
-        `SELECT MAX(ts) AS ts
-           FROM audit_log
-          WHERE action IN ('epss.ingest', 'epss.watermark')`
-      );
-      const ts = r.rows[0]?.ts ? new Date(r.rows[0].ts).getTime() : 0;
-      if (!ts) return true;
-      return Date.now() - ts > hours * 3600_000;
+      const r = await this.db.query<{ d: string | null }>(`SELECT MAX(scored_at)::text AS d FROM epss_score`);
+      const d = r.rows[0]?.d?.slice(0, 10) ?? null;
+      if (!d) return true;
+      return d < epssUtcYmd();
     } catch {
       return true;
     }

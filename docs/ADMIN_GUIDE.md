@@ -269,20 +269,19 @@ Volumes: `tls_certs` (или `tls_staging_certs`), общий ACME webroot (`acm
 
 ### EPSS
 
-Ежедневный CSV.gz (мульти-mirror / FIRST failover + integrity checks), boot при пустой/stale таблице; poll по умолчанию ~6ч (`EPSS_POLL_INTERVAL_MS`). После ingest score **сразу** пишется в `risk_score` (inline). Ручной sync: System Health → Управление или `pnpm epss:sync` / `POST /api/stats/ops/epss/sync`.
+Ежедневный CSV.gz (мульти-mirror / FIRST failover + integrity checks), boot при пустой/stale таблице; poll по умолчанию 6ч (`EPSS_POLL_INTERVAL_MS`). Если корпус отстаёт на календарный день UTC — retry каждые 6ч даже при 24ч интервале. После ingest обновляется exploit-intel (hot CVE) и **весь каталог `risk_score`** одним SQL (rule_v2, без лимита 20k): актуальный EPSS, freshness, KEV/spike. Если feed уже за сегодня, а scores отстают — тот же catalog rescore. Ручной sync: System Health → Управление или `pnpm epss:sync` / `POST /api/stats/ops/epss/sync`.
 
 **UI:** Overview показывает **EPSS · база** (корпус). Низкий EPSS среди CVE за 24ч ожидаем: дневной feed отстаёт от NVD ~сутки — не трактовать как сбой sync.
 
 | Переменная | Default | Описание |
 |------------|---------|----------|
 | `EPSS_BOOT_ON_START` | true | Импорт при старте если пусто/stale |
-| `EPSS_POLL_INTERVAL_MS` | 86400000 | Интервал job |
+| `EPSS_POLL_INTERVAL_MS` | 21600000 | Интервал job (6ч). Пока `scored_at` старше сегодняшнего UTC — не реже 6ч |
 | `EPSS_FEED_URL` | (FIRST) | Опциональный primary URL; иначе empiricalsecurity + cyentia |
 | `EPSS_FETCH_RETRIES` | 5 | Попытки по URL-ам |
 | `EPSS_FAIL_RETRY_MS` | 300000 | Backoff при сбое цикла |
 | `EPSS_MAX_DECOMPRESSED_BYTES` | 64MB | Лимит gzip |
-| `EPSS_BOOT_RESCORE_LIMIT` | 5000 | Сколько CVE пересчитать после boot |
-| `EPSS_RESCORE_LIMIT` | 20000 | Лимит rescore после полного ingest |
+| `EPSS_RESCORE_LIMIT` | 8000 | Сколько CVE обновить в `cve_exploit_intel` после ingest (не лимит `risk_score`) |
 
 ---
 

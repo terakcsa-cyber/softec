@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Однократная загрузка EPSS feed → epss_score + epss_score_history.
+ * Однократная загрузка EPSS feed → epss_score + catalog-wide risk_score (rule_v2).
  * node --env-file=.env scripts/epss-sync-now.mjs
  */
 import pg from "pg";
@@ -14,7 +14,9 @@ async function main() {
   try {
     const result = await ingestEpssFeed(pool, { auditMeta: { reason: "manual", via: "epss-sync-now" } });
     console.log(
-      `[epss-sync] ok source=${result.sourceUrl} rows=${result.rows} upserted=${result.upserted} changed=${result.changedCveIds.length}`
+      `[epss-sync] ok source=${result.sourceUrl} rows=${result.rows} upserted=${result.upserted}` +
+        ` riskScores=${result.riskScoresUpserted ?? 0}` +
+        ` skippedFresh=${Boolean(result.skippedFresh)} scoreDate=${result.scoreDate ?? "?"}`
     );
   } finally {
     await pool.end();

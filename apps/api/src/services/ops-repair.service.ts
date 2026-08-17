@@ -71,20 +71,9 @@ export class OpsRepairService {
         auditMeta: { reason: "manual", via: "system-health", actor: actorEmail ?? null },
         force: true
       });
-      const rescored = result.changedCveIds.slice(0, Number(process.env.EPSS_RESCORE_LIMIT ?? 5_000));
-      const n = await applyRiskScoresForCveIds(this.db, rescored, {
-        concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
-        buildQueueEvents: () =>
-          buildScoreEventsForCveIds(rescored, {
-            producer: PRODUCER,
-            tag: "epss-manual",
-            tsBucket: "day"
-          }),
-        publishViaQueue: (events) =>
-          publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
-      });
+      const n = result.riskScoresUpserted ?? 0;
       return {
-        message: `EPSS: rows=${result.rows} upserted=${result.upserted} rescored=${n} source=${result.sourceUrl}${result.skippedFresh ? " (fresh)" : ""}`,
+        message: `EPSS: rows=${result.rows} upserted=${result.upserted} riskScores=${n} source=${result.sourceUrl}${result.skippedFresh ? " (fresh)" : ""}`,
         detail: {
           sourceUrl: result.sourceUrl,
           rows: result.rows,

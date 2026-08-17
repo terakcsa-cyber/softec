@@ -4,6 +4,7 @@ import {
   shouldScoreViaQueue,
   type ScoreRequestedEnvelope
 } from "../queue/score-request.js";
+import { SQL_EFFECTIVE_PUBLISHED_AT } from "../cve/published-window.js";
 
 export type RiskScoreDbQueryable = {
   query(
@@ -230,4 +231,139 @@ export async function applyRiskScoresForCveIds(
     hintsFor: opts?.hintsFor,
     onError: opts?.onError
   });
+}
+
+/** True when any catalog CVE is missing rule_v2 or scored before the EPSS feed date. */
+export async function catalogRiskScoresLagFeedDate(
+  db: RiskScoreDbQueryable,
+  scoreDate: string
+): Promise<boolean> {
+  const r = await db.query(
+    `SELECT EXISTS (
+       SELECT 1
+         FROM cve c
+         LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
+        WHERE rs.cve_id IS NULL
+           OR rs.computed_at::date < $1::date
+           OR rs.model_version IS DISTINCT FROM 'rule_v2'
+     ) AS stale`,
+    [scoreDate]
+  );
+  const row = r.rows[0] as { stale?: boolean } | undefined;
+  return Boolean(row?.stale);
+}
+
+/**
+ * After daily EPSS (and for freshness decay): rewrite `risk_score` for the whole CVE catalog
+ * with the same rule_v2 weights as computeUnifiedRiskScoreV2. One SQL pass, no per-CVE cap.
+ */
+export async function rescoreCatalogRiskScores(db: RiskScoreDbQueryable): Promise<number> {
+  if (!isAiScoreEnabled()) return 0;
+  const r = await db.query(
+    `INSERT INTO risk_score (cve_id, score, factors, model_version, computed_at)
+     SELECT s.cve_id, s.score, s.factors, 'rule_v2', now()
+       FROM (
+         SELECT
+           c.cve_id,
+           ROUND(
+             LEAST(100, GREATEST(0,
+               (
+                 0.36 * cvss_n
+                 + 0.22 * epss_n
+                 + 0.18 * exploit_n
+                 + 0.06 * CASE WHEN epss_spike THEN 1.0 ELSE 0.0 END
+                 + 0.08 * freshness_n
+                 + 0.10 * mentions_n
+                 + CASE
+                     WHEN (exploit_known OR vckev_only) AND cvss_base IS NOT NULL AND cvss_base >= 9 THEN 0.08
+                     WHEN epss_spike AND exploit_n >= 0.55 THEN 0.05
+                     ELSE 0
+                   END
+               ) * 100
+             ))
+           )::int AS score,
+           jsonb_strip_nulls(jsonb_build_object(
+             'cvss', cvss_base,
+             'epss', epss,
+             'exploitKnown', exploit_known,
+             'vckevOnly', vckev_only,
+             'vulncheckKev', vulncheck_kev,
+             'epssSpike', epss_spike,
+             'hasPoc', has_poc,
+             'hasPublicExploit', has_public_exploit,
+             'mentions', tg_mentions,
+             'tgMentions24h', tg_mentions,
+             'freshnessDays', freshness_days
+           )) AS factors
+         FROM (
+           SELECT
+             c.cve_id,
+             c.cvss_base,
+             (k.cve_id IS NOT NULL) AS exploit_known,
+             COALESCE(ei.vckev_only, false) AS vckev_only,
+             COALESCE(ei.vulncheck_kev, vk.cve_id IS NOT NULL) AS vulncheck_kev,
+             COALESCE(ei.has_poc, false) AS has_poc,
+             COALESCE(ei.has_public_exploit, false) AS has_public_exploit,
+             COALESCE(ei.tg_mentions_24h, 0) AS tg_mentions,
+             CASE
+               WHEN e.score IS NOT NULL AND (
+                 (hist.score IS NULL AND e.score >= 0.15)
+                 OR (hist.score IS NOT NULL AND hist.score > 0 AND e.score / hist.score >= 3)
+                 OR (hist.score IS NOT NULL AND e.score - hist.score >= 0.15)
+               ) THEN true
+               ELSE COALESCE(ei.epss_spike, false)
+             END AS epss_spike,
+             LEAST(1::double precision, GREATEST(0::double precision,
+               CASE WHEN c.cvss_base IS NULL THEN 0.35 ELSE c.cvss_base / 10.0 END
+             )) AS cvss_n,
+             LEAST(1::double precision, GREATEST(0::double precision,
+               CASE WHEN e.score IS NULL THEN 0.15 ELSE e.score END
+             )) AS epss_n,
+             CASE
+               WHEN k.cve_id IS NOT NULL THEN 1.0
+               WHEN COALESCE(ei.vckev_only, false) THEN 0.92
+               WHEN COALESCE(ei.has_public_exploit, false) THEN 0.88
+               WHEN COALESCE(ei.vulncheck_kev, vk.cve_id IS NOT NULL) THEN 0.8
+               WHEN COALESCE(ei.has_poc, false) THEN 0.55
+               ELSE 0.0
+             END AS exploit_n,
+             CASE
+               WHEN ${SQL_EFFECTIVE_PUBLISHED_AT} IS NULL THEN 0.2
+               ELSE LEAST(1::double precision, GREATEST(0::double precision,
+                 EXP(-((EXTRACT(EPOCH FROM (now() - ${SQL_EFFECTIVE_PUBLISHED_AT})) / 86400.0) / 180.0))
+               ))
+             END AS freshness_n,
+             CASE
+               WHEN ${SQL_EFFECTIVE_PUBLISHED_AT} IS NULL THEN NULL
+               ELSE ROUND(EXTRACT(EPOCH FROM (now() - ${SQL_EFFECTIVE_PUBLISHED_AT})) / 86400.0)::int
+             END AS freshness_days,
+             LEAST(1::double precision, GREATEST(0::double precision,
+               LN(COALESCE(ei.tg_mentions_24h, 0) + 1) / LN(10) / 4.0
+             )) AS mentions_n,
+             e.score AS epss
+           FROM cve c
+           LEFT JOIN epss_score e ON e.cve_id = c.cve_id
+           LEFT JOIN kev k ON k.cve_id = c.cve_id
+           LEFT JOIN vulncheck_kev vk ON vk.cve_id = c.cve_id
+           LEFT JOIN cve_exploit_intel ei ON ei.cve_id = c.cve_id
+           LEFT JOIN LATERAL (
+             SELECT h.score
+               FROM epss_score_history h
+              WHERE h.cve_id = c.cve_id
+                AND h.scored_at <= (COALESCE(e.scored_at, CURRENT_DATE) - INTERVAL '7 days')
+              ORDER BY h.scored_at DESC
+              LIMIT 1
+           ) hist ON true
+         ) c
+       ) s
+     ON CONFLICT (cve_id) DO UPDATE SET
+       score = EXCLUDED.score,
+       factors = EXCLUDED.factors,
+       model_version = EXCLUDED.model_version,
+       computed_at = now()
+     WHERE risk_score.score IS DISTINCT FROM EXCLUDED.score
+        OR risk_score.factors IS DISTINCT FROM EXCLUDED.factors
+        OR risk_score.model_version IS DISTINCT FROM EXCLUDED.model_version`
+  );
+  return Number(r.rowCount ?? 0);
 }

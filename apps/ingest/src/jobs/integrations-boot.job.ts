@@ -115,21 +115,10 @@ export class IntegrationsBootJob implements OnModuleInit {
     // eslint-disable-next-line no-console
     console.log(`[ingest:integrations-boot] epss import start (rows=${count}, force=${force})`);
     const result = await ingestEpssFeed(this.db, { auditMeta: { reason: "boot", via: "ingest" } });
-    const rescored = result.changedCveIds.slice(0, Number(process.env.EPSS_BOOT_RESCORE_LIMIT ?? 5000));
-    const n = await applyRiskScoresForCveIds(this.db, rescored, {
-      concurrency: Number(process.env.AI_SCORE_INLINE_CONCURRENCY ?? 32),
-      buildQueueEvents: () =>
-        buildScoreEventsForCveIds(rescored, {
-          producer: INGEST_PRODUCER,
-          tag: "epss-boot",
-          tsBucket: "day"
-        }),
-      publishViaQueue: (events) =>
-        publishScoreEvents((ex, rk, payload) => this.queue.publish(ex, rk, payload), events)
-    });
     // eslint-disable-next-line no-console
     console.log(
-      `[ingest:integrations-boot] epss ok rows=${result.rows} upserted=${result.upserted} rescored=${n}`
+      `[ingest:integrations-boot] epss ok rows=${result.rows} upserted=${result.upserted}` +
+        ` riskScores=${result.riskScoresUpserted ?? 0}`
     );
   }
 }
