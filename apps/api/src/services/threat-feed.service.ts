@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
 import {
   formatThreatDailyDigestMessages,
+  NVD_REFS_SCANNED_SIGNAL_TYPE,
   type ThreatDigestHotCve,
   type ThreatDigestCriticalEvent,
   type ThreatDigestPayload
@@ -133,6 +134,12 @@ export class ThreatFeedService {
       params.push(value);
       filters.push(cond.replace(/\$(\d+)/g, () => `$${params.length}`));
     };
+
+    // `nvd_refs_scanned` is a scan watermark inserted during NVD raw processing.
+    // It is not a real external “mention/source”, so it should not dominate “new/updated 24h”.
+    if (!q.signalType || q.signalType !== NVD_REFS_SCANNED_SIGNAL_TYPE) {
+      add(`s.signal_type <> $1`, NVD_REFS_SCANNED_SIGNAL_TYPE);
+    }
 
     // Window is applied after CVE aggregation (see getFeed) so we keep the best signal score.
     if (q.signalType) add(`s.signal_type = $1`, q.signalType);
@@ -304,6 +311,7 @@ export class ThreatFeedService {
               count(DISTINCT s.cve_id)::text AS count
          FROM cve_exploit_signal s JOIN cve c ON c.cve_id = s.cve_id
         WHERE s.first_seen_at >= now() - interval '7 days'
+          AND s.signal_type <> '${NVD_REFS_SCANNED_SIGNAL_TYPE}'
      GROUP BY 1 ORDER BY 1 ASC`
     );
 
