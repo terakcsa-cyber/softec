@@ -282,7 +282,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
       runAction(
         "EPSS sync",
         () => apiFetch("/api/stats/ops/epss/sync", { method: "POST" }),
-        "Скачать и обновить EPSS feed? Это может занять 1–3 минуты."
+        "Скачать и обновить EPSS feed? Обычно 30–90 сек; пересчёт risk_score по каталогу идёт в фоне."
       )
   });
   const bduSync = useMutation({

@@ -103,7 +103,8 @@ export class DataRevisionService {
 export function revisionSliceForPath(pathname: string): RevisionSlice | null {
   const path = pathname.split("?")[0] ?? "";
   if (path.includes("/stats/revision")) return null;
-  if (path.includes("/stats/summary") || path.includes("/stats/vendors")) return "catalog";
+  if (path.includes("/stats/summary") || path.includes("/stats/vendors") || path.includes("/stats/priority-cves"))
+    return "catalog";
   if (path.includes("/stats/threat-feed") || path.includes("/stats/exploit-radar")) return "threat";
   if (path.includes("/stats/")) return null;
   if (path.includes("/settings") || path.includes("/auth") || path.includes("/health")) return null;

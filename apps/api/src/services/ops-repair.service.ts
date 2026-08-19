@@ -9,6 +9,7 @@ import {
   hot24ScoreHourBucket,
   hot24ScoreIdempotencyKey,
   ingestEpssFeed,
+  rescoreCatalogRiskScores,
   listHot24CvesNeedingScore,
   listCvesNeedingRiskScore,
   parseBduVulNode,
@@ -40,6 +41,7 @@ const PRODUCER = { service: "api", version: "0.0.1" } as const;
 export class OpsRepairService {
   private readonly logger = new Logger(OpsRepairService.name);
   private readonly jobs = new Map<OpsJobKind, JobState>();
+  private catalogRescoreRunning = false;
 
   constructor(
     @Inject(DbService) private readonly db: DbService,
@@ -69,21 +71,46 @@ export class OpsRepairService {
     return this.run("epss", async () => {
       const result = await ingestEpssFeed(this.db, {
         auditMeta: { reason: "manual", via: "system-health", actor: actorEmail ?? null },
-        force: true
+        force: true,
+        // Full-catalog risk_score rescore can take many minutes on prod — run in background.
+        skipCatalogRescore: true
       });
+      this.kickCatalogRescore("epss-manual");
       const n = result.riskScoresUpserted ?? 0;
       return {
-        message: `EPSS: rows=${result.rows} upserted=${result.upserted} riskScores=${n} source=${result.sourceUrl}${result.skippedFresh ? " (fresh)" : ""}`,
+        message:
+          `EPSS: rows=${result.rows} upserted=${result.upserted} source=${result.sourceUrl}` +
+          `${result.skippedFresh ? " (fresh)" : ""}` +
+          ` · risk_score catalog rescore запущен в фоне`,
         detail: {
           sourceUrl: result.sourceUrl,
           rows: result.rows,
           upserted: result.upserted,
           rescored: n,
+          catalogRescoreBackground: true,
           scoreDate: result.scoreDate ?? null,
           exploitIntelRefreshed: result.exploitIntelRefreshed ?? 0
         }
       };
     });
+  }
+
+  private kickCatalogRescore(reason: string) {
+    if (this.catalogRescoreRunning) {
+      this.logger.log(`[ops] catalog rescore already running (${reason})`);
+      return;
+    }
+    this.catalogRescoreRunning = true;
+    void rescoreCatalogRiskScores(this.db)
+      .then((n) => this.logger.log(`[ops] catalog rescore done (${reason}): ${n} rows`))
+      .catch((e) =>
+        this.logger.warn(
+          `[ops] catalog rescore failed (${reason}): ${e instanceof Error ? e.message : String(e)}`
+        )
+      )
+      .finally(() => {
+        this.catalogRescoreRunning = false;
+      });
   }
 
   async runHot24(actorEmail?: string) {

@@ -280,18 +280,16 @@ export function Dashboard() {
   });
 
   const topPriorityQuery = useQuery({
-    queryKey: ["cves", "dashboard", "topPriority", "latest", "rank", 80],
+    queryKey: ["stats", "priority-cves", 80],
     enabled: moduleKey === "dashboard",
     staleTime: 30_000,
     refetchInterval: false,
     refetchIntervalInBackground: false,
     queryFn: async () => {
-      const url = new URL(`/api/cves`, window.location.origin);
-      url.searchParams.set("view", "latest");
-      url.searchParams.set("sort", "rank");
+      const url = new URL(`/api/stats/priority-cves`, window.location.origin);
       url.searchParams.set("limit", "80");
       const res = await apiFetch(url.toString(), { cache: "no-store" });
-      if (!res.ok) throw new Error(`Failed to fetch top priority CVEs (${res.status})`);
+      if (!res.ok) throw new Error(`Failed to fetch priority CVEs (${res.status})`);
       const data = (await res.json()) as { items: CveListItem[] };
       return data.items;
     }

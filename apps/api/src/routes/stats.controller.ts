@@ -291,6 +291,128 @@ export class StatsController {
     return this.computeSummary();
   }
 
+  /** Lightweight priority CVE list for dashboard (avoids full-corpus /cves?view=latest). */
+  @Get("priority-cves")
+  async priorityCves(@Query("limit") limitRaw?: string) {
+    const limit = Math.max(10, Math.min(120, Number(limitRaw ?? 80)));
+    const r = await this.db.query(
+      `SELECT c.cve_id,
+              c.published_at,
+              c.modified_at,
+              rs.score AS risk_score,
+              es.score AS epss,
+              c.cvss_base AS cvss_base,
+              vp1.vendor AS vp_vendor,
+              vp1.product AS vp_product,
+              NULLIF(substring(regexp_replace(COALESCE(
+                c.raw->'descriptions'->0->>'value',
+                c.raw->'cve'->'descriptions'->0->>'value',
+                c.raw->'cve'->'description'->'description_data'->0->>'value',
+                c.raw->'description'->'description_data'->0->>'value',
+                ''
+              ), E'\\s+', ' ', 'g') for 220), '') AS short_description,
+              NULL::text AS short_ru,
+              (COALESCE(
+                c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'attackVector',
+                c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'attackVector',
+                c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'attackVector'
+              ) = 'NETWORK') AS cvss_av_network,
+              (COALESCE(
+                c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'privilegesRequired',
+                c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'privilegesRequired',
+                c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'privilegesRequired'
+              ) = 'NONE') AS cvss_pr_none,
+              (COALESCE(
+                c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'userInteraction',
+                c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'userInteraction',
+                c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'userInteraction'
+              ) = 'NONE') AS cvss_ui_none,
+              (COALESCE(
+                c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'attackComplexity',
+                c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'attackComplexity',
+                c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'attackComplexity'
+              ) = 'LOW') AS cvss_ac_low,
+              EXISTS (
+                SELECT 1 FROM cve_vendor_product vp_p
+                WHERE vp_p.cve_id = c.cve_id
+                  AND (
+                    vp_p.vendor_key IN (
+                      'microsoft','apache','nginx','openssl','openbsd','openssh','citrix','f5','paloaltonetworks',
+                      'fortinet','checkpoint','juniper','cisco','vmware','okta','redhat','oracle','ibm','sap'
+                    )
+                    OR vp_p.product_key_norm IN (
+                      'iis','http_server','nginx','openssl','openssh','netscaler','adc','big-ip','pan-os','fortios',
+                      'fortigate','pulse_connect_secure','globalprotect','vpn','sslvpn','gateway','reverse_proxy',
+                      'load_balancer','waf','firewall','identity','sso','keycloak','tomcat','jetty','spring'
+                    )
+                    OR lower(vp_p.product_key_norm) LIKE '%vpn%'
+                    OR lower(vp_p.product_key_norm) LIKE '%proxy%'
+                    OR lower(vp_p.product_key_norm) LIKE '%gateway%'
+                  )
+              ) AS perimeter_product,
+              (k.cve_id IS NOT NULL) AS exploit_known,
+              EXISTS (
+                SELECT 1 FROM enrichment_ai ea
+                WHERE ea.cve_id = c.cve_id
+                  AND (ea.output_json->>'_enrich_error') IS DISTINCT FROM 'true'
+                  AND NOT (
+                    COALESCE(ea.output_text, '') = 'LLM not configured.'
+                    OR COALESCE(ea.output_json->>'summary', '') LIKE 'LLM not configured%'
+                  )
+              ) AS ai_ready,
+              ARRAY_REMOVE(ARRAY[
+                CASE WHEN k.cve_id IS NOT NULL THEN 'KEV' ELSE NULL END,
+                CASE WHEN es.score IS NOT NULL AND es.score >= 0.5 THEN 'EPSS>=0.50' ELSE NULL END,
+                CASE WHEN es.score IS NOT NULL AND es.score >= 0.2 AND es.score < 0.5 THEN 'EPSS>=0.20' ELSE NULL END,
+                CASE WHEN c.cvss_base IS NOT NULL AND c.cvss_base >= 9.0 THEN 'CVSS>=9.0' ELSE NULL END,
+                CASE WHEN c.cvss_base IS NOT NULL AND c.cvss_base >= 8.0 AND c.cvss_base < 9.0 THEN 'CVSS>=8.0' ELSE NULL END
+              ], NULL) AS critical_reasons,
+              COALESCE(ei.epss_percentile, es.percentile) AS epss_percentile,
+              ei.epss_delta_7d,
+              COALESCE(ei.epss_spike, false) AS epss_spike,
+              COALESCE(ei.vulncheck_kev, false) AS vulncheck_kev,
+              COALESCE(ei.vckev_only, false) AS vckev_only,
+              COALESCE(ei.has_poc, false) AS has_poc,
+              COALESCE(ei.has_public_exploit, false) AS has_public_exploit,
+              COALESCE(ei.exploit_ref_count, 0) AS exploit_ref_count
+         FROM cve c
+         LEFT JOIN LATERAL (
+           SELECT vp.vendor, vp.product
+             FROM cve_vendor_product vp
+            WHERE vp.cve_id = c.cve_id
+         ORDER BY vp.vendor_key ASC, vp.product_key_norm ASC
+            LIMIT 1
+         ) vp1 ON TRUE
+         LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
+         LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+         LEFT JOIN kev k ON k.cve_id = c.cve_id
+         LEFT JOIN cve_exploit_intel ei ON ei.cve_id = c.cve_id
+        WHERE (
+          k.cve_id IS NOT NULL
+          OR es.score >= 0.15
+          OR c.cvss_base >= 7.5
+          OR rs.score >= 65
+          OR (
+            ${SQL_EFFECTIVE_PUBLISHED_AT} >= now() - interval '7 days'
+            AND (
+              c.cvss_base >= 6.0
+              OR es.score >= 0.05
+              OR k.cve_id IS NOT NULL
+              OR rs.score >= 45
+            )
+          )
+        )
+        ORDER BY (k.cve_id IS NOT NULL) DESC,
+                 COALESCE(rs.score, 0) DESC,
+                 GREATEST(COALESCE(es.score, 0) * 100, COALESCE(c.cvss_base, 0) * 10) DESC,
+                 c.published_at DESC NULLS LAST,
+                 c.cve_id ASC
+        LIMIT $1`,
+      [limit]
+    );
+    return { items: r.rows };
+  }
+
   private async computeSummary() {
     const total = await this.db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM cve`);
     const maxPublished = await this.db.query<{ ts: string | null }>(
