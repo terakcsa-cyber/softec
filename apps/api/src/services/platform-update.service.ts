@@ -11,6 +11,10 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { constants as fsConstants } from "node:fs";
 import { pruneBduStaging } from "@vuln-intel/shared";
+import { DbService } from "./db.service.js";
+import { CveEnrichRunnerService } from "./cve-enrich-runner.service.js";
+import { BduEnrichRunnerService } from "./bdu-enrich-runner.service.js";
+import { IntegrationSettingsService } from "./integration-settings.service.js";
 import { PgMaintenanceService } from "./pg-maintenance.service.js";
 
 export type UpdateCommitInfo = {
@@ -126,6 +130,18 @@ export type PlatformCleanupResult = {
   storage: PlatformStorageStatus;
 };
 
+export type PlatformCardsRefreshResult = {
+  ok: true;
+  textEngine: string;
+  llmPromptVersion: string | null;
+  cveScheduled: number;
+  bduScheduled: number;
+  cveLimit: number;
+  bduLimit: number;
+  totalScheduled: number;
+  noteRu: string;
+};
+
 type JobFile = {
   phase?: string;
   progressRu?: string;
@@ -143,7 +159,13 @@ export class PlatformUpdateService {
   private lastCheck: PlatformUpdateStatus | null = null;
   private applyLockUntil = 0;
 
-  constructor(private readonly pgMaint: PgMaintenanceService) {}
+  constructor(
+    private readonly pgMaint: PgMaintenanceService,
+    private readonly db: DbService,
+    private readonly cveEnrich: CveEnrichRunnerService,
+    private readonly bduEnrich: BduEnrichRunnerService,
+    private readonly integration: IntegrationSettingsService
+  ) {}
 
   async getStatus(): Promise<PlatformUpdateStatus> {
     if (this.lastCheck) {
@@ -339,6 +361,74 @@ export class PlatformUpdateService {
       dockerPruneLog: docker.log,
       steps,
       storage
+    };
+  }
+
+  async refreshCardTemplates(): Promise<PlatformCardsRefreshResult> {
+    const textEngine = await this.integration.getTextEngineSettings();
+    const llmCfg = await this.integration.getEffectiveLlmConfig();
+    const cveLimit = Math.max(10, Math.min(1000, Number(process.env.CARD_REFRESH_CVE_LIMIT ?? 180)));
+    const bduLimit = Math.max(10, Math.min(1000, Number(process.env.CARD_REFRESH_BDU_LIMIT ?? 120)));
+
+    const cves = await this.db.query<{ cve_id: string }>(
+      `SELECT cve_id
+         FROM (
+           SELECT DISTINCT ON (e.cve_id)
+                  e.cve_id,
+                  e.created_at,
+                  COALESCE(e.output_json->>'description', '') AS description
+             FROM enrichment_ai e
+         ORDER BY e.cve_id, e.created_at DESC
+         ) latest
+        WHERE latest.description = ''
+           OR latest.description NOT LIKE '🚩%'
+     ORDER BY latest.created_at DESC
+        LIMIT $1`,
+      [cveLimit]
+    );
+
+    const bdus = await this.db.query<{ bdu_id: string }>(
+      `SELECT bdu_id
+         FROM (
+           SELECT DISTINCT ON (e.bdu_id)
+                  e.bdu_id,
+                  e.created_at,
+                  COALESCE(e.output_json->>'description', '') AS description
+             FROM enrichment_bdu e
+         ORDER BY e.bdu_id, e.created_at DESC
+         ) latest
+        WHERE latest.description = ''
+           OR latest.description NOT LIKE '🚩%'
+     ORDER BY latest.created_at DESC
+        LIMIT $1`,
+      [bduLimit]
+    );
+
+    for (const row of cves.rows) {
+      this.cveEnrich.scheduleEnrich(row.cve_id, { force: true, allowOutsideHotWindow: true });
+    }
+    for (const row of bdus.rows) {
+      this.bduEnrich.scheduleEnrich(row.bdu_id, { force: true, allowOutsideHotWindow: true });
+    }
+
+    const cveScheduled = cves.rows.length;
+    const bduScheduled = bdus.rows.length;
+    const totalScheduled = cveScheduled + bduScheduled;
+    const noteRu =
+      totalScheduled > 0
+        ? `Поставлено в переобогащение: CVE ${cveScheduled}, БДУ ${bduScheduled}. Новые Telegram-посты возьмут обновлённый шаблон после завершения фонового AI.`
+        : "Карточки со старым Telegram-шаблоном не найдены.";
+
+    return {
+      ok: true,
+      textEngine: textEngine.textEngine,
+      llmPromptVersion: llmCfg.promptVersion ?? null,
+      cveScheduled,
+      bduScheduled,
+      cveLimit,
+      bduLimit,
+      totalScheduled,
+      noteRu
     };
   }
 
