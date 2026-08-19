@@ -96,18 +96,6 @@ type CleanupResult = {
   storage: StorageStatus;
 };
 
-type CardsRefreshResult = {
-  ok: true;
-  textEngine: string;
-  llmPromptVersion: string | null;
-  cveScheduled: number;
-  bduScheduled: number;
-  cveLimit: number;
-  bduLimit: number;
-  totalScheduled: number;
-  noteRu: string;
-};
-
 async function readApiError(res: Response, fallback: string) {
   try {
     const data = (await res.json()) as { message?: unknown; error?: unknown };
@@ -288,30 +276,9 @@ export function PlatformUpdatePanel({ embedded = false }: { embedded?: boolean }
     }
   });
 
-  const refreshCards = useMutation({
-    mutationFn: async () => {
-      const res = await apiFetch("/api/settings/updates/cards-refresh", {
-        method: "POST",
-        headers: { accept: "application/json" },
-        cache: "no-store"
-      });
-      if (!res.ok) throw new Error(await readApiError(res, "Не удалось запустить переобогащение карточек"));
-      return (await res.json()) as CardsRefreshResult;
-    },
-    onSuccess: (data) => {
-      setErr(null);
-      setMsg(data.noteRu);
-    },
-    onError: (e) => {
-      setMsg(null);
-      setErr(e instanceof Error ? e.message : "Ошибка переобогащения карточек");
-    }
-  });
-
   const st = statusQ.data;
   const storage = storageQ.data;
-  const busy =
-    check.isPending || apply.isPending || cleanup.isPending || refreshCards.isPending || jobBusy(st?.job?.phase);
+  const busy = check.isPending || apply.isPending || cleanup.isPending || jobBusy(st?.job?.phase);
   const primaryMount = storage?.mounts[0] ?? null;
   const deletableBackups = Math.max(
     0,
@@ -405,24 +372,6 @@ export function PlatformUpdatePanel({ embedded = false }: { embedded?: boolean }
             >
               Применить обновление
             </button>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                if (
-                  !window.confirm(
-                    "Запустить ручное переобогащение карточек со старым Telegram-шаблоном? После завершения фонового AI новые посты в ТГ будут уходить по новому prompt."
-                  )
-                ) {
-                  return;
-                }
-                refreshCards.mutate();
-              }}
-              className="inline-flex items-center gap-2 rounded-xl border border-sky-300/50 bg-sky-500/10 px-3.5 py-2 text-sm font-medium text-fg/90 transition hover:bg-sky-500/15 disabled:opacity-50 dark:border-sky-700/50 dark:bg-sky-500/10 dark:hover:bg-sky-500/15"
-            >
-              <Sparkles className={cn("h-4 w-4", refreshCards.isPending && "animate-spin")} aria-hidden />
-              Обновить карточки
-            </button>
           </div>
 
           {st.checkedAt ? (
@@ -488,15 +437,6 @@ export function PlatformUpdatePanel({ embedded = false }: { embedded?: boolean }
               </p>
             </div>
           ) : null}
-
-          <div className="rounded-xl border border-slate-200 px-4 py-3 dark:border-border">
-            <div className="text-[11px] uppercase tracking-wide text-muted">Карточки и Telegram</div>
-            <p className="mt-1 text-xs text-muted">
-              Кнопка <span className="font-medium text-fg/85">«Обновить карточки»</span> ставит в фоновое
-              переобогащение карточки, у которых последний AI-анализ ещё не в новом Telegram-формате. Когда
-              переобогащение завершится, новые посты в Telegram начнут отправляться уже по новому prompt.
-            </p>
-          </div>
 
           <div className="rounded-xl border border-slate-200 px-4 py-3 dark:border-border">
             <div className="flex flex-wrap items-start justify-between gap-2">

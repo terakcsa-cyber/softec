@@ -46,10 +46,4 @@ export class PlatformUpdateController {
       mode: body?.mode === "machine" ? "machine" : "backups"
     });
   }
-
-  @Post("cards-refresh")
-  @HttpCode(200)
-  refreshCards() {
-    return this.updates.refreshCardTemplates();
-  }
 }

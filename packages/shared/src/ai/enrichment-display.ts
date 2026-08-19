@@ -49,12 +49,7 @@ export function isGarbageEnrichSummary(value: unknown): boolean {
   const t = value.trim();
   if (!t) return true;
   if (t.startsWith("{") || t.startsWith("[")) return true;
-  // Telegram-post narrative templates can be long (bullets + multiple sections).
-  // If the text looks like a Telegram template, don't treat it as garbage just because it is long.
-  if (t.length > 1800) {
-    if (t.startsWith("🚩") && (t.includes("🔝 Суть уязвимости") || t.includes("⚠️ Возможные риски"))) return false;
-    return true;
-  }
+  if (t.length > 1800) return true;
   if (t.includes('"attackFlow"') && t.includes('"description"')) return true;
   return false;
 }
@@ -105,9 +100,6 @@ export function isGenericEnrichmentTitle(title: string | null | undefined): bool
 /** Убирает служебные префиксы из summary/description enrichment. */
 export function stripEnrichmentBoilerplate(text: string): string {
   let t = text.trim();
-  // Telegram narrative templates rely on explicit newlines/bullets.
-  // If the text already looks like a Telegram block, keep formatting intact.
-  const looksLikeTelegram = t.startsWith("🚩");
   const patterns = [
     /^Описание\s*\(как в источнике\)\s*:\s*/i,
     /^Кратко:\s*(CVE-\d{4}-\d+|BDU:[\w-]+)\s*[—–-]\s*/i,
@@ -116,7 +108,7 @@ export function stripEnrichmentBoilerplate(text: string): string {
   for (const p of patterns) {
     t = t.replace(p, "");
   }
-  return looksLikeTelegram ? t.trim() : t.replace(/\s+/g, " ").trim();
+  return t.replace(/\s+/g, " ").trim();
 }
 
 /**

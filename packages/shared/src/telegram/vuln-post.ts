@@ -110,50 +110,127 @@ function trimBlock(s: string, max = 2800): string {
   return `${t.slice(0, max - 1).trimEnd()}…`;
 }
 
+function firstNonEmpty(...values: Array<string | null | undefined>): string {
+  for (const value of values) {
+    const t = sanitizeTelegramText(value);
+    if (t) return t;
+  }
+  return "—";
+}
+
+function extractIds(identifier: string, urls: string[]) {
+  const upperId = String(identifier ?? "").trim().toUpperCase();
+  const cveFromId = /^CVE-\d{4}-\d+$/i.test(upperId) ? upperId : null;
+  const bduFromId = /^BDU:/i.test(upperId) ? upperId : null;
+  const cveFromUrl =
+    urls
+      .map((u) => u.match(/CVE-\d{4}-\d+/i)?.[0]?.toUpperCase() ?? null)
+      .find(Boolean) ?? null;
+  const bduFromUrl =
+    urls
+      .map((u) => u.match(/\/vul\/(\d{4}-\d+)/i)?.[1] ?? null)
+      .find(Boolean) ?? null;
+  return {
+    cveId: cveFromId ?? cveFromUrl ?? "—",
+    bduId: bduFromId ?? (bduFromUrl ? `BDU:${bduFromUrl}` : "—")
+  };
+}
+
+function extractProduct(title: string, description: string): string {
+  const cleanTitle = sanitizeTelegramText(title);
+  const cleanDesc = sanitizeTelegramText(description);
+  const fromTitle = cleanTitle
+    .replace(/^CVE-\d{4}-\d+\s*[—:-]\s*/i, "")
+    .replace(/^BDU:[\w-]+\s*[—:-]\s*/i, "")
+    .trim();
+  if (fromTitle && !isGenericEnrichmentTitle(fromTitle) && fromTitle.length <= 120) return fromTitle;
+  const m =
+    cleanDesc.match(/\b(?:in|в)\s+([A-Za-z0-9_.:+#\-\/ ]{2,80}?)(?:[.,;:]| allows| is affected| has| library| component)/i) ??
+    cleanDesc.match(/\b([A-Za-z0-9_.:+#\-\/]{2,60})\s+(?:library|package|component|client|server)\b/i);
+  return m?.[1]?.trim() || "—";
+}
+
+function extractCwe(vulnerabilityClass: string | null, description: string): string {
+  const joined = `${vulnerabilityClass ?? ""} ${description}`;
+  const m = joined.match(/CWE-\d+/i);
+  return m?.[0]?.toUpperCase() ?? "—";
+}
+
+function splitSentences(text: string, maxItems = 4): string[] {
+  return text
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => sanitizeTelegramText(s, { max: 260 }))
+    .filter(Boolean)
+    .slice(0, maxItems);
+}
+
+function bulletize(items: string[], min = 3, fallback?: string[]): string[] {
+  const base = items.map((s) => sanitizeTelegramText(s, { max: 280 })).filter(Boolean);
+  if (base.length >= min) return base.slice(0, 6);
+  return [...base, ...(fallback ?? [])].filter(Boolean).slice(0, 6);
+}
+
 /** Текст поста для Telegram-канала по шаблону банка. */
 export function formatVulnTelegramPost(input: VulnTelegramPostInput): string {
-  // New mode: if LLM produced a ready Telegram narrative template in `description`,
-  // send it verbatim (without the old “bank template” wrappers).
-  const desc = input.description ?? "";
-  if (
-    typeof desc === "string" &&
-    desc.trim().startsWith("🚩") &&
-    (desc.includes("🔝 Суть уязвимости") || desc.includes("⚠️ Возможные риски"))
-  ) {
-    return sanitizeTelegramText(desc, { multiline: true, max: 4090 });
-  }
-
   const sev = cvssSeverityLabel(input.cvssScore);
-  const cvssLine =
-    input.cvssScore != null && Number.isFinite(input.cvssScore)
-      ? `${input.cvssScore.toFixed(1)} (${sev.label})`
-      : "—";
-
-  const header = "Комплексный анализ уязвимости";
-  let subtitle = sanitizeTelegramText(input.title, { max: 220 }) || "Уязвимость";
-  if (isGenericEnrichmentTitle(subtitle) || subtitle.toLowerCase() === header.toLowerCase()) {
-    subtitle = sanitizeTelegramText(input.identifier, { max: 80 }) || "Уязвимость";
-  }
+  const description = sanitizeTelegramText(input.description, { multiline: true, max: 1800 });
+  const title = sanitizeTelegramText(input.title, { max: 220 });
+  const ids = extractIds(input.identifier, input.sourceUrls);
+  const product = extractProduct(title, description);
+  const cwe = extractCwe(input.vulnerabilityClass, description);
+  const cvssV3 = input.cvssScore != null && Number.isFinite(input.cvssScore) ? input.cvssScore.toFixed(1) : "—";
+  const level = input.cvssScore != null && Number.isFinite(input.cvssScore) ? sev.label : "—";
+  const vulnType = firstNonEmpty(input.vulnerabilityClass, title);
+  const component = firstNonEmpty(
+    splitSentences(description, 1)[0],
+    Array.isArray(input.attackFlow) && input.attackFlow[0] ? input.attackFlow[0] : null
+  );
+  const exploit = firstNonEmpty(input.exploitation);
+  const summaryLines = splitSentences(description, 3);
+  const riskLines = bulletize(summaryLines, 2, [
+    "возможна компрометация затронутого приложения или сервиса",
+    "возможен отказ в обслуживании или нарушение стабильности компонента",
+    "требуется проверка применимости в локальной инфраструктуре"
+  ]);
+  const recommendationLines = bulletize(input.recommendations, 2, [
+    "проверить наличие затронутой версии в инфраструктуре",
+    "установить обновление или патч вендора",
+    "проверить связанные продукты и встроенные зависимости"
+  ]);
+  const links = input.sourceUrls.map((u) => sanitizeTelegramText(u)).filter(Boolean).slice(0, 5);
 
   const parts = [
-    `🚀 ${header}`,
-    `💥 ${subtitle}`,
-    `🔝 Идентификатор уязвимости: ${sanitizeTelegramText(input.identifier, { max: 80 })}`,
-    "🟠 Описание:",
-    trimBlock(input.description || "—", 1800),
-    `⚙️ Класс: ${sanitizeTelegramText(input.vulnerabilityClass, { max: 160 }) || "не указан в NVD/ИИ"}`,
-    `🔹 Уровень опасности по CVSS: ${cvssLine}`,
-    `❗️ Эксплуатация: ${sanitizeTelegramText(input.exploitation, { max: 360 }) || "—"}`,
-    `🚨 Статус: ${sanitizeTelegramText(input.status, { max: 360 }) || "🟡 В работе — требуется уточнение контекста"}`,
-    ...(input.attackFlow?.length
-      ? ["🧭 Схема атаки:", numberedLines(input.attackFlow)]
-      : ["🧭 Схема атаки:", numberedLines(defaultAttackFlowSteps())]),
-    "⚙️ Рекомендации (в проработке):",
-    bulletLines(input.recommendations),
-    "🌐 Ссылки на источник:",
-    input.sourceUrls.length > 0
-      ? input.sourceUrls.map((u) => sanitizeTelegramText(u)).filter(Boolean).join("\n")
-      : "—"
+    `🚩 ⁣Уязвимость в ${product}`,
+    "",
+    `ℹ️ ${firstNonEmpty(description, title)}`,
+    "",
+    `🔸 BDU: ${ids.bduId}`,
+    `🔸 CVE: ${ids.cveId}`,
+    `🔸 CVSSv3: ${cvssV3}`,
+    `🔸 CVSSv4: —`,
+    `🔸 Уровень: ${level}`,
+    `🔸 Продукт: ${product}`,
+    `🔸 Компонент: ${component}`,
+    `🔸 Тип: ${vulnType}`,
+    `🔸 CWE: ${cwe}`,
+    `🔸 Затронутые версии: —`,
+    `🔸 Эксплуатация: ${exploit}`,
+    `🔸 Привилегии: —`,
+    `🔸 Взаимодействие с пользователем: —`,
+    "",
+    "🔝 Суть уязвимости:",
+    ...summaryLines.map((line) => `🔸 ${line}`),
+    "",
+    "⚠️ Возможные риски:",
+    ...riskLines.map((line) => `🔸 ${line}`),
+    "",
+    "🛠 Рекомендации:",
+    ...recommendationLines.map((line) => `🔸 ${line}`),
+    "",
+    `✅ ${sanitizeTelegramText(input.status, { max: 360 }) || "Согласно процессу уязвимость взята в работу."}`,
+    "",
+    "🌐 Дополнительная информация:",
+    ...(links.length > 0 ? links : ["—"])
   ];
 
   let text = parts.map((p) => sanitizeTelegramText(p, { multiline: true })).join("\n");

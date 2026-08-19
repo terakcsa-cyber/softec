@@ -288,11 +288,7 @@ function coercePartialAnalysisEnvelope(parsed: LlmJson): LlmJson | null {
   if (!isCleanSummaryText(summary)) return null;
   const title = strOrEmpty(parsed.title) || "Анализ уязвимости";
   let description = strOrEmpty(parsed.description);
-  if (description.length > 2800) {
-    const looksLikeTelegramTemplate = description.trim().startsWith("🚩");
-    const max = looksLikeTelegramTemplate ? 4000 : 2800;
-    description = `${description.slice(0, max)}…`;
-  }
+  if (description.length > 2800) description = `${description.slice(0, 2800)}…`;
   return {
     title,
     summary,
@@ -1006,33 +1002,7 @@ export async function runVulnContextLlm(
     `Требования:\n` +
     `- title: короткий заголовок (например, \"Критическая уязвимость в Linux Kernel (n_gsm)\").\n` +
     `- summary: 2–4 предложения для менеджера (что, где, эффект).\n` +
-    `- description: готовый ТЕКСТ Telegram-поста в НОВОМ ШАБЛОНЕ.\n` +
-    `  Структура (строго соблюдай порядок строк и заголовки; заменяй значения из raw или ставь '—', если данных нет):\n` +
-    `  1) 🚩 ⁣Уязвимость в {product}\n` +
-    `  2) ℹ️ Выявлена уязвимость {bduId} / {cveId} в {component}.\n` +
-    `  3) 🔸 BDU: {bduId}\n` +
-    `  4) 🔸 CVE: {cveId}\n` +
-    `  5) 🔸 CVSSv3: {cvssV3}\n` +
-    `  6) 🔸 CVSSv4: {cvssV4}\n` +
-    `  7) 🔸 Уровень: {level}\n` +
-    `  8) 🔸 Продукт: {product}\n` +
-    `  9) 🔸 Компонент: {component}\n` +
-    `  10) 🔸 Тип: {type}\n` +
-    `  11) 🔸 CWE: {cwe}\n` +
-    `  12) 🔸 Затронутые версии: {affectedVersions}\n` +
-    `  13) 🔸 Эксплуатация: {exploitability}\n` +
-    `  14) 🔸 Привилегии: {privileges}\n` +
-    `  15) 🔸 Взаимодействие с пользователем: {userInteraction}\n` +
-    `  16) 🔝 Суть уязвимости: затем 2–4 предложения (без списков).\n` +
-    `  17) ⚠️ Возможные риски: затем 4–7 строк, каждая начинается с '🔸 '.\n` +
-    `  18) 🛠 Рекомендации: затем 4–7 строк, каждая начинается с '🔸 '.\n` +
-    `  19) ✅ Согласно процессу уязвимость взята в работу. Проверка выполнена... (используй числа только если они есть в raw, иначе '—').\n` +
-    `  20) 🌐 Дополнительная информация:\n` +
-    `      • https://bdu.fstec.ru/vul/{bduId}\n` +
-    `      • https://nvd.nist.gov/vuln/detail/{cveId}\n` +
-    `      • (если в raw есть ссылка на коммит/патч в GitHub — добавь её, иначе поставь '—')\n` +
-    `  ВАЖНО: значения (BDU/CVE/CVSS/версии/CWE/ссылки) бери ТОЛЬКО из входного raw; если соответствующих данных нет — используй '—'.\n` +
-    `  Длина description должна умещаться в лимит одного Telegram-сообщения (ориентир: до ~3900 символов).\n` +
+    `- description: 1–3 абзаца технически (что за баг, условия эксплуатации, ограничения).\n` +
     `- vulnerabilityClass: например \"Race Condition → Use-After-Free\" / \"RCE\" / \"SSRF\".\n` +
     `- exploitation.publicExploit: \"yes\" если есть публичный PoC/эксплойт, \"no\" если явно нет, иначе \"unknown\".\n` +
     `- applicability.status: \"applicable\" если уязвимость обычно релевантна в реальных окружениях и требует проверки; \"not_applicable\" если только узкая/редкая конфигурация; иначе \"unknown\".\n` +
