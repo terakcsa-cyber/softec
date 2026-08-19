@@ -112,6 +112,17 @@ function trimBlock(s: string, max = 2800): string {
 
 /** Текст поста для Telegram-канала по шаблону банка. */
 export function formatVulnTelegramPost(input: VulnTelegramPostInput): string {
+  // New mode: if LLM produced a ready Telegram narrative template in `description`,
+  // send it verbatim (without the old “bank template” wrappers).
+  const desc = input.description ?? "";
+  if (
+    typeof desc === "string" &&
+    desc.trim().startsWith("🚩") &&
+    (desc.includes("🔝 Суть уязвимости") || desc.includes("⚠️ Возможные риски"))
+  ) {
+    return sanitizeTelegramText(desc, { multiline: true, max: 4090 });
+  }
+
   const sev = cvssSeverityLabel(input.cvssScore);
   const cvssLine =
     input.cvssScore != null && Number.isFinite(input.cvssScore)
