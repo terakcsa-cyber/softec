@@ -763,6 +763,9 @@ export class SchemaService implements OnModuleInit {
     );
     await this.db.query(`CREATE INDEX IF NOT EXISTS enrichment_ai_cve_id_idx ON enrichment_ai (cve_id)`);
     await this.db.query(
+      `CREATE INDEX IF NOT EXISTS enrichment_ai_cve_created_idx ON enrichment_ai (cve_id, created_at DESC)`
+    );
+    await this.db.query(
       `CREATE INDEX IF NOT EXISTS enrichment_ai_output_text_lower_trgm_idx ON enrichment_ai USING gin (lower(COALESCE(output_text, '')) gin_trgm_ops)`
     );
     await this.db.query(
