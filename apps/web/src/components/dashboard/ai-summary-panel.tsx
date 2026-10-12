@@ -4,6 +4,7 @@ import { parseAiOutputJson as parseCveAiOutputJson } from "@/lib/cve-enrich-ui";
 import { parseAiOutputJson as parseBduAiOutputJson } from "@/lib/bdu-enrich-ui";
 import { RefreshCw } from "lucide-react";
 import { cn } from "../ui/cn";
+import { DetailFactList } from "./vuln-detail-chrome";
 
 export function AiSummaryPanel({
   data,
@@ -120,7 +121,7 @@ export function AiSummaryPanel({
                 класс: <span className="text-fg/85">{String(vulnerabilityClass)}</span>
               </div>
             ) : null}
-            <div className="mt-2 text-sm leading-relaxed">
+            <div className="mt-2 break-words text-sm leading-relaxed text-fg/90">
               {summaryText ??
                 (aiPending
                   ? `Генерируем сводку по ${entityLabel} (LLM). Обычно занимает несколько секунд.`
@@ -164,43 +165,37 @@ export function AiSummaryPanel({
 
         <div className={cn("space-y-3", embedded ? "" : "col-span-12 xl:col-span-5")}>
           <div className="rounded-xl border border-border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none">
-            <div className="text-xs text-muted">Эксплуатация / применимость</div>
-            <div className="mt-2 text-sm text-fg/90">
-              <div>
-                публичный PoC/эксплойт:{" "}
-                <span className="text-fg/95">
-                  {(() => {
+            <div className="text-xs font-medium uppercase tracking-wide text-muted">Эксплуатация</div>
+            <DetailFactList
+              rows={[
+                {
+                  label: "Публичный PoC",
+                  value: (() => {
                     const e = exploitation && typeof exploitation === "object" ? (exploitation as Record<string, unknown>) : null;
                     const v = e?.publicExploit;
-                    if (v === "yes") return "да";
-                    if (v === "no") return "нет";
-                    return "неизвестно";
-                  })()}
-                </span>
-              </div>
-              <div className="mt-1">
-                статус применимости:{" "}
-                <span className="text-fg/95">
-                  {(() => {
+                    if (v === "yes") return "Да";
+                    if (v === "no") return "Нет";
+                    return "Неизвестно";
+                  })()
+                },
+                {
+                  label: "Применимость",
+                  value: (() => {
                     const a = applicability && typeof applicability === "object" ? (applicability as Record<string, unknown>) : null;
                     const s = a?.status;
-                    if (s === "applicable") return "применимо (нужна проверка)";
-                    if (s === "not_applicable") return "скорее не применимо";
-                    return "неизвестно";
-                  })()}
-                </span>
-              </div>
-              {(() => {
-                const a = applicability && typeof applicability === "object" ? (applicability as Record<string, unknown>) : null;
-                const notes = a?.notes;
-                return notes ? <div className="mt-2 text-xs text-muted whitespace-pre-wrap">{String(notes)}</div> : null;
-              })()}
-              {(() => {
-                const e = exploitation && typeof exploitation === "object" ? (exploitation as Record<string, unknown>) : null;
-                const notes = e?.exploitNotes;
-                return notes ? <div className="mt-2 text-xs text-muted whitespace-pre-wrap">{String(notes)}</div> : null;
-              })()}
-            </div>
+                    if (s === "applicable") return "Нужна проверка";
+                    if (s === "not_applicable") return "Скорее не применимо";
+                    return "Неизвестно";
+                  })()
+                },
+                ...(() => {
+                  const a = applicability && typeof applicability === "object" ? (applicability as Record<string, unknown>) : null;
+                  const e = exploitation && typeof exploitation === "object" ? (exploitation as Record<string, unknown>) : null;
+                  const notes = [a?.notes, e?.exploitNotes].filter((x) => typeof x === "string" && x.trim()).join("\n\n");
+                  return notes ? [{ label: "Заметки", value: <span className="whitespace-pre-wrap">{notes}</span> }] : [];
+                })()
+              ]}
+            />
           </div>
 
           <div className="rounded-xl border border-border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none">

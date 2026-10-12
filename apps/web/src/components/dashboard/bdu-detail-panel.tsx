@@ -5,11 +5,11 @@ import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "@/lib/api-fetch";
 import { parseAiOutputJson } from "@/lib/bdu-enrich-ui";
 import { computeBduPriority, bduRiskScore } from "@/lib/bdu-priority";
-import { cn } from "../ui/cn";
 import { ExternalLink, FileDown, X } from "lucide-react";
 import { TelegramPostButton } from "./telegram-post-button";
 import { AiSummaryPanel } from "./ai-summary-panel";
 import { VulnTicketHistory } from "./vuln-ticket-history";
+import { DetailFactList, DetailMetricGrid, DetailSection, DetailTabs } from "./vuln-detail-chrome";
 import type { BduListItem } from "./bdu-card";
 
 type DetailTab = "general" | "products" | "fixes" | "history" | "sources";
@@ -34,14 +34,6 @@ function fmtDateShort(s?: string | null) {
   if (/\d{2}\.\d{2}\.\d{4}/.test(s)) return s;
   const d = new Date(s);
   return Number.isFinite(d.getTime()) ? d.toLocaleDateString() : String(s);
-}
-
-function pill(cls: string, label: string, title?: string) {
-  return (
-    <span title={title} className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px]", cls)}>
-      {label}
-    </span>
-  );
 }
 
 function parseSoftwareLines(softwareNames?: string | null, vendors?: string | null): Array<{ vendor: string; product: string }> {
@@ -241,89 +233,38 @@ export function BduDetailPanel({
     }
   }, [primaryCve, taskBusy, products, bduId, d?.name, tasksByCveQuery, onOpenTask]);
 
-  const prPill =
-    pr?.level === "critical"
-      ? { cls: "border-danger/30 bg-danger/15 text-danger", label: `Приоритет: крит ${pr.score}` }
-      : pr?.level === "high"
-        ? { cls: "border-warn/30 bg-warn/15 text-warn", label: `Приоритет: высокий ${pr.score}` }
-        : pr?.level === "medium"
-          ? { cls: "border-accent/30 bg-accent/10 text-fg/80", label: `Приоритет: средний ${pr.score}` }
-          : pr
-            ? { cls: "border-ok/30 bg-ok/10 text-ok", label: `Приоритет: низкий ${pr.score}` }
-            : null;
-
-  const riskPill =
-    risk == null
-      ? { cls: "bg-slate-50 text-muted border-slate-200 dark:bg-white/5 dark:border-white/10", label: "Risk: —" }
-      : risk >= 85
-        ? { cls: "bg-danger/15 text-danger border-danger/30", label: `Risk: ${risk}` }
-        : risk >= 70
-          ? { cls: "bg-warn/15 text-warn border-warn/30", label: `Risk: ${risk}` }
-          : risk >= 40
-            ? { cls: "bg-accent/15 text-accent border-accent/30", label: `Risk: ${risk}` }
-            : { cls: "bg-ok/15 text-ok border-ok/30", label: `Risk: ${risk}` };
-
   const fstecUrl = d?.fstecUrl ?? `https://bdu.fstec.ru/vul/${encodeURIComponent(bduId)}`;
+  const scoreTone = (n: number | null | undefined): "danger" | "warn" | "ok" | "neutral" => {
+    if (n == null || !Number.isFinite(n)) return "neutral";
+    if (n >= 85) return "danger";
+    if (n >= 70) return "warn";
+    if (n >= 40) return "ok";
+    return "neutral";
+  };
+  const cvssTone = (n: number | null | undefined): "danger" | "warn" | "ok" | "neutral" => {
+    if (n == null || !Number.isFinite(n)) return "neutral";
+    if (n >= 9) return "danger";
+    if (n >= 7) return "warn";
+    if (n >= 4) return "ok";
+    return "neutral";
+  };
 
   return (
     <div className="glass rounded-2xl p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
-              <div className="truncate text-base font-semibold tracking-tight">BDU:{bduId}</div>
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] uppercase tracking-wide text-muted">Бюллетень БДУ</div>
+          <h2 className="truncate text-lg font-semibold tracking-tight text-fg">BDU:{bduId}</h2>
+          {d?.name ? <p className="mt-1 line-clamp-2 text-sm leading-snug text-fg/80">{d.name}</p> : null}
+          {(d?.linkedCveIds ?? []).length > 0 ? (
+            <p className="mt-1 flex flex-wrap gap-x-3 gap-y-1 font-mono text-[11px]">
               {(d?.linkedCveIds ?? []).map((cve) => (
-                <button
-                  key={cve}
-                  type="button"
-                  onClick={() => onOpenCve?.(cve)}
-                  className="text-[11px] font-mono font-normal text-accent hover:underline"
-                >
+                <button key={cve} type="button" onClick={() => onOpenCve?.(cve)} className="text-accent hover:underline">
                   {cve}
                 </button>
               ))}
-            </div>
-            {prPill ? pill(prPill.cls, prPill.label, pr?.reasons?.join(" • ")) : null}
-            {pill(cn("border-border", riskPill.cls), riskPill.label)}
-            {pill("border-slate-200 bg-slate-50 text-fg/80 dark:border-white/10 dark:bg-white/5", "EPSS: —")}
-            {d?.hasExploit
-              ? pill("border-danger/30 bg-danger/15 text-danger", "Эксплойт: да")
-              : pill("border-border bg-white/60 text-fg/70 dark:bg-black/10", "Эксплойт: нет")}
-            {pill(
-              "border-slate-200 bg-slate-50 text-fg/80 dark:border-white/10 dark:bg-white/5",
-              `CVSS: ${typeof d?.cvssScore === "number" ? d.cvssScore.toFixed(1) : "—"}`
-            )}
-            {manualEnrichAllowed
-              ? pill(
-                  hasAiSummary || aiPending
-                    ? "border-ok/30 bg-ok/10 text-ok"
-                    : "border-slate-200 bg-white text-fg/70 dark:border-white/10 dark:bg-white/5",
-                  aiPending ? "ИИ: генерация…" : hasAiSummary ? "ИИ: готово" : "ИИ: доступно"
-                )
-              : pill("border-slate-200 bg-white text-fg/70 dark:border-white/10 dark:bg-white/5", "ИИ: —")}
-          </div>
-          {d?.name ? <div className="mt-1 line-clamp-2 text-sm text-fg/85">{d.name}</div> : null}
-          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted">
-            <div>
-              выявлено: <span className="text-fg/80">{fmtDateShort(d?.identifyDate ?? null)}</span>
-            </div>
-            <div>
-              опубл: <span className="text-fg/80">{fmtDateShort(d?.publicationDate ?? null)}</span>
-            </div>
-            <div>
-              обновл: <span className="text-fg/80">{fmtDateShort(d?.lastUpdDate ?? d?.updatedAt ?? null)}</span>
-            </div>
-          </div>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-            <a
-              className="inline-flex items-center gap-1 rounded-full border border-border bg-white/70 px-2 py-1 text-fg/80 hover:bg-white dark:bg-black/10 dark:hover:bg-black/20"
-              href={fstecUrl}
-              target="_blank"
-              rel="noreferrer"
-            >
-              БДУ ФСТЭК <ExternalLink className="h-3.5 w-3.5" aria-hidden />
-            </a>
-          </div>
+            </p>
+          ) : null}
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
@@ -352,67 +293,82 @@ export function BduDetailPanel({
       </div>
       {dlErr ? <div className="mt-2 text-[11px] text-rose-700">{dlErr}</div> : null}
 
+      <DetailMetricGrid
+        items={[
+          {
+            label: "Приоритет",
+            value: pr ? `${pr.score}` : "—",
+            title: pr?.reasons?.join(" · "),
+            tone: pr?.level === "critical" ? "danger" : pr?.level === "high" ? "warn" : pr?.level === "low" ? "ok" : "neutral"
+          },
+          { label: "Risk", value: risk == null ? "—" : String(risk), tone: scoreTone(risk) },
+          {
+            label: "CVSS",
+            value: typeof d?.cvssScore === "number" ? d.cvssScore.toFixed(1) : "—",
+            tone: cvssTone(typeof d?.cvssScore === "number" ? d.cvssScore : null)
+          },
+          { label: "Эксплойт", value: d?.hasExploit ? "Да" : "Нет", tone: d?.hasExploit ? "danger" : "neutral" },
+          {
+            label: "ИИ",
+            value: !manualEnrichAllowed ? "—" : aiPending ? "Считаем" : hasAiSummary ? "Готово" : "Доступно",
+            tone: hasAiSummary ? "ok" : "neutral"
+          },
+          { label: "Уровень", value: d?.severity?.trim() || "—" }
+        ]}
+      />
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-muted">
+        <span>Выявлено {fmtDateShort(d?.identifyDate ?? null)}</span>
+        <span>Опубликовано {fmtDateShort(d?.publicationDate ?? null)}</span>
+        <span>Обновлено {fmtDateShort(d?.lastUpdDate ?? d?.updatedAt ?? null)}</span>
+        <a className="inline-flex items-center gap-1 text-fg/80 hover:underline" href={fstecUrl} target="_blank" rel="noreferrer">
+          БДУ ФСТЭК <ExternalLink className="h-3 w-3" />
+        </a>
+      </div>
+
       {loading ? (
         <div className="mt-6 text-sm text-muted">Загрузка…</div>
       ) : !d ? (
         <div className="mt-6 text-sm text-danger">Запись не найдена</div>
       ) : (
         <>
-          <div className="mt-4 flex flex-wrap gap-2 border-b border-border pb-3">
-            {[
-              ["general", "Общая"],
-              ["products", "Уязвимые продукты"],
-              ["fixes", "Исправления"],
-              ["history", "История"],
-              ["sources", "Источники"]
-            ].map(([k, label]) => (
-              <button
-                key={k}
-                type="button"
-                onClick={() => setTab(k as DetailTab)}
-                className={cn(
-                  "rounded-full border px-3 py-1.5 text-xs transition",
-                  tab === k
-                    ? "border-accent/40 bg-accent/10 text-fg"
-                    : "border-border bg-white/60 text-fg/75 hover:bg-white dark:bg-black/10 dark:hover:bg-black/20"
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+          <DetailTabs
+            value={tab}
+            onChange={setTab}
+            tabs={[
+              { id: "general", label: "Общая" },
+              { id: "products", label: "Продукты" },
+              { id: "fixes", label: "Исправления" },
+              { id: "history", label: "История" },
+              { id: "sources", label: "Источники" }
+            ]}
+          />
 
           {tab === "general" ? (
             <div className="mt-4 grid grid-cols-12 gap-4">
               <div className="col-span-12 xl:col-span-5 space-y-3">
-                <div className="rounded-xl border border-border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none">
-                  <div className="text-xs text-muted">Оценка риска (БДУ)</div>
-                  <div className="mt-2 space-y-2 text-sm">
-                    <div className="flex justify-between gap-3">
-                      <span className="text-fg/90">Уровень ФСТЭК</span>
-                      <span className="text-fg/80">{d.severity ?? "—"}</span>
-                    </div>
-                    <div className="flex justify-between gap-3">
-                      <span className="text-fg/90">Статус</span>
-                      <span className="text-fg/80">{d.status ?? "—"}</span>
-                    </div>
-                    <div className="flex justify-between gap-3">
-                      <span className="text-fg/90">Эксплуатация</span>
-                      <span className="text-fg/80">{d.exploitStatus ?? "—"}</span>
-                    </div>
-                    <div className="flex justify-between gap-3">
-                      <span className="text-fg/90">Исправление</span>
-                      <span className="text-fg/80">{d.fixStatus ?? "—"}</span>
-                    </div>
-                  </div>
-                </div>
-                <div className="rounded-xl border border-border bg-white p-4 shadow-sm dark:bg-black/20 dark:shadow-none">
-                  <div className="text-xs text-muted">CVSS (реестр БДУ)</div>
-                  <div className="mt-2 text-sm tabular-nums text-fg/80">
-                    {typeof d.cvssScore === "number" ? d.cvssScore.toFixed(1) : "—"}
-                  </div>
-                  {d.cvssVector ? <div className="mt-2 break-all text-xs text-muted">{d.cvssVector}</div> : null}
-                </div>
+                <DetailSection title="Реестр БДУ">
+                  <DetailFactList
+                    rows={[
+                      { label: "Уровень", value: d.severity ?? "—" },
+                      { label: "Статус", value: d.status ?? "—" },
+                      { label: "Эксплуатация", value: d.exploitStatus ?? "—" },
+                      { label: "Исправление", value: d.fixStatus ?? "—" },
+                      {
+                        label: "CVSS",
+                        value: (
+                          <span>
+                            <span className="tabular-nums">
+                              {typeof d.cvssScore === "number" ? d.cvssScore.toFixed(1) : "—"}
+                            </span>
+                            {d.cvssVector ? (
+                              <span className="mt-0.5 block font-mono text-[11px] text-muted">{d.cvssVector}</span>
+                            ) : null}
+                          </span>
+                        )
+                      }
+                    ]}
+                  />
+                </DetailSection>
               </div>
 
               <div className="col-span-12 xl:col-span-7 space-y-3">
@@ -459,6 +415,7 @@ export function BduDetailPanel({
                 </div>
 
                 <AiSummaryPanel
+                  embedded
                   data={payload}
                   loading={loading}
                   aiPending={aiPending}
@@ -481,11 +438,13 @@ export function BduDetailPanel({
                   {products.map((vp, i) => (
                     <div
                       key={`${vp.vendor}:${vp.product}:${i}`}
-                      className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm dark:border-white/10 dark:bg-white/5"
+                      className="min-w-0 rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm dark:border-white/10 dark:bg-white/5"
                     >
-                      <div className="font-medium text-fg/90">{vp.vendor}</div>
-                      <div className="text-fg/85">{vp.product}</div>
-                      <div className="mt-1 text-[11px] text-muted">источник: БДУ ФСТЭК</div>
+                      <div className="text-[10px] uppercase tracking-wide text-muted">Вендор</div>
+                      <div className="break-words font-medium text-fg/90">{vp.vendor}</div>
+                      <div className="mt-2 text-[10px] uppercase tracking-wide text-muted">Продукт</div>
+                      <div className="break-words text-fg/85">{vp.product}</div>
+                      <div className="mt-2 text-[11px] text-muted">Источник: БДУ ФСТЭК</div>
                     </div>
                   ))}
                 </div>
