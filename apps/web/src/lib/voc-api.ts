@@ -3,6 +3,7 @@ import { apiFetch } from "./api-fetch";
 export type VocSource = "cve" | "bdu" | "tg";
 export type VocTriageStatus = "open" | "claimed" | "done" | "dismissed";
 export type VocPriority = "p1" | "p2" | "p3" | "p4";
+export type VocDeskDecision = "fixing" | "waiting_patch" | "not_ours" | "accepted_risk";
 
 export type VocQueueItem = {
   refKey: string;
@@ -25,6 +26,8 @@ export type VocQueueItem = {
   slaBreached?: boolean;
   linkedRefsCount?: number;
   taskId?: string | null;
+  deskDecision?: VocDeskDecision | null;
+  deskReviewAt?: string | null;
 };
 
 export type VocQueueResponse = {
@@ -51,6 +54,8 @@ export type VocTriageRow = {
   status: VocTriageStatus;
   claimedByEmail: string | null;
   updatedAt: string | null;
+  deskDecision?: VocDeskDecision | null;
+  deskReviewAt?: string | null;
 };
 
 export async function fetchVocTriageBySource(source: VocSource, limit = 200): Promise<VocTriageRow[]> {

@@ -5,6 +5,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/contexts/auth-context";
 import {
   patchVocTriage,
+  type VocDeskDecision,
   type VocQueueItem,
   type VocQueueResponse,
   type VocTriageRow,
@@ -15,11 +16,19 @@ import { isVocRefSessionClosed, markVocRefClosed, markVocRefOpen } from "./voc-s
 export type VocTriageOverride = {
   status: VocTriageStatus;
   claimedByEmail: string | null;
+  deskDecision?: VocDeskDecision | null;
+  deskReviewAt?: string | null;
 };
 
 function applyOverride(item: VocQueueItem, override?: VocTriageOverride): VocQueueItem {
   if (override) {
-    return { ...item, status: override.status, claimedByEmail: override.claimedByEmail };
+    return {
+      ...item,
+      status: override.status,
+      claimedByEmail: override.claimedByEmail,
+      deskDecision: override.deskDecision ?? item.deskDecision ?? null,
+      deskReviewAt: override.deskReviewAt ?? item.deskReviewAt ?? null
+    };
   }
   if (isVocRefSessionClosed(item.refKey)) {
     return { ...item, status: "done" };
@@ -46,10 +55,20 @@ export function useVocQueueTriage() {
       setError(null);
       setPendingKey(vars.refKey);
 
+      const meta = vars.meta ?? {};
+      const deskDecision =
+        meta.deskDecision === "fixing" ||
+        meta.deskDecision === "waiting_patch" ||
+        meta.deskDecision === "not_ours" ||
+        meta.deskDecision === "accepted_risk"
+          ? meta.deskDecision
+          : null;
       const optimistic: VocTriageOverride = {
         status: vars.status,
         claimedByEmail:
-          vars.status === "claimed" ? (user?.email ?? "вы") : vars.status === "open" ? null : null
+          vars.status === "claimed" ? (user?.email ?? "вы") : vars.status === "open" ? null : null,
+        deskDecision,
+        deskReviewAt: typeof meta.deskReviewAt === "string" ? meta.deskReviewAt : null
       };
 
       if (vars.status === "done" || vars.status === "dismissed") markVocRefClosed(vars.refKey);
@@ -126,13 +145,17 @@ export function useVocQueueTriage() {
     }
   });
 
-  const setStatus = useCallback(
-    (item: VocQueueItem, status: VocTriageStatus) => {
+  const commit = useCallback(
+    async (
+      item: VocQueueItem,
+      status: VocTriageStatus,
+      decision?: { deskDecision: VocDeskDecision; deskReviewAt?: string | null }
+    ) => {
       if (!canWrite) {
         setError("Роль viewer доступна только для чтения");
         return;
       }
-      mutation.mutate({
+      await mutation.mutateAsync({
         refKey: item.refKey,
         source: item.source,
         refId: item.refId,
@@ -141,7 +164,13 @@ export function useVocQueueTriage() {
         vocScore: item.vocScore,
         vocPriority: item.vocPriority,
         vocReasons: item.vocReasons,
-        meta: item.payload
+        meta: decision
+          ? {
+              deskDecision: decision.deskDecision,
+              deskReviewAt: decision.deskReviewAt ?? null,
+              deskDecidedAt: new Date().toISOString()
+            }
+          : {}
       });
     },
     [canWrite, mutation]
@@ -150,7 +179,10 @@ export function useVocQueueTriage() {
   return {
     userEmail: user?.email ?? null,
     mergeItems,
-    setStatus,
+    setStatus: (item: VocQueueItem, status: VocTriageStatus) => {
+      void commit(item, status);
+    },
+    commit,
     pendingKey,
     error,
     clearError: () => setError(null),

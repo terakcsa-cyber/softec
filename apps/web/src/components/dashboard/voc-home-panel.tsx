@@ -2,143 +2,66 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AnimatePresence, motion } from "framer-motion";
+import { AlertCircle, ChevronRight, Loader2, RefreshCw, X } from "lucide-react";
+import { cn } from "../ui/cn";
+import { apiFetch } from "@/lib/api-fetch";
 import { LiveNumber } from "../ui/live-number";
 import { useLiveQueryOptions } from "@/lib/live-refresh";
 import {
-  Activity,
-  AlertCircle,
-  Bookmark,
-  Briefcase,
-  ChevronRight,
-  Clock,
-  Inbox,
-  Keyboard,
-  Loader2,
-  RefreshCw,
-  ShieldAlert,
-  UserRound,
-  X
-} from "lucide-react";
-import { cn } from "../ui/cn";
-import { apiFetch } from "@/lib/api-fetch";
-import {
   fetchVocQueue,
   fetchVocTriageBySource,
+  type VocDeskDecision,
   type VocQueueItem,
-  type VocSource,
   type VocTriageStatus
 } from "@/lib/voc-api";
 import { useVocQueueTriage } from "@/lib/use-voc-queue-triage";
-import {
-  buildTgCriticalRows,
-  isWithinLast24h,
-  type TgCveIntel,
-  type TgFeedResponse
-} from "@/lib/tg-feed-critical";
+import { buildTgCriticalRows, isWithinLast24h, type TgCveIntel, type TgFeedResponse } from "@/lib/tg-feed-critical";
 import { scoreTgForVoc } from "@/lib/voc-scoring-client";
-import { vocPriorityLabel, vocPriorityMeta, vocStatusLabel } from "@/lib/voc-labels";
-import { vocChipClass, vocIntelContext } from "@/lib/voc-queue-context";
+import { applyWatchlistBoostClient } from "@/lib/voc-watchlist-client";
 import { fetchVocWatchlist } from "@/lib/voc-watchlist-api";
-import { applyWatchlistBoostClient, hasWatchlistHit } from "@/lib/voc-watchlist-client";
-import { isVocRefSessionClosed } from "@/lib/voc-session-closed";
+import { buildDeskRows, deskStats, filterDeskRows, type DeskFilter, type DeskRow } from "@/lib/voc-desk";
 import { VocQueueRow } from "./voc-queue-row";
 import { VocWatchlistPanel } from "./voc-watchlist-panel";
-import { VocWatchlistQuickAdd } from "./voc-watchlist-quick-add";
-import { VocCasesPanel, type VocCaseFilter } from "./voc-cases-panel";
+import { VocCasesPanel } from "./voc-cases-panel";
 import { VocShiftPanel } from "./voc-shift-panel";
-import {
-  buildCaseRefMap,
-  createVocCaseFromRef,
-  fetchVocCases,
-  type VocCaseRow
-} from "@/lib/voc-case-api";
-import { caseIssueKey, isSlaBreached, slaRemainingLabel, slaTone } from "@/lib/voc-case-client";
-
-type SourceTab = "all" | VocSource | "watchlist";
-type StatusTab = "active" | "open" | "claimed" | "done" | "all";
-type SectionTab = "queue" | "cases" | "watchlist" | "shift";
-type WorkLens = "now" | "mine" | "all";
-
-function fmtWhen(raw: string | null | undefined): string {
-  if (!raw) return "—";
-  const s = raw.trim();
-  const bdu = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(s);
-  if (bdu) {
-    const d = new Date(Date.UTC(Number(bdu[3]), Number(bdu[2]) - 1, Number(bdu[1])));
-    if (Number.isNaN(d.getTime())) return s;
-    return d.toLocaleDateString("ru-RU", {
-      day: "numeric",
-      month: "long",
-      year: "numeric",
-      timeZone: "UTC"
-    });
-  }
-  const d = new Date(s);
-  if (Number.isNaN(d.getTime())) return s;
-  return d.toLocaleString("ru-RU", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
-}
-
-function isMineItem(item: VocQueueItem, email?: string | null) {
-  if (!email) return false;
-  const e = email.toLowerCase();
-  return item.claimedByEmail?.toLowerCase() === e || item.assigneeEmail?.toLowerCase() === e;
-}
-
-function isNowItem(item: VocQueueItem) {
-  if (isVocRefSessionClosed(item.refKey)) return false;
-  if (item.status === "done" || item.status === "dismissed") return false;
-  if (item.vocPriority === "p1" || Boolean(item.slaBreached) || hasWatchlistHit(item)) return true;
-  // ФСТЭК БДУ высокого/критичного контура — обязательный приоритет смены для банка
-  return item.source === "bdu" && item.vocPriority === "p2";
-}
-
-function urgencyScore(item: VocQueueItem) {
-  let n = item.vocScore;
-  if (item.slaBreached) n += 1000;
-  if (item.vocPriority === "p1") n += 400;
-  if (item.vocPriority === "p2") n += 120;
-  if (hasWatchlistHit(item)) n += 180;
-  if (item.status === "open") n += 20;
-  return n;
-}
+import { buildCaseRefMap, createVocCaseFromRef, fetchVocCases, type VocCaseRow } from "@/lib/voc-case-api";
+import { isSlaBreached } from "@/lib/voc-case-client";
+import { vocChipClass, vocIntelContext } from "@/lib/voc-queue-context";
 
 export function VocHomePanel({
   onOpenCve,
   onOpenBdu,
-  onOpenTgLink,
-  variant = "card"
+  onOpenTgLink
 }: {
   onOpenCve?: (cveId: string) => void;
   onOpenBdu?: (bduId: string) => void;
   onOpenTgLink?: (link: string) => void;
-  /** `page` — отдельный модуль с вкладками; `card` — компактный блок (legacy). */
   variant?: "card" | "page";
 }) {
-  const isPage = variant === "page";
-  const { userEmail, mergeItems, setStatus, pendingKey, error, clearError } = useVocQueueTriage();
-  const [section, setSection] = useState<SectionTab>("queue");
-  const [sourceTab, setSourceTab] = useState<SourceTab>("all");
-  const [statusTab, setStatusTab] = useState<StatusTab>("active");
-  const [workLens, setWorkLens] = useState<WorkLens>("all");
+  const { userEmail, mergeItems, commit, pendingKey, error, clearError } = useVocQueueTriage();
+  const [filter, setFilter] = useState<DeskFilter>("desk");
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
-  const [kbdIndex, setKbdIndex] = useState(0);
   const [caseError, setCaseError] = useState<string | null>(null);
   const [casePending, setCasePending] = useState(false);
   const [openCaseId, setOpenCaseId] = useState<string | null>(null);
-  const [caseFilter, setCaseFilter] = useState<VocCaseFilter>("all");
-
+  const [showSetup, setShowSetup] = useState(false);
   const liveOpts = useLiveQueryOptions();
   const queryClient = useQueryClient();
 
   const queueQuery = useQuery({
-    queryKey: ["voc", "queue", sourceTab === "tg" ? "all" : sourceTab, statusTab],
-    queryFn: () =>
-      fetchVocQueue({
-        source: sourceTab === "tg" ? "all" : sourceTab,
-        status: statusTab,
-        limit: 160
-      }),
+    queryKey: ["voc", "queue", "desk"],
+    queryFn: async () => {
+      const [hot, watched] = await Promise.all([
+        fetchVocQueue({ source: "all", status: "all", limit: 200 }),
+        fetchVocQueue({ source: "watchlist", status: "all", limit: 80 }).catch(() => ({
+          items: [] as VocQueueItem[],
+          stats: {}
+        }))
+      ]);
+      const byKey = new Map<string, VocQueueItem>();
+      for (const item of [...hot.items, ...watched.items]) byKey.set(item.refKey, item);
+      return { items: [...byKey.values()], stats: hot.stats };
+    },
     ...liveOpts
   });
 
@@ -166,32 +89,17 @@ export function VocHomePanel({
     ...liveOpts
   });
 
-  const caseRefMap = useMemo(() => buildCaseRefMap(casesQuery.data ?? []), [casesQuery.data]);
-
   const tgTriageQuery = useQuery({
     queryKey: ["voc", "triage", "tg"],
     queryFn: () => fetchVocTriageBySource("tg", 240),
-    enabled: sourceTab === "all" || sourceTab === "tg" || sourceTab === "watchlist",
     ...liveOpts
   });
 
-  const tgTriageMap = useMemo(() => {
-    const map = new Map<string, { status: VocTriageStatus; claimedByEmail: string | null; updatedAt: string | null }>();
-    for (const row of tgTriageQuery.data ?? []) {
-      map.set(row.refKey, row);
-    }
-    return map;
-  }, [tgTriageQuery.data]);
-
-  const tgRecentItems = useMemo(
-    () => (tgFeedQuery.data?.items ?? []).filter((it) => isWithinLast24h(it.pubDate)),
-    [tgFeedQuery.data?.items]
-  );
+  const caseRefMap = useMemo(() => buildCaseRefMap(casesQuery.data ?? []), [casesQuery.data]);
 
   const tgItems = useMemo((): VocQueueItem[] => {
     const intelByCve = new Map<string, TgCveIntel>();
-    const apiItems = queueQuery.data?.items ?? [];
-    for (const row of apiItems) {
+    for (const row of queueQuery.data?.items ?? []) {
       if (row.source !== "cve") continue;
       intelByCve.set(row.refId.toUpperCase(), {
         cve_id: row.refId,
@@ -203,10 +111,10 @@ export function VocHomePanel({
         vp_product: (row.payload.vp_product as string | null) ?? null
       });
     }
-
+    const triage = new Map((tgTriageQuery.data ?? []).map((row) => [row.refKey, row]));
+    const recent = (tgFeedQuery.data?.items ?? []).filter((item) => isWithinLast24h(item.pubDate));
     const watchlist = watchlistQuery.data ?? [];
-    const rows = buildTgCriticalRows(tgRecentItems, intelByCve, { minScore: 24 });
-    return rows.map((row) => {
+    return buildTgCriticalRows(recent, intelByCve, { minScore: 24 }).map((row) => {
       const scored = scoreTgForVoc({
         score: row.score,
         reasons: row.reasons,
@@ -223,9 +131,8 @@ export function VocHomePanel({
         },
         watchlist
       );
-      const title = row.item.title?.trim() || `@${row.item.channel.slug}`;
       const refKey = `TG:${row.item.id}`;
-      const triage = tgTriageMap.get(refKey);
+      const saved = triage.get(refKey);
       return {
         refKey,
         source: "tg" as const,
@@ -233,12 +140,14 @@ export function VocHomePanel({
         vocScore: boosted.score,
         vocPriority: boosted.priority,
         vocReasons: boosted.reasons,
-        title,
+        title: row.item.title?.trim() || `@${row.item.channel.slug}`,
         subtitle: (row.item.descriptionText || "").slice(0, 220),
         publishedAt: row.item.pubDate,
-        status: triage?.status ?? "open",
-        claimedByEmail: triage?.claimedByEmail ?? null,
-        updatedAt: triage?.updatedAt ?? null,
+        status: saved?.status ?? "open",
+        claimedByEmail: saved?.claimedByEmail ?? null,
+        updatedAt: saved?.updatedAt ?? null,
+        deskDecision: saved?.deskDecision ?? null,
+        deskReviewAt: saved?.deskReviewAt ?? null,
         payload: {
           link: row.item.link,
           channel: row.item.channel,
@@ -247,40 +156,11 @@ export function VocHomePanel({
         }
       };
     });
-  }, [tgRecentItems, queueQuery.data?.items, tgTriageMap, watchlistQuery.data]);
+  }, [queueQuery.data?.items, tgFeedQuery.data?.items, tgTriageQuery.data, watchlistQuery.data]);
 
-  const queueItems = useMemo(() => {
-    const base = queueQuery.data?.items ?? [];
-    let merged =
-      sourceTab === "watchlist"
-        ? [...base, ...tgItems.filter((i) => hasWatchlistHit(i))]
-        : sourceTab === "tg"
-          ? tgItems
-          : sourceTab === "all"
-            ? [...base, ...tgItems]
-            : base;
-    merged = mergeItems(merged);
-    merged = [...merged].sort((a, b) => {
-      const urg = urgencyScore(b) - urgencyScore(a);
-      if (urg !== 0) return urg;
-      return String(b.publishedAt ?? "").localeCompare(String(a.publishedAt ?? ""));
-    });
-    if (statusTab === "active") {
-      merged = merged.filter((i) => i.status === "open" || i.status === "claimed");
-    } else if (statusTab === "open") {
-      merged = merged.filter((i) => i.status === "open");
-    } else if (statusTab === "claimed") {
-      merged = merged.filter((i) => i.status === "claimed");
-    } else if (statusTab === "done") {
-      merged = merged.filter((i) => i.status === "done" || i.status === "dismissed");
-    }
-    return merged.map((item) => {
-      if (item.caseId) {
-        return {
-          ...item,
-          slaBreached: item.slaBreached ?? isSlaBreached(item.slaDueAt)
-        };
-      }
+  const rows = useMemo(() => {
+    const merged = mergeItems([...(queueQuery.data?.items ?? []), ...tgItems]).map((item) => {
+      if (item.caseId) return { ...item, slaBreached: item.slaBreached ?? isSlaBreached(item.slaDueAt) };
       const hit = caseRefMap.get(item.refKey);
       if (!hit) return item;
       return {
@@ -294,748 +174,346 @@ export function VocHomePanel({
         taskId: hit.taskId
       };
     });
-  }, [queueQuery.data?.items, tgItems, sourceTab, statusTab, mergeItems, caseRefMap]);
+    return buildDeskRows(merged);
+  }, [queueQuery.data?.items, tgItems, mergeItems, caseRefMap]);
 
-  const items = useMemo(() => {
-    if (workLens === "mine") return queueItems.filter((i) => isMineItem(i, userEmail));
-    if (workLens === "now") return queueItems.filter(isNowItem);
-    return queueItems;
-  }, [queueItems, workLens, userEmail]);
+  const stats = useMemo(() => deskStats(rows), [rows]);
+  const visible = useMemo(() => filterDeskRows(rows, filter), [rows, filter]);
+  const selected = visible.find((row) => row.key === selectedKey) ?? visible[0] ?? null;
 
-  const sourceCounts = useMemo(
-    () => ({
-      cve: queueItems.filter((i) => i.source === "cve").length,
-      bdu: queueItems.filter((i) => i.source === "bdu").length,
-      tg: queueItems.filter((i) => i.source === "tg").length
-    }),
-    [queueItems]
-  );
+  useEffect(() => {
+    if (!visible.length) {
+      setSelectedKey(null);
+      return;
+    }
+    if (!selectedKey || !visible.some((row) => row.key === selectedKey)) setSelectedKey(visible[0]!.key);
+  }, [visible, selectedKey]);
 
-  const stats = useMemo(() => {
-    const slaCases = (casesQuery.data ?? []).filter((c) => isSlaBreached(c.slaDueAt)).length;
-    return {
-      now: queueItems.filter(isNowItem).length,
-      mine: queueItems.filter((i) => isMineItem(i, userEmail)).length,
-      p1: queueItems.filter((i) => i.vocPriority === "p1" && i.status !== "done" && i.status !== "dismissed").length,
-      sla: slaCases || queueItems.filter((i) => i.slaBreached).length,
-      cases: casesQuery.data?.length ?? 0,
-      watchlist: queueItems.filter((i) => hasWatchlistHit(i) && i.status !== "done").length,
-      tg: tgRecentItems.length,
-      watchlistRules: (watchlistQuery.data ?? []).filter((r) => r.active).length
-    };
-  }, [queueItems, tgRecentItems.length, watchlistQuery.data, casesQuery.data, userEmail]);
-
-  async function handleCreateCase(item: VocQueueItem) {
+  async function decide(row: DeskRow, decision: VocDeskDecision) {
     setCaseError(null);
     setCasePending(true);
     try {
-      const linkedCveIds =
-        item.source === "cve"
-          ? [item.refId]
-          : Array.isArray(item.payload.cveIds)
-            ? item.payload.cveIds.map(String)
-            : Array.isArray(item.payload.criticalCveIds)
-              ? item.payload.criticalCveIds.map(String)
-              : [];
-      const vendorDisplay =
-        typeof item.payload.vp_vendor === "string" ? item.payload.vp_vendor : undefined;
-      const productDisplay =
-        typeof item.payload.vp_product === "string" ? item.payload.vp_product : undefined;
-      const created = await createVocCaseFromRef({
-        refKey: item.refKey,
-        source: item.source,
-        refId: item.refId,
-        title: item.title,
-        subtitle: item.subtitle,
-        vocPriority: item.vocPriority,
-        vocReasons: item.vocReasons,
-        linkedCveIds,
-        assigneeEmail: userEmail,
-        createTask: true,
-        vendorKey: vendorDisplay?.toLowerCase(),
-        vendorDisplay,
-        productDisplay,
-        productKeyNorm: productDisplay?.toLowerCase(),
-        tgChannel:
-          item.source === "tg" && item.payload.channel && typeof item.payload.channel === "object"
-            ? String((item.payload.channel as { slug?: string }).slug ?? "")
-            : undefined
-      });
-      if (!created.taskId && !created.case?.taskId) {
-        setCaseError("Кейс есть, задача не создалась — нажмите «Создать задачу» или «Догнать задачи»");
-      }
-      if (item.status === "open") {
-        await setStatus(item, "claimed");
-      }
-      const createdCase = created.case as VocCaseRow | undefined;
-      if (createdCase?.id) {
-        queryClient.setQueryData<VocCaseRow[]>(["voc", "cases", "active"], (old) => {
-          const list = old ?? [];
-          if (list.some((c) => c.id === createdCase.id)) return list;
-          return [createdCase, ...list];
+      if (decision === "fixing" && !row.members.some((item) => item.caseId)) {
+        const item = row.primary;
+        const linkedCveIds =
+          item.source === "cve"
+            ? [item.refId]
+            : Array.isArray(item.payload.cveIds)
+              ? item.payload.cveIds.map(String)
+              : Array.isArray(item.payload.cve_ids)
+                ? item.payload.cve_ids.map(String)
+                : [];
+        const vendor = typeof item.payload.vp_vendor === "string" ? item.payload.vp_vendor : undefined;
+        const product = typeof item.payload.vp_product === "string" ? item.payload.vp_product : undefined;
+        const created = await createVocCaseFromRef({
+          refKey: item.refKey,
+          source: item.source,
+          refId: item.refId,
+          title: item.title,
+          subtitle: item.subtitle,
+          vocPriority: item.vocPriority,
+          vocReasons: item.vocReasons,
+          linkedCveIds,
+          assigneeEmail: userEmail,
+          createTask: true,
+          vendorDisplay: vendor,
+          productDisplay: product,
+          vendorKey: vendor?.toLowerCase(),
+          productKeyNorm: product?.toLowerCase()
         });
-        setOpenCaseId(createdCase.id);
-        if (isPage) setSection("cases");
+        const createdCase = created.case as VocCaseRow | undefined;
+        if (createdCase?.id) {
+          queryClient.setQueryData<VocCaseRow[]>(["voc", "cases", "active"], (old) => {
+            const list = old ?? [];
+            return list.some((entry) => entry.id === createdCase.id) ? list : [createdCase, ...list];
+          });
+        }
+        if (!created.taskId && !created.case?.taskId) {
+          setCaseError("Кейс есть, задача не создалась. Её можно догнать из карточки кейса.");
+        }
+      }
+      const status: VocTriageStatus = decision === "fixing" ? "claimed" : decision === "accepted_risk" ? "done" : "dismissed";
+      const reviewAt =
+        decision === "accepted_risk" ? new Date(Date.now() + 90 * 86_400_000).toISOString() : null;
+      for (const member of row.members) {
+        await commit(member, status, { deskDecision: decision, deskReviewAt: reviewAt });
       }
       void casesQuery.refetch();
       void queueQuery.refetch();
-      void queryClient.invalidateQueries({ queryKey: ["vuln-tasks"] });
-    } catch (e) {
-      setCaseError(e instanceof Error ? e.message : "Не удалось создать кейс");
+    } catch (err) {
+      setCaseError(err instanceof Error ? err.message : "Не удалось записать решение");
     } finally {
       setCasePending(false);
     }
   }
 
-  const selected = useMemo(
-    () => items.find((i) => i.refKey === selectedKey) ?? items[kbdIndex] ?? null,
-    [items, selectedKey, kbdIndex]
-  );
-
   useEffect(() => {
-    if (!items.length) {
-      setKbdIndex(0);
-      setSelectedKey(null);
-      return;
-    }
-    if (kbdIndex >= items.length) setKbdIndex(0);
-    const row = items[kbdIndex];
-    if (row && selectedKey !== row.refKey) setSelectedKey(row.refKey);
-  }, [items, kbdIndex, selectedKey]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      if (openCaseId) {
-        if (e.key === "Escape") setOpenCaseId(null);
-        return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      if (!visible.length || !selected) return;
+      const index = visible.findIndex((row) => row.key === selected.key);
+      if (event.key === "ArrowDown" || event.key === "j" || event.key === "J") {
+        event.preventDefault();
+        const next = visible[Math.min(visible.length - 1, index + 1)];
+        if (next) setSelectedKey(next.key);
       }
-      if (e.key === "1") {
-        setWorkLens("now");
-        if (isPage) setSection("queue");
+      if (event.key === "ArrowUp" || event.key === "k" || event.key === "K") {
+        event.preventDefault();
+        const next = visible[Math.max(0, index - 1)];
+        if (next) setSelectedKey(next.key);
       }
-      if (e.key === "2") {
-        setWorkLens("mine");
-        if (isPage) setSection("queue");
-      }
-      if (e.key === "3") setWorkLens("all");
-      if (isPage && section !== "queue") return;
-      if (!items.length) return;
-      if (e.key === "ArrowDown" || e.key === "j" || e.key === "J") {
-        e.preventDefault();
-        setKbdIndex((i) => Math.min(items.length - 1, i + 1));
-      }
-      if (e.key === "ArrowUp" || e.key === "k" || e.key === "K") {
-        e.preventDefault();
-        setKbdIndex((i) => Math.max(0, i - 1));
-      }
-      if ((e.key === "c" || e.key === "C") && selected?.status === "open") {
-        e.preventDefault();
-        setStatus(selected, "claimed");
-      }
-      if ((e.key === "e" || e.key === "E") && selected) {
-        e.preventDefault();
-        if (selected.caseId) {
-          setOpenCaseId(selected.caseId);
-          if (isPage) setSection("cases");
-        } else {
-          void handleCreateCase(selected);
-        }
-      }
-      if (e.key === "Enter" && selected) {
-        if (selected.source === "cve") onOpenCve?.(selected.refId);
-        else if (selected.source === "bdu") onOpenBdu?.(selected.refId);
-        else if (selected.source === "tg") {
-          const link = selected.payload.link;
-          if (typeof link === "string") onOpenTgLink?.(link);
-        }
+      const decisionByKey: Record<string, VocDeskDecision> = {
+        "1": "fixing",
+        "2": "waiting_patch",
+        "3": "not_ours",
+        "4": "accepted_risk"
+      };
+      const decision = decisionByKey[event.key];
+      if (decision && !casePending) {
+        event.preventDefault();
+        void decide(selected, decision);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [items.length, selected, onOpenCve, onOpenBdu, onOpenTgLink, openCaseId, section, isPage, setStatus]);
+  });
 
-  const loading =
-    queueQuery.isLoading ||
-    (sourceTab === "tg" && (tgFeedQuery.isLoading || tgTriageQuery.isLoading));
   const refreshing = queueQuery.isFetching || tgFeedQuery.isFetching || tgTriageQuery.isFetching;
-  const tgFeedErrorMessage =
-    tgFeedQuery.error instanceof Error
-      ? tgFeedQuery.error.message
-      : tgFeedQuery.error
-        ? "Не удалось загрузить TG-ленту"
-        : null;
+  const intel = selected ? vocIntelContext(selected.primary) : null;
+  const tgLink = selected?.members.find((item) => item.source === "tg" && typeof item.payload.link === "string");
+  const bdu = selected?.members.find((item) => item.source === "bdu");
+  const cve = selected?.members.find((item) => item.source === "cve");
 
-  const goQueue = (lens: WorkLens) => {
-    setWorkLens(lens);
-    if (isPage) setSection("queue");
-  };
-
-  const openCaseFromQueue = (caseId: string) => {
-    setOpenCaseId(caseId);
-    if (isPage) setSection("cases");
-  };
+  const cards = [
+    { id: "burning" as const, label: "Горит", hint: "наше и эксплуатация или SLA", value: stats.burning, danger: stats.burning > 0 },
+    { id: "ours" as const, label: "Наши", hint: "без решения", value: stats.ours, danger: false },
+    { id: "bdu" as const, label: "БДУ", hint: "на контуре", value: stats.bdu, danger: false }
+  ];
 
   return (
-    <section className={cn(isPage ? "space-y-5" : "rounded-2xl border border-border bg-white p-5 dark:bg-black/20")}>
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <section className="space-y-4">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="flex items-center gap-2 text-base font-semibold tracking-tight text-fg/95">
-            <Inbox className="h-4 w-4 text-accent" />
-            Vulnerability Operations
-          </div>
-          <p className="mt-1 max-w-3xl text-[12px] leading-relaxed text-muted">
-            Смена работает с тем, что горит: P1, SLA и watchlist. Сигнал → кейс → playbook → исход.
-            Клавиши: J/K очередь, C взять, E кейс, Enter карточка, 1/2/3 линзы.
+          <h2 className="text-base font-semibold tracking-tight text-fg/95">Стол смены</h2>
+          <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-muted">
+            Одна строка — одна уязвимость. Справа решение: чиним, ждём патч, не наше или принятый риск.
+            J/K по списку, 1–4 записывают решение.
           </p>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <span className="hidden items-center gap-1 text-[10px] text-muted lg:inline-flex">
-            <Keyboard className="h-3.5 w-3.5" />
-            J K C E
-          </span>
-          <button
-            type="button"
-            onClick={() => {
-              void queueQuery.refetch();
-              void tgFeedQuery.refetch();
-              void tgTriageQuery.refetch();
-              void watchlistQuery.refetch();
-              void casesQuery.refetch();
-            }}
-            disabled={refreshing}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-xl border border-border bg-white px-3 py-2 text-[11px]",
-              "hover:bg-slate-50 dark:bg-black/30 dark:hover:bg-black/45",
-              refreshing && "opacity-80"
-            )}
-          >
-            {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-            Обновить
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => {
+            void queueQuery.refetch();
+            void tgFeedQuery.refetch();
+            void tgTriageQuery.refetch();
+            void casesQuery.refetch();
+          }}
+          disabled={refreshing}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-[11px]"
+        >
+          {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+          Обновить
+        </button>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-        {(
-          [
-            {
-              id: "now" as const,
-              label: "Сейчас",
-              hint: "P1 · SLA · watchlist",
-              value: stats.now,
-              icon: ShieldAlert,
-              danger: stats.sla > 0 || stats.p1 > 0,
-              onClick: () => goQueue("now")
-            },
-            {
-              id: "mine" as const,
-              label: "Мои",
-              hint: "взятые вами",
-              value: stats.mine,
-              icon: UserRound,
-              danger: false,
-              onClick: () => goQueue("mine")
-            },
-            {
-              id: "sla" as const,
-              label: "SLA",
-              hint: "просроченные кейсы",
-              value: stats.sla,
-              icon: Clock,
-              danger: stats.sla > 0,
-              onClick: () => {
-                setCaseFilter("sla");
-                if (isPage) setSection("cases");
-              }
-            },
-            {
-              id: "cases" as const,
-              label: "Кейсы",
-              hint: "открытые",
-              value: stats.cases,
-              icon: Briefcase,
-              danger: false,
-              onClick: () => {
-                setCaseFilter("all");
-                if (isPage) setSection("cases");
-              }
-            }
-          ] as const
-        ).map((c) => (
+      <div className="grid grid-cols-3 gap-2">
+        {cards.map((card) => (
           <button
-            key={c.id}
+            key={card.id}
             type="button"
-            onClick={c.onClick}
+            onClick={() => setFilter((current) => (current === card.id ? "desk" : card.id))}
             className={cn(
-              "rounded-xl border px-3 py-2.5 text-left transition",
-              workLens === c.id && section === "queue"
-                ? "border-accent/45 bg-accent/10"
-                : "border-border bg-white hover:bg-slate-50/80 dark:bg-black/25 dark:hover:bg-white/[0.03]",
-              c.danger && "border-danger/35"
+              "rounded-lg border px-3 py-2.5 text-left",
+              filter === card.id ? "border-accent/40 bg-accent/10" : "border-border bg-white dark:bg-black/20",
+              card.danger && filter !== card.id && "border-danger/30"
             )}
           >
-            <div className="flex items-center gap-1.5 text-[10px] text-muted">
-              <c.icon className="h-3 w-3" />
-              {c.label}
+            <div className="text-[10px] text-muted">{card.label}</div>
+            <div className={cn("text-xl font-semibold tabular-nums", card.danger && "text-danger")}>
+              <LiveNumber value={card.value} />
             </div>
-            <div className={cn("mt-0.5 text-xl font-semibold tabular-nums", c.danger && "text-danger")}>
-              <LiveNumber value={c.value} />
-            </div>
-            <div className="text-[10px] text-muted">{c.hint}</div>
+            <div className="text-[10px] text-muted">{card.hint}</div>
           </button>
         ))}
       </div>
 
-      {isPage ? (
-        <div className="flex flex-wrap gap-2 border-b border-border pb-3">
-          {(
-            [
-              ["queue", "Очередь", Activity],
-              ["cases", "Кейсы", Briefcase],
-              ["watchlist", "Watchlist", Bookmark],
-              ["shift", "Смена", Clock]
-            ] as const
-          ).map(([key, label, Icon]) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => setSection(key)}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-[12px] font-medium transition",
-                section === key
-                  ? "border-accent/45 bg-accent/12 text-fg/95"
-                  : "border-border bg-white text-muted hover:text-fg/85 dark:bg-black/25"
-              )}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              {label}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <>
-          <VocWatchlistPanel className="mt-4" />
-          <VocShiftPanel className="mt-4" />
-          <VocCasesPanel
-            className="mt-4"
-            currentUserEmail={userEmail}
-            openCaseId={openCaseId}
-            onOpenCaseIdChange={setOpenCaseId}
-            onOpenCve={onOpenCve}
-            onOpenBdu={onOpenBdu}
-            onSelectRefKey={(refKey) => {
-              const idx = items.findIndex((i) => i.refKey === refKey);
-              if (idx >= 0) {
-                setKbdIndex(idx);
-                setSelectedKey(refKey);
-              }
-            }}
-          />
-        </>
-      )}
-
-      {isPage && section === "watchlist" ? <VocWatchlistPanel className="mt-1" /> : null}
-      {isPage && section === "shift" ? <VocShiftPanel className="mt-1" /> : null}
-      {isPage && section === "cases" ? (
-        <VocCasesPanel
-          className="mt-1"
-          currentUserEmail={userEmail}
-          openCaseId={openCaseId}
-          onOpenCaseIdChange={setOpenCaseId}
-          initialFilter={caseFilter}
-          onOpenCve={onOpenCve}
-          onOpenBdu={onOpenBdu}
-          onSelectRefKey={(refKey) => {
-            setSection("queue");
-            setWorkLens("all");
-            const idx = queueItems.findIndex((i) => i.refKey === refKey);
-            if (idx >= 0) {
-              setKbdIndex(idx);
-              setSelectedKey(refKey);
-            }
-          }}
+      {caseError ? <Banner text={caseError} onClose={() => setCaseError(null)} /> : null}
+      {error ? <Banner text={error} onClose={clearError} /> : null}
+      {queueQuery.isError ? (
+        <Banner
+          text={queueQuery.error instanceof Error ? queueQuery.error.message : "Не удалось загрузить стол"}
+          onClose={() => void queueQuery.refetch()}
         />
       ) : null}
 
-      {(!isPage || section === "queue") && (
-        <>
-      {caseError ? (
-        <div className="mt-4 flex items-start gap-2 rounded-xl border border-danger/35 bg-danger/10 px-3 py-2 text-[12px] text-danger">
-          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <div className="min-w-0 flex-1">{caseError}</div>
-          <button type="button" onClick={() => setCaseError(null)} className="shrink-0 rounded p-0.5 hover:bg-danger/10">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      ) : null}
-
-      {error ? (
-        <div className="mt-4 flex items-start gap-2 rounded-xl border border-danger/35 bg-danger/10 px-3 py-2 text-[12px] text-danger">
-          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <div className="min-w-0 flex-1">{error}</div>
-          <button type="button" onClick={clearError} className="shrink-0 rounded p-0.5 hover:bg-danger/10">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      ) : null}
-
-      {tgFeedErrorMessage ? (
-        <div className="mt-4 flex items-start gap-2 rounded-xl border border-danger/35 bg-danger/10 px-3 py-2 text-[12px] text-danger">
-          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-          <div className="min-w-0 flex-1">Не удалось загрузить TG-ленту: {tgFeedErrorMessage}</div>
-        </div>
-      ) : null}
-
-      <div className="mt-4 flex flex-wrap gap-2">
-        {(
-          [
-            ["now", "Сейчас"],
-            ["mine", "Мои"],
-            ["all", "Вся очередь"]
-          ] as const
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => setWorkLens(key)}
-            className={cn(
-              "rounded-full border px-3 py-1 text-[11px] font-semibold transition",
-              workLens === key
-                ? "border-accent/40 bg-accent/12 text-fg/95"
-                : "border-border bg-white text-muted hover:text-fg/80 dark:bg-black/30"
-            )}
-          >
-            {label}
-          </button>
-        ))}
-        <span className="mx-1 hidden h-6 w-px bg-border sm:inline" />
-        {(
-          [
-            ["all", "Все источники"],
-            ["watchlist", "Watchlist"],
-            ["cve", "CVE"],
-            ["bdu", "БДУ"],
-            ["tg", "Telegram"]
-          ] as const
-        ).map(([key, label]) => {
-          const count =
-            key === "cve" ? sourceCounts.cve : key === "bdu" ? sourceCounts.bdu : key === "tg" ? sourceCounts.tg : null;
-          return (
-          <button
-            key={key}
-            type="button"
-            onClick={() => setSourceTab(key)}
-            className={cn(
-              "rounded-full border px-3 py-1 text-[11px] font-medium transition",
-              sourceTab === key
-                ? "border-border bg-slate-100 text-fg/95 dark:bg-white/10"
-                : "border-border bg-white text-muted hover:text-fg/80 dark:bg-black/30"
-            )}
-          >
-            {label}
-            {count != null && sourceTab === "all" && count > 0 ? (
-              <span className="ml-1 tabular-nums text-muted">{count}</span>
-            ) : null}
-          </button>
-          );
-        })}
-        <span className="mx-1 hidden h-6 w-px bg-border sm:inline" />
-        {(
-          [
-            ["active", "Активные"],
-            ["open", "В очереди"],
-            ["claimed", "В работе"],
-            ["done", "Готово"],
-            ["all", "Все"]
-          ] as const
-        ).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => setStatusTab(key)}
-            className={cn(
-              "rounded-full border px-3 py-1 text-[11px] transition",
-              statusTab === key
-                ? "border-accent/35 bg-accent/10 text-fg/90"
-                : "border-border bg-white text-muted dark:bg-black/30"
-            )}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
-        <div
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-[11px] text-muted">{filter === "history" ? "Закрытые решения" : "На столе"}</div>
+        <button
+          type="button"
+          onClick={() => setFilter((current) => (current === "history" ? "desk" : "history"))}
           className={cn(
-            "space-y-2 overflow-y-auto overscroll-contain pr-1 [scrollbar-width:thin]",
-            isPage ? "max-h-[min(44rem,calc(100vh-16rem))]" : "max-h-[min(36rem,calc(100vh-14rem))]"
+            "rounded-md border px-2.5 py-1 text-[11px]",
+            filter === "history" ? "border-accent/40 bg-accent/10" : "border-border text-muted"
           )}
         >
-          {loading ? (
+          История
+        </button>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(280px,0.8fr)]">
+        <div className="max-h-[min(44rem,calc(100vh-16rem))] space-y-2 overflow-y-auto pr-1">
+          {queueQuery.isLoading ? (
             <div className="space-y-2">
-              {Array.from({ length: 5 }).map((_, i) => (
-                <div key={i} className="h-24 animate-pulse rounded-2xl bg-slate-200/60 dark:bg-white/[0.06]" />
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div key={index} className="h-16 animate-pulse rounded-lg bg-slate-200/60 dark:bg-white/[0.06]" />
               ))}
             </div>
-          ) : items.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-border px-4 py-10 text-center text-sm text-muted">
-              {workLens === "now" ? (
-                <div className="space-y-3">
-                  <div>Сейчас чисто: нет P1, просроченного SLA и попаданий в watchlist.</div>
-                  <button
-                    type="button"
-                    onClick={() => setWorkLens("all")}
-                    className="rounded-lg border border-border px-3 py-1.5 text-[12px] font-medium text-fg/85 hover:bg-slate-50 dark:hover:bg-white/5"
-                  >
-                    Показать всю очередь
-                  </button>
-                </div>
-              ) : workLens === "mine" ? (
-                "Нет сигналов, взятых вами. Возьмите из «Сейчас» или очереди."
-              ) : sourceTab === "watchlist" && stats.watchlistRules === 0 ? (
-                "Добавьте правила во Watchlist — здесь появятся совпадения за 7 дней."
-              ) : (
-                "Нет событий по выбранным фильтрам."
-              )}
+          ) : visible.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-border px-4 py-10 text-center text-sm text-muted">
+              {queueQuery.isError
+                ? "Не удалось загрузить стол."
+                : filter === "desk"
+                  ? "Стол чистый: нет открытых решений."
+                  : "В этом срезе пусто."}
             </div>
           ) : (
-            <AnimatePresence initial={false} mode="popLayout">
-              {items.map((item, idx) => (
-                <motion.div
-                  key={item.refKey}
-                  layout
-                  initial={{ opacity: 0, y: -8, scale: 0.98 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  exit={{ opacity: 0, scale: 0.96 }}
-                  transition={{ type: "spring", stiffness: 380, damping: 32, mass: 0.8 }}
-                  data-voc-key={item.refKey}
-                >
-                  <VocQueueRow
-                    item={item}
-                    active={selected?.refKey === item.refKey}
-                    currentUserEmail={userEmail}
-                    pending={pendingKey === item.refKey}
-                    onSelect={() => {
-                      setSelectedKey(item.refKey);
-                      setKbdIndex(idx);
-                    }}
-                    onClaim={() => setStatus(item, "claimed")}
-                    onRelease={() => setStatus(item, "open")}
-                    onDone={() => setStatus(item, "done")}
-                    onReopen={() => setStatus(item, "open")}
-                  />
-                </motion.div>
-              ))}
-            </AnimatePresence>
+            visible.map((row) => (
+              <VocQueueRow
+                key={row.key}
+                row={row}
+                active={selected?.key === row.key}
+                onSelect={() => setSelectedKey(row.key)}
+              />
+            ))
           )}
         </div>
 
-        <div className="rounded-xl border border-border bg-white p-4 dark:bg-[#0d1524]">
+        <div className="rounded-lg border border-border bg-white p-4 dark:bg-black/20">
           {selected ? (
             <div className="space-y-4">
               <div>
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted">Сигнал смены</div>
-                <div className="mt-1 flex flex-wrap items-center gap-2">
-                  <span className={cn("rounded-md border px-1.5 py-0.5 text-[11px] font-semibold", vocPriorityMeta(selected.vocPriority).badge)}>
-                    {vocPriorityLabel(selected.vocPriority)}
-                  </span>
-                  <span className="font-mono text-[12px] font-semibold tabular-nums text-fg/70">{selected.vocScore}</span>
-                  <span className="text-[11px] text-muted">{vocStatusLabel(selected.status)}</span>
+                <div className="font-mono text-[12px] text-fg/70">{selected.ident}</div>
+                <h3 className="mt-1 text-[16px] font-semibold leading-snug">{selected.product}</h3>
+                <p className="mt-2 text-[13px] leading-relaxed text-fg/90">{selected.phrase}</p>
+              </div>
+              {intel?.description ? <p className="text-[12px] leading-relaxed text-muted">{intel.description}</p> : null}
+              {selected.evidence.length ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {selected.evidence.map((chip) => (
+                    <span key={chip} className={cn("rounded border px-1.5 py-0.5 text-[10px]", vocChipClass("muted"))}>
+                      {chip}
+                    </span>
+                  ))}
                 </div>
-                <h2 className="mt-2 text-[16px] font-semibold leading-snug tracking-tight">{selected.title}</h2>
-                {(() => {
-                  if (selected.source !== "cve") return null;
-                  const t = typeof selected.payload.enrich_title === "string" ? selected.payload.enrich_title.trim() : "";
-                  if (!t || t === selected.refId || t === "Комплексный анализ уязвимости" || t === `Уязвимость ${selected.refId}`) {
-                    return null;
-                  }
-                  return <div className="mt-1 text-[13px] leading-snug text-fg/85">{t}</div>;
-                })()}
-                <div className="mt-1 text-[11px] text-muted">{fmtWhen(selected.publishedAt)}</div>
+              ) : null}
+              <div className="grid grid-cols-2 gap-2">
+                <DecisionButton label="Наше, чиним" hint="1" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "fixing")} primary />
+                <DecisionButton label="Ждём патч" hint="2" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "waiting_patch")} />
+                <DecisionButton label="Не наше" hint="3" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "not_ours")} />
+                <DecisionButton label="Принятый риск" hint="4" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "accepted_risk")} />
               </div>
-
-              <div className="flex flex-col gap-2">
-                {selected.status === "open" ? (
-                  <button
-                    type="button"
-                    disabled={casePending || pendingKey === selected.refKey}
-                    onClick={() => {
-                      if (!selected.caseId) void handleCreateCase(selected);
-                      else void setStatus(selected, "claimed");
-                    }}
-                    className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-accent/40 bg-accent/12 px-3 py-2 text-[12px] font-semibold"
-                  >
-                    {casePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Briefcase className="h-3.5 w-3.5" />}
-                    {selected.caseId ? "Взять в работу" : "В работу — создать кейс"}
+              <div className="flex flex-col gap-1 border-t border-border pt-3 text-[12px]">
+                {selected.primary.caseId ? (
+                  <button type="button" className="text-left text-accent hover:underline" onClick={() => setOpenCaseId(selected.primary.caseId ?? null)}>
+                    Открыть кейс
                   </button>
                 ) : null}
-                {selected.caseId ? (
-                  <button
-                    type="button"
-                    onClick={() => openCaseFromQueue(selected.caseId!)}
-                    className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-border px-3 py-2 text-[12px] font-medium hover:bg-slate-50 dark:hover:bg-white/5"
-                  >
-                    <Briefcase className="h-3.5 w-3.5" />
-                    Открыть кейс {caseIssueKey(selected.caseId)}
-                  </button>
-                ) : selected.status !== "open" ? (
-                  <button
-                    type="button"
-                    disabled={casePending}
-                    onClick={() => void handleCreateCase(selected)}
-                    className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-border px-3 py-2 text-[12px] font-medium"
-                  >
-                    {casePending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Briefcase className="h-3.5 w-3.5" />}
-                    Создать кейс
+                {cve ? (
+                  <button type="button" className="inline-flex items-center gap-1 text-left text-fg/80 hover:text-fg" onClick={() => onOpenCve?.(cve.refId)}>
+                    {cve.refId} <ChevronRight className="h-3.5 w-3.5" />
                   </button>
                 ) : null}
-                {selected.source === "cve" ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenCve?.(selected.refId)}
-                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-border px-3 py-2 text-[12px] hover:bg-slate-50 dark:hover:bg-white/5"
-                  >
-                    Открыть CVE <ChevronRight className="h-3.5 w-3.5" />
+                {bdu ? (
+                  <button type="button" className="inline-flex items-center gap-1 text-left text-fg/80 hover:text-fg" onClick={() => onOpenBdu?.(bdu.refId)}>
+                    {bdu.refId} <ChevronRight className="h-3.5 w-3.5" />
                   </button>
                 ) : null}
-                {selected.source === "bdu" ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenBdu?.(selected.refId)}
-                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-border px-3 py-2 text-[12px] hover:bg-slate-50 dark:hover:bg-white/5"
-                  >
-                    Открыть БДУ <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                ) : null}
-                {selected.source === "tg" && typeof selected.payload.link === "string" ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenTgLink?.(String(selected.payload.link))}
-                    className="inline-flex items-center justify-center gap-1 rounded-lg border border-border px-3 py-2 text-[12px]"
-                  >
-                    Открыть в Telegram <ChevronRight className="h-3.5 w-3.5" />
+                {tgLink && typeof tgLink.payload.link === "string" ? (
+                  <button type="button" className="text-left text-fg/80 hover:text-fg" onClick={() => onOpenTgLink?.(String(tgLink.payload.link))}>
+                    Пост в Telegram
                   </button>
                 ) : null}
               </div>
-
-              {(() => {
-                const intel = vocIntelContext(selected);
-                if (intel) {
-                  return (
-                    <>
-                      {intel.vendor || intel.product ? (
-                        <div className="text-[12px] text-muted">
-                          {[intel.vendor, intel.product].filter(Boolean).join(" / ")}
-                        </div>
-                      ) : null}
-                      {intel.description ? (
-                        <p className="text-[12px] leading-relaxed text-fg/85">{intel.description}</p>
-                      ) : null}
-                      {intel.chips.length ? (
-                        <div className="flex flex-wrap gap-1.5">
-                          {intel.chips.map((chip) => (
-                            <span
-                              key={chip.key}
-                              className={cn("rounded-md border px-2 py-0.5 text-[10px] font-medium", vocChipClass(chip.tone))}
-                            >
-                              {chip.label}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                    </>
-                  );
-                }
-                return (
-                  <>
-                    {selected.subtitle ? (
-                      <p className="text-[12px] leading-relaxed text-fg/85">{selected.subtitle}</p>
-                    ) : null}
-                    <div className="flex flex-wrap gap-1.5">
-                      {selected.vocReasons.map((r) => (
-                        <span key={r} className="rounded-md border border-border px-2 py-0.5 text-[10px] text-muted">
-                          {r}
-                        </span>
-                      ))}
-                    </div>
-                  </>
-                );
-              })()}
-
-              <div className="flex flex-wrap items-center gap-2">
-                {selected.caseId ? (
-                  <span
-                    className={cn(
-                      "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px]",
-                      slaTone(selected.slaDueAt, selected.slaBreached)
-                    )}
-                  >
-                    <Clock className="h-3 w-3" />
-                    SLA {slaRemainingLabel(selected.slaDueAt)}
-                  </span>
-                ) : null}
-                {typeof selected.payload.vp_vendor === "string" && selected.payload.vp_vendor ? (
-                  <VocWatchlistQuickAdd kind="vendor" value={selected.payload.vp_vendor} compact />
-                ) : null}
-                {typeof selected.payload.vp_product === "string" && selected.payload.vp_product ? (
-                  <VocWatchlistQuickAdd kind="product" value={String(selected.payload.vp_product)} compact />
-                ) : null}
-              </div>
-
-              <div className="flex flex-wrap gap-2 border-t border-border pt-3">
-                {selected.caseId && !selected.taskId ? (
-                  <button
-                    type="button"
-                    disabled={casePending}
-                    onClick={() => void handleCreateCase(selected)}
-                    className="rounded-md border border-warn/40 bg-warn/10 px-2.5 py-1.5 text-[11px] font-medium"
-                  >
-                    Создать задачу
-                  </button>
-                ) : null}
-                {selected.status === "claimed" &&
-                selected.claimedByEmail?.toLowerCase() === userEmail?.toLowerCase() ? (
-                  <button
-                    type="button"
-                    disabled={pendingKey === selected.refKey}
-                    onClick={() => setStatus(selected, "open")}
-                    className="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-muted"
-                  >
-                    Отпустить
-                  </button>
-                ) : null}
-                {selected.status !== "done" && selected.status !== "dismissed" ? (
-                  <button
-                    type="button"
-                    disabled={pendingKey === selected.refKey}
-                    onClick={() => setStatus(selected, "done")}
-                    className="rounded-md border border-ok/35 bg-ok/10 px-2.5 py-1.5 text-[11px] text-ok"
-                  >
-                    Снять с ленты
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={pendingKey === selected.refKey}
-                    onClick={() => setStatus(selected, "open")}
-                    className="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-muted"
-                  >
-                    Вернуть в очередь
-                  </button>
-                )}
-              </div>
+              {selected.primary.caseId ? (
+                <p className="text-[11px] text-muted">
+                  SLA идёт, пока решение «чиним». {selected.when ? `Осталось ${selected.when}.` : ""}
+                  {selected.primary.assigneeEmail || selected.primary.claimedByEmail
+                    ? ` Держит ${selected.primary.assigneeEmail || selected.primary.claimedByEmail}.`
+                    : ""}
+                </p>
+              ) : (
+                <p className="text-[11px] text-muted">SLA начнётся только после «Наше, чиним».</p>
+              )}
             </div>
           ) : (
-            <div className="flex h-full min-h-[12rem] items-center justify-center text-sm text-muted">
-              Выберите сигнал — справа действия смены
-            </div>
+            <div className="flex min-h-40 items-center justify-center text-sm text-muted">Выберите строку</div>
           )}
         </div>
       </div>
-        </>
-      )}
+
+      {openCaseId ? (
+        <VocCasesPanel
+          presentation="drawer"
+          currentUserEmail={userEmail}
+          openCaseId={openCaseId}
+          onOpenCaseIdChange={setOpenCaseId}
+          onOpenCve={onOpenCve}
+          onOpenBdu={onOpenBdu}
+        />
+      ) : null}
+
+      <div className="border-t border-border pt-3">
+        <button type="button" className="text-[12px] text-muted hover:text-fg" onClick={() => setShowSetup((value) => !value)}>
+          {showSetup ? "Скрыть контур и смену" : "Контур и сдача смены"}
+        </button>
+        {showSetup ? (
+          <div className="mt-3 space-y-4">
+            <VocWatchlistPanel />
+            <VocShiftPanel />
+          </div>
+        ) : null}
+      </div>
     </section>
+  );
+}
+
+function DecisionButton({
+  label,
+  hint,
+  onClick,
+  busy,
+  primary
+}: {
+  label: string;
+  hint: string;
+  onClick: () => void;
+  busy?: boolean;
+  primary?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={onClick}
+      className={cn(
+        "rounded-lg border px-2.5 py-2 text-left text-[12px] font-medium disabled:opacity-50",
+        primary ? "border-accent/40 bg-accent/12" : "border-border bg-white dark:bg-black/25"
+      )}
+    >
+      {label}
+      <span className="ml-1 text-[10px] text-muted">{hint}</span>
+    </button>
+  );
+}
+
+function Banner({ text, onClose }: { text: string; onClose: () => void }) {
+  return (
+    <div className="flex items-start gap-2 rounded-lg border border-danger/35 bg-danger/10 px-3 py-2 text-[12px] text-danger">
+      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+      <div className="min-w-0 flex-1">{text}</div>
+      <button type="button" onClick={onClose} className="shrink-0">
+        <X className="h-4 w-4" />
+      </button>
+    </div>
   );
 }

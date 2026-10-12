@@ -89,7 +89,8 @@ export function VocCasesPanel({
   onOpenBdu,
   openCaseId: openCaseIdProp,
   onOpenCaseIdChange,
-  initialFilter
+  initialFilter,
+  presentation = "full"
 }: {
   className?: string;
   currentUserEmail?: string | null;
@@ -99,6 +100,8 @@ export function VocCasesPanel({
   openCaseId?: string | null;
   onOpenCaseIdChange?: (id: string | null) => void;
   initialFilter?: CaseFilter;
+  /** `drawer` shows only the open case, without the case grid. */
+  presentation?: "full" | "drawer";
 }) {
   const queryClient = useQueryClient();
   const liveOpts = useLiveQueryOptions();
@@ -175,6 +178,39 @@ export function VocCasesPanel({
     }
     onSelectRefKey?.(refKey);
   };
+
+  if (presentation === "drawer") {
+    return (
+      <div className={cn("min-w-0", className)}>
+        {openCaseId && openRow ? (
+          <CaseDrawer
+            row={openRow}
+            currentUserEmail={currentUserEmail}
+            pending={patchMut.isPending && patchMut.variables?.id === openRow.id}
+            onClose={() => setOpenCaseId(null)}
+            onAssignMe={() => {
+              if (!currentUserEmail) return;
+              patchMut.mutate({ id: openRow.id, body: { assigneeEmail: currentUserEmail, status: "in_progress" } });
+            }}
+            onUnassign={() => patchMut.mutate({ id: openRow.id, body: { assigneeEmail: null } })}
+            onStatus={(status) => patchMut.mutate({ id: openRow.id, body: { status } })}
+            onOpenRef={openRef}
+            onOpenInQueue={() => {
+              onSelectRefKey?.(openRow.primaryRefKey);
+              setOpenCaseId(null);
+            }}
+            onResolved={() => {
+              setOpenCaseId(null);
+              void queryClient.invalidateQueries({ queryKey: ["voc", "cases"] });
+              void queryClient.invalidateQueries({ queryKey: ["voc", "queue"] });
+            }}
+          />
+        ) : openCaseId ? (
+          <p className="text-[12px] text-muted">Кейс закрыт или ещё загружается.</p>
+        ) : null}
+      </div>
+    );
+  }
 
   return (
     <div className={cn("min-w-0", className)}>

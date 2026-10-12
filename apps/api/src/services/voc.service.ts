@@ -42,6 +42,8 @@ export type VocQueueItem = {
   slaBreached?: boolean;
   linkedRefsCount?: number;
   taskId?: string | null;
+  deskDecision?: "fixing" | "waiting_patch" | "not_ours" | "accepted_risk" | null;
+  deskReviewAt?: string | null;
 };
 
 type VocCaseRefHit = {
@@ -96,12 +98,15 @@ export class VocService {
     const merged = items.map((item) => {
       const triage = triageMap.get(item.refKey);
       const caseHit = caseMap.get(item.refKey);
+      const desk = readDeskMeta(triage?.meta);
       const base = triage
         ? {
             ...item,
             status: triage.status,
             claimedByEmail: triage.claimed_by_email,
-            updatedAt: triage.updated_at?.toISOString?.() ?? null
+            updatedAt: triage.updated_at?.toISOString?.() ?? null,
+            deskDecision: desk.deskDecision,
+            deskReviewAt: desk.deskReviewAt
           }
         : item;
       if (!caseHit) return base;
@@ -243,20 +248,26 @@ export class VocService {
       status: VocTriageStatus;
       claimed_by_email: string | null;
       updated_at: Date;
+      meta: unknown;
     }>(
-      `SELECT ref_key, status, claimed_by_email, updated_at
+      `SELECT ref_key, status, claimed_by_email, updated_at, meta
          FROM voc_triage
          ${where}
         ORDER BY updated_at DESC
         LIMIT $${limitIdx}`,
       params
     );
-    return r.rows.map((row) => ({
-      refKey: row.ref_key,
-      status: row.status,
-      claimedByEmail: row.claimed_by_email,
-      updatedAt: row.updated_at?.toISOString?.() ?? null
-    }));
+    return r.rows.map((row) => {
+      const desk = readDeskMeta(row.meta);
+      return {
+        refKey: row.ref_key,
+        status: row.status,
+        claimedByEmail: row.claimed_by_email,
+        updatedAt: row.updated_at?.toISOString?.() ?? null,
+        deskDecision: desk.deskDecision,
+        deskReviewAt: desk.deskReviewAt
+      };
+    });
   }
 
   async listWatchlist(): Promise<VocWatchlistRule[]> {
@@ -387,7 +398,7 @@ export class VocService {
   private async loadTriageMap(refKeys: string[]) {
     const map = new Map<
       string,
-      { status: VocTriageStatus; claimed_by_email: string | null; updated_at: Date }
+      { status: VocTriageStatus; claimed_by_email: string | null; updated_at: Date; meta: unknown }
     >();
     if (refKeys.length === 0) return map;
     const r = await this.db.query<{
@@ -395,9 +406,11 @@ export class VocService {
       status: VocTriageStatus;
       claimed_by_email: string | null;
       updated_at: Date;
-    }>(`SELECT ref_key, status, claimed_by_email, updated_at FROM voc_triage WHERE ref_key = ANY($1::text[])`, [
-      refKeys
-    ]);
+      meta: unknown;
+    }>(
+      `SELECT ref_key, status, claimed_by_email, updated_at, meta FROM voc_triage WHERE ref_key = ANY($1::text[])`,
+      [refKeys]
+    );
     for (const row of r.rows) {
       map.set(row.ref_key, row);
     }
@@ -981,4 +994,20 @@ export class VocService {
       )
     );
   }
+}
+
+const DESK_DECISIONS = new Set(["fixing", "waiting_patch", "not_ours", "accepted_risk"]);
+
+function readDeskMeta(meta: unknown): {
+  deskDecision: "fixing" | "waiting_patch" | "not_ours" | "accepted_risk" | null;
+  deskReviewAt: string | null;
+} {
+  if (!meta || typeof meta !== "object") return { deskDecision: null, deskReviewAt: null };
+  const raw = meta as Record<string, unknown>;
+  const decision = typeof raw.deskDecision === "string" && DESK_DECISIONS.has(raw.deskDecision) ? raw.deskDecision : null;
+  const reviewAt = typeof raw.deskReviewAt === "string" && raw.deskReviewAt.trim() ? raw.deskReviewAt : null;
+  return {
+    deskDecision: decision as "fixing" | "waiting_patch" | "not_ours" | "accepted_risk" | null,
+    deskReviewAt: reviewAt
+  };
 }
