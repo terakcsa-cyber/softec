@@ -12,6 +12,7 @@ export type DeskRow = {
   product: string;
   ident: string;
   phrase: string;
+  summary: string;
   evidence: string[];
   ours: boolean;
   burning: boolean;
@@ -103,6 +104,35 @@ function phraseOf(input: {
   return "Нужно решение: наше это или нет.";
 }
 
+function textOf(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return null;
+  if (text === "Комплексный анализ уязвимости") return null;
+  if (/^уязвимость\s+(cve|bdu)-/i.test(text)) return null;
+  return text.length > 320 ? `${text.slice(0, 317).trim()}…` : text;
+}
+
+function summaryOf(members: VocQueueItem[], primary: VocQueueItem, product: string): string {
+  const ordered = [primary, ...members.filter((item) => item !== primary)];
+  for (const item of ordered) {
+    const payload = item.payload ?? {};
+    const candidates = [
+      textOf(payload.enrich_summary),
+      textOf(payload.short_description),
+      item.source === "bdu" ? textOf(payload.name) : null,
+      item.source === "tg" ? textOf(item.subtitle) : null,
+      textOf(item.subtitle)
+    ];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      if (candidate === product || candidate === item.refId || candidate === item.title) continue;
+      return candidate;
+    }
+  }
+  return "";
+}
+
 function evidenceOf(members: VocQueueItem[], primary: VocQueueItem): string[] {
   const chips: string[] = [];
   const intel = vocIntelContext(primary);
@@ -167,6 +197,7 @@ export function buildDeskRows(items: VocQueueItem[]): DeskRow[] {
         hasBdu,
         fix: signal.fix
       }),
+      summary: summaryOf(members, primary, productOf(primary)),
       evidence: evidenceOf(members, primary),
       ours,
       burning,
@@ -204,6 +235,17 @@ export function filterDeskRows(rows: DeskRow[], filter: DeskFilter): DeskRow[] {
   if (filter === "ours") return live.filter((row) => row.ours && !row.primary.caseId && row.primary.status === "open");
   if (filter === "bdu") return live.filter((row) => row.bduOnWatch);
   return live;
+}
+
+export function deskResearch(row: DeskRow): { cveId: string | null; bduId: string | null; tgLink: string | null } {
+  const cve = row.members.find((item) => item.source === "cve");
+  const bdu = row.members.find((item) => item.source === "bdu");
+  const tg = row.members.find((item) => item.source === "tg" && typeof item.payload.link === "string");
+  return {
+    cveId: cve?.refId ?? null,
+    bduId: bdu?.refId ?? null,
+    tgLink: typeof tg?.payload.link === "string" ? tg.payload.link : null
+  };
 }
 
 export function deskDecisionLabel(decision: VocDeskDecision | null | undefined): string {

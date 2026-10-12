@@ -19,14 +19,14 @@ import { buildTgCriticalRows, isWithinLast24h, type TgCveIntel, type TgFeedRespo
 import { scoreTgForVoc } from "@/lib/voc-scoring-client";
 import { applyWatchlistBoostClient } from "@/lib/voc-watchlist-client";
 import { fetchVocWatchlist } from "@/lib/voc-watchlist-api";
-import { buildDeskRows, deskStats, filterDeskRows, type DeskFilter, type DeskRow } from "@/lib/voc-desk";
+import { buildDeskRows, deskResearch, deskStats, filterDeskRows, type DeskFilter, type DeskRow } from "@/lib/voc-desk";
 import { VocQueueRow } from "./voc-queue-row";
 import { VocWatchlistPanel } from "./voc-watchlist-panel";
 import { VocCasesPanel } from "./voc-cases-panel";
 import { VocShiftPanel } from "./voc-shift-panel";
 import { buildCaseRefMap, createVocCaseFromRef, fetchVocCases, type VocCaseRow } from "@/lib/voc-case-api";
 import { isSlaBreached } from "@/lib/voc-case-client";
-import { vocChipClass, vocIntelContext } from "@/lib/voc-queue-context";
+import { vocChipClass } from "@/lib/voc-queue-context";
 
 export function VocHomePanel({
   onOpenCve,
@@ -249,7 +249,7 @@ export function VocHomePanel({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLButtonElement) return;
       if (!visible.length || !selected) return;
       const index = visible.findIndex((row) => row.key === selected.key);
       if (event.key === "ArrowDown" || event.key === "j" || event.key === "J") {
@@ -273,16 +273,24 @@ export function VocHomePanel({
         event.preventDefault();
         void decide(selected, decision);
       }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        openResearch(selected);
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   });
 
   const refreshing = queueQuery.isFetching || tgFeedQuery.isFetching || tgTriageQuery.isFetching;
-  const intel = selected ? vocIntelContext(selected.primary) : null;
-  const tgLink = selected?.members.find((item) => item.source === "tg" && typeof item.payload.link === "string");
-  const bdu = selected?.members.find((item) => item.source === "bdu");
-  const cve = selected?.members.find((item) => item.source === "cve");
+  const research = selected ? deskResearch(selected) : null;
+
+  function openResearch(row: DeskRow) {
+    const target = deskResearch(row);
+    if (target.cveId) onOpenCve?.(target.cveId);
+    else if (target.bduId) onOpenBdu?.(target.bduId);
+    else if (target.tgLink) onOpenTgLink?.(target.tgLink);
+  }
 
   const cards = [
     { id: "burning" as const, label: "Горит", hint: "наше и эксплуатация или SLA", value: stats.burning, danger: stats.burning > 0 },
@@ -296,8 +304,8 @@ export function VocHomePanel({
         <div>
           <h2 className="text-base font-semibold tracking-tight text-fg/95">Стол смены</h2>
           <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-muted">
-            Одна строка — одна уязвимость. Справа решение: чиним, ждём патч, не наше или принятый риск.
-            J/K по списку, 1–4 записывают решение.
+            Под каждой уязвимостью короткое описание. Идентификатор или «Карточка» открывают исследование.
+            J/K по списку, Enter — карточка, 1–4 — решение.
           </p>
         </div>
         <button
@@ -365,7 +373,7 @@ export function VocHomePanel({
           {queueQuery.isLoading ? (
             <div className="space-y-2">
               {Array.from({ length: 4 }).map((_, index) => (
-                <div key={index} className="h-16 animate-pulse rounded-lg bg-slate-200/60 dark:bg-white/[0.06]" />
+                <div key={index} className="h-28 animate-pulse rounded-lg bg-slate-200/60 dark:bg-white/[0.06]" />
               ))}
             </div>
           ) : visible.length === 0 ? (
@@ -383,57 +391,77 @@ export function VocHomePanel({
                 row={row}
                 active={selected?.key === row.key}
                 onSelect={() => setSelectedKey(row.key)}
+                onOpenCve={onOpenCve}
+                onOpenBdu={onOpenBdu}
+                onOpenTg={onOpenTgLink}
               />
             ))
           )}
         </div>
 
-        <div className="rounded-lg border border-border bg-white p-4 dark:bg-black/20">
-          {selected ? (
+        <div className="rounded-lg border border-border bg-white p-4 dark:bg-black/20 xl:sticky xl:top-0 xl:self-start">
+          {selected && research ? (
             <div className="space-y-4">
               <div>
-                <div className="font-mono text-[12px] text-fg/70">{selected.ident}</div>
-                <h3 className="mt-1 text-[16px] font-semibold leading-snug">{selected.product}</h3>
-                <p className="mt-2 text-[13px] leading-relaxed text-fg/90">{selected.phrase}</p>
+                <div className="text-[10px] font-medium uppercase tracking-wide text-muted">Исследование</div>
+                <h3 className="mt-1 text-[16px] font-semibold leading-snug tracking-tight">{selected.product}</h3>
+                <p className="mt-1 text-[12px] font-medium text-fg/70">{selected.phrase}</p>
               </div>
-              {intel?.description ? <p className="text-[12px] leading-relaxed text-muted">{intel.description}</p> : null}
+              <p className="text-[13px] leading-relaxed text-fg/85">
+                {selected.summary || "Короткого описания в ленте нет. Полный разбор — в карточке."}
+              </p>
               {selected.evidence.length ? (
                 <div className="flex flex-wrap gap-1.5">
                   {selected.evidence.map((chip) => (
-                    <span key={chip} className={cn("rounded border px-1.5 py-0.5 text-[10px]", vocChipClass("muted"))}>
+                    <span key={chip} className={cn("rounded border px-1.5 py-0.5 text-[10px] font-medium", vocChipClass("muted"))}>
                       {chip}
                     </span>
                   ))}
                 </div>
               ) : null}
-              <div className="grid grid-cols-2 gap-2">
+              <div className="flex flex-wrap gap-2">
+                {research.cveId ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenCve?.(research.cveId!)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-accent/40 bg-accent/12 px-3 py-2 text-[12px] font-semibold"
+                  >
+                    Карточка {research.cveId}
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+                {research.bduId ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenBdu?.(research.bduId!)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-[12px] font-medium hover:border-accent/30"
+                  >
+                    Карточка {research.bduId.startsWith("BDU") ? research.bduId : `BDU:${research.bduId}`}
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+                {research.tgLink ? (
+                  <button
+                    type="button"
+                    onClick={() => onOpenTgLink?.(research.tgLink!)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-[12px] font-medium hover:border-accent/30"
+                  >
+                    Пост в Telegram
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+              </div>
+              <div className="grid grid-cols-2 gap-2 border-t border-border pt-3">
                 <DecisionButton label="Наше, чиним" hint="1" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "fixing")} primary />
                 <DecisionButton label="Ждём патч" hint="2" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "waiting_patch")} />
                 <DecisionButton label="Не наше" hint="3" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "not_ours")} />
                 <DecisionButton label="Принятый риск" hint="4" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "accepted_risk")} />
               </div>
-              <div className="flex flex-col gap-1 border-t border-border pt-3 text-[12px]">
-                {selected.primary.caseId ? (
-                  <button type="button" className="text-left text-accent hover:underline" onClick={() => setOpenCaseId(selected.primary.caseId ?? null)}>
-                    Открыть кейс
-                  </button>
-                ) : null}
-                {cve ? (
-                  <button type="button" className="inline-flex items-center gap-1 text-left text-fg/80 hover:text-fg" onClick={() => onOpenCve?.(cve.refId)}>
-                    {cve.refId} <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                ) : null}
-                {bdu ? (
-                  <button type="button" className="inline-flex items-center gap-1 text-left text-fg/80 hover:text-fg" onClick={() => onOpenBdu?.(bdu.refId)}>
-                    {bdu.refId} <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                ) : null}
-                {tgLink && typeof tgLink.payload.link === "string" ? (
-                  <button type="button" className="text-left text-fg/80 hover:text-fg" onClick={() => onOpenTgLink?.(String(tgLink.payload.link))}>
-                    Пост в Telegram
-                  </button>
-                ) : null}
-              </div>
+              {selected.primary.caseId ? (
+                <button type="button" className="text-left text-[12px] text-accent hover:underline" onClick={() => setOpenCaseId(selected.primary.caseId ?? null)}>
+                  Открыть кейс смены
+                </button>
+              ) : null}
               {selected.primary.caseId ? (
                 <p className="text-[11px] text-muted">
                   SLA идёт, пока решение «чиним». {selected.when ? `Осталось ${selected.when}.` : ""}
