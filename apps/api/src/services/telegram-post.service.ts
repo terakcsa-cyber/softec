@@ -246,9 +246,9 @@ export class TelegramPostService {
     });
   }
 
-  async postCve(cveId: string, userStatus: string) {
+  async postCve(cveId: string, userStatus: string, messageText?: string) {
     const input = await this.buildCvePostInput(cveId, userStatus);
-    return this.publish(input);
+    return this.publish(input, messageText);
   }
 
   private async buildBduPostInput(bduId: string, userStatus: string) {
@@ -336,13 +336,27 @@ export class TelegramPostService {
     });
   }
 
-  async postBdu(bduId: string, userStatus: string) {
+  async postBdu(bduId: string, userStatus: string, messageText?: string) {
     const input = await this.buildBduPostInput(bduId, userStatus);
-    return this.publish(input);
+    return this.publish(input, messageText);
   }
 
-  private async publish(input: ReturnType<typeof buildVulnPostFromAiJson>) {
-    const text = formatVulnTelegramPost(input);
+  private resolvePublishText(
+    input: ReturnType<typeof buildVulnPostFromAiJson>,
+    messageText?: string
+  ): string {
+    const override = messageText?.trim();
+    if (override) {
+      if (override.length > 4096) {
+        throw new BadRequestException("Текст сообщения не длиннее 4096 символов (лимит Telegram)");
+      }
+      return override;
+    }
+    return formatVulnTelegramPost(input);
+  }
+
+  private async publish(input: ReturnType<typeof buildVulnPostFromAiJson>, messageText?: string) {
+    const text = this.resolvePublishText(input, messageText);
     const sent = await this.sendTelegramMessage(text);
     try {
       await this.db.query(

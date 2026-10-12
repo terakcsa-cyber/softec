@@ -114,7 +114,10 @@ export class IntegrationsBootJob implements OnModuleInit {
 
     // eslint-disable-next-line no-console
     console.log(`[ingest:integrations-boot] epss import start (rows=${count}, force=${force})`);
-    const result = await ingestEpssFeed(this.db, { auditMeta: { reason: "boot", via: "ingest" } });
+    const result = await ingestEpssFeed(this.db, {
+      auditMeta: { reason: "boot", via: "ingest" },
+      skipCatalogRescore: true
+    });
     // eslint-disable-next-line no-console
     console.log(
       `[ingest:integrations-boot] epss ok rows=${result.rows} upserted=${result.upserted}` +

@@ -91,6 +91,8 @@ export function isGenericEnrichmentTitle(title: string | null | undefined): bool
   if (!title?.trim()) return true;
   const t = title.trim();
   if (t === "Комплексный анализ уязвимости" || t === "Анализ уязвимости") return true;
+  if (/^уязв/i.test(t) && /\bCWE\b/i.test(t)) return true;
+  if (/^CWE-\d+\b/i.test(t) && t.length < 48) return true;
   if (t.startsWith("ИИ не настроен") || t.startsWith("LLM not configured")) return true;
   if (/^Комплексный анализ\s+(CVE-|BDU:)/i.test(t)) return true;
   if (/^Модель вернула не-JSON/i.test(t)) return true;

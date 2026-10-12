@@ -1,9 +1,11 @@
 import { Inject, Injectable, OnModuleInit } from "@nestjs/common";
-import { epssUtcYmd, ingestEpssFeed } from "@vuln-intel/shared";
+import { epssUtcYmd, ingestEpssFeed, rescoreCatalogRiskScores } from "@vuln-intel/shared";
 import { DbService } from "../services/db.service.js";
 
 @Injectable()
 export class EpssIngestJob implements OnModuleInit {
+  private catalogRescoreRunning = false;
+
   constructor(@Inject(DbService) private readonly db: DbService) {}
 
   async onModuleInit() {
@@ -51,7 +53,13 @@ export class EpssIngestJob implements OnModuleInit {
 
   private async runOnce() {
     const force = process.env.EPSS_FORCE_FULL === "1" || process.env.EPSS_FORCE_FULL === "true";
-    const result = await ingestEpssFeed(this.db, { auditMeta: { via: "epss-job" }, force });
+    // Full-catalog rescore can stall or OOM ingest; the poll loop must keep filling new CVEs.
+    const result = await ingestEpssFeed(this.db, {
+      auditMeta: { via: "epss-job" },
+      force,
+      skipCatalogRescore: true
+    });
+    this.kickCatalogRescore();
 
     // eslint-disable-next-line no-console
     console.log(
@@ -60,6 +68,23 @@ export class EpssIngestJob implements OnModuleInit {
         ` scoreDate=${result.scoreDate ?? "?"} exploitIntel=${result.exploitIntelRefreshed ?? 0}` +
         ` source=${result.sourceUrl}`
     );
+  }
+
+  private kickCatalogRescore() {
+    if (this.catalogRescoreRunning) return;
+    this.catalogRescoreRunning = true;
+    void rescoreCatalogRiskScores(this.db)
+      .then((n) => {
+        // eslint-disable-next-line no-console
+        console.log(`[ingest:epss] catalog rescore done rows=${n}`);
+      })
+      .catch((e) => {
+        // eslint-disable-next-line no-console
+        console.warn(`[ingest:epss] catalog rescore failed`, e instanceof Error ? e.message : e);
+      })
+      .finally(() => {
+        this.catalogRescoreRunning = false;
+      });
   }
 
   /** True when MAX(epss_score.scored_at) is before today's UTC date. */

@@ -77,7 +77,10 @@ export function TelegramPostButton({
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [statusForPreview, setStatusForPreview] = useState("");
+  const [postBody, setPostBody] = useState("");
+  const [postBodyDirty, setPostBodyDirty] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const postBodyRef = useRef<HTMLTextAreaElement | null>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const cfgQ = useQuery({
@@ -135,8 +138,14 @@ export function TelegramPostButton({
     staleTime: 0
   });
 
+  useEffect(() => {
+    if (!open || postBodyDirty) return;
+    const next = previewQ.data?.text?.trim();
+    if (next) setPostBody(next);
+  }, [open, postBodyDirty, previewQ.data?.text]);
+
   const postMut = useMutation({
-    mutationFn: async (status: string) => {
+    mutationFn: async (payload: { status: string; text: string }) => {
       const id = String(entityId ?? "").trim();
       if (!id) throw new Error("Нет идентификатора");
       const path =
@@ -146,7 +155,7 @@ export function TelegramPostButton({
       const res = await apiFetch(path, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ status })
+        body: JSON.stringify({ status: payload.status, text: payload.text })
       });
       if (!res.ok) {
         const t = await res.text().catch(() => "");
@@ -161,6 +170,8 @@ export function TelegramPostButton({
       closeTimerRef.current = setTimeout(() => {
         setOpen(false);
         setDetail("");
+        setPostBody("");
+        setPostBodyDirty(false);
         closeTimerRef.current = null;
       }, 2000);
       setTimeout(() => setMsg(null), 5000);
@@ -175,6 +186,7 @@ export function TelegramPostButton({
   const applyPreset = (p: (typeof STATUS_PRESETS)[number]) => {
     setPreset(p.id);
     setDetail(p.hint.replace(/^[🟡🔴🟢⚪]\s*/u, ""));
+    setPostBodyDirty(false);
   };
 
   const handleOpenChange = (nextOpen: boolean) => {
@@ -183,10 +195,16 @@ export function TelegramPostButton({
       closeTimerRef.current = null;
     }
     setOpen(nextOpen);
-    if (!nextOpen) return;
+    if (!nextOpen) {
+      setPostBody("");
+      setPostBodyDirty(false);
+      return;
+    }
     setErr(null);
     setMsg(null);
     postMut.reset();
+    setPostBody("");
+    setPostBodyDirty(false);
     if (!detail.trim()) {
       applyPreset(DEFAULT_STATUS);
     }
@@ -194,10 +212,18 @@ export function TelegramPostButton({
 
   const handleSubmit = () => {
     try {
-      void postMut.mutate(statusPayload);
+      const text = postBody.trim();
+      if (!text) throw new Error("Введите текст сообщения");
+      void postMut.mutate({ status: statusPayload, text });
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
+  };
+
+  const resetPostBodyFromPreview = () => {
+    setPostBodyDirty(false);
+    const next = previewQ.data?.text?.trim();
+    if (next) setPostBody(next);
   };
 
   useEffect(() => {
@@ -253,7 +279,7 @@ export function TelegramPostButton({
               <div>
                 <Dialog.Title className="text-sm font-semibold text-fg/95">Пост в Telegram</Dialog.Title>
                 <Dialog.Description className="mt-1 text-[11px] text-muted">
-                  Выберите статус (светофор) и проверьте текст ниже — в канал уйдёт именно он.
+                  Статус (светофор) собирает шаблон; текст сообщения можно править — в канал уйдёт то, что в поле ниже.
                 </Dialog.Description>
               </div>
               <Dialog.Close asChild>
@@ -294,37 +320,60 @@ export function TelegramPostButton({
               ref={textareaRef}
               rows={3}
               value={detail}
-              onChange={(e) => setDetail(e.target.value)}
+              onChange={(e) => {
+                setDetail(e.target.value);
+                setPostBodyDirty(false);
+              }}
               disabled={postMut.isPending}
               placeholder="Например: В работе — ожидаем патч от вендора, затронуты 12 хостов"
               className="mt-1 w-full resize-y rounded-lg border border-border bg-black/5 px-2.5 py-2 text-xs text-fg placeholder:text-muted/70 dark:bg-white/5"
             />
 
-            <p className="mt-3 text-[10px] uppercase tracking-wide text-muted">Текст сообщения в Telegram</p>
-            <div
-              className={cn(
-                "mt-1.5 min-h-[120px] max-h-[min(42vh,320px)] overflow-y-auto rounded-lg border border-border bg-black/10 px-3 py-2.5 dark:bg-black/35",
-                previewQ.isFetching && "opacity-70"
-              )}
-              aria-live="polite"
-            >
-              {previewQ.isFetching && !previewQ.data?.text ? (
-                <div className="flex items-center gap-2 text-[11px] text-muted">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Собираем каркас поста…
-                </div>
-              ) : previewQ.isError ? (
-                <p className="text-[11px] leading-relaxed text-danger">
-                  {previewQ.error instanceof Error ? previewQ.error.message : "Не удалось построить превью"}
-                </p>
-              ) : previewQ.data?.text ? (
-                <pre className="whitespace-pre-wrap break-words font-sans text-[11px] leading-relaxed text-fg/90">
-                  {previewQ.data.text}
-                </pre>
-              ) : (
-                <p className="text-[11px] text-muted">Укажите текст статуса — превью обновится автоматически.</p>
-              )}
+            <div className="mt-3 flex items-center justify-between gap-2">
+              <label className="text-[10px] uppercase tracking-wide text-muted" htmlFor="tg-post-body">
+                Текст сообщения в Telegram
+              </label>
+              {postBodyDirty && previewQ.data?.text ? (
+                <button
+                  type="button"
+                  disabled={postMut.isPending || previewQ.isFetching}
+                  onClick={resetPostBodyFromPreview}
+                  className="text-[10px] text-sky-200/90 underline-offset-2 hover:underline disabled:opacity-50"
+                >
+                  Сбросить к шаблону
+                </button>
+              ) : null}
             </div>
+            {previewQ.isFetching && !postBody.trim() ? (
+              <div className="mt-1.5 flex items-center gap-2 rounded-lg border border-border bg-black/10 px-3 py-2.5 text-[11px] text-muted dark:bg-black/35">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Собираем каркас поста…
+              </div>
+            ) : previewQ.isError && !postBody.trim() ? (
+              <p className="mt-1.5 text-[11px] leading-relaxed text-danger">
+                {previewQ.error instanceof Error ? previewQ.error.message : "Не удалось построить превью"}
+              </p>
+            ) : (
+              <textarea
+                id="tg-post-body"
+                ref={postBodyRef}
+                rows={12}
+                value={postBody}
+                onChange={(e) => {
+                  setPostBody(e.target.value);
+                  setPostBodyDirty(true);
+                }}
+                disabled={postMut.isPending}
+                placeholder="Шаблон появится после выбора статуса — можно редактировать перед отправкой"
+                className={cn(
+                  "mt-1.5 min-h-[120px] max-h-[min(42vh,320px)] w-full resize-y rounded-lg border border-border bg-black/10 px-2.5 py-2 font-sans text-[11px] leading-relaxed text-fg placeholder:text-muted/70 dark:bg-black/35",
+                  previewQ.isFetching && !postBodyDirty && "opacity-70"
+                )}
+              />
+            )}
+            {postBodyDirty ? (
+              <p className="mt-1 text-[10px] text-muted">Текст изменён вручную — смена статуса не перезапишет его, пока не нажмёте «Сбросить к шаблону».</p>
+            ) : null}
 
             {msg ? (
               <div className="mt-3 rounded-lg border border-ok/30 bg-ok/10 px-3 py-2 text-xs text-ok">
@@ -350,14 +399,7 @@ export function TelegramPostButton({
               </Dialog.Close>
               <button
                 type="button"
-                disabled={
-                  postMut.isPending ||
-                  Boolean(msg) ||
-                  !detail.trim() ||
-                  previewQ.isFetching ||
-                  previewQ.isError ||
-                  !previewQ.data?.text
-                }
+                disabled={postMut.isPending || Boolean(msg) || !detail.trim() || !postBody.trim()}
                 onClick={handleSubmit}
                 className="inline-flex items-center gap-2 rounded-lg border border-sky-400/60 bg-sky-500/20 px-3 py-1.5 text-xs text-sky-100 disabled:opacity-50"
               >

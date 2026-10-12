@@ -136,18 +136,56 @@ function extractIds(identifier: string, urls: string[]) {
   };
 }
 
-function extractProduct(title: string, description: string): string {
-  const cleanTitle = sanitizeTelegramText(title);
-  const cleanDesc = sanitizeTelegramText(description);
-  const fromTitle = cleanTitle
-    .replace(/^CVE-\d{4}-\d+\s*[—:-]\s*/i, "")
-    .replace(/^BDU:[\w-]+\s*[—:-]\s*/i, "")
+function looksLikeIdOrCwe(value: string): boolean {
+  const t = value.trim();
+  if (!t) return true;
+  if (/^(?:CVE-\d{4}-\d+|BDU:[\w.-]+|CWE-\d+)\b/i.test(t)) return true;
+  if (/\bCWE-\d+\b/i.test(t) && !/[А-Яа-яЁё]{5,}/.test(t)) return true;
+  return false;
+}
+
+/** Product/component label for the post headline — not a CWE code or boilerplate. */
+function cleanProductLabel(raw: string | null | undefined): string | null {
+  let t = sanitizeTelegramText(raw);
+  if (!t) return null;
+  t = t
+    .replace(/^CVE-\d{4}-\d+\s*[:—–-]\s*/i, "")
+    .replace(/^BDU:[\w.-]+\s*[:—–-]\s*/i, "")
+    .replace(/^(?:уязвимость|vulnerability)\s+(?:в|in)\s+/i, "")
+    .replace(/\s*\(?\s*CWE-\d+\s*\)?/gi, " ")
+    .replace(/\s+/g, " ")
     .trim();
-  if (fromTitle && !isGenericEnrichmentTitle(fromTitle) && fromTitle.length <= 120) return fromTitle;
+  if (!t || t.length > 90 || t.length < 2) return null;
+  if (isGenericEnrichmentTitle(t) || looksLikeIdOrCwe(t)) return null;
+  if (/^уязв/i.test(t)) return null;
+  if (/^(?:n\/a|unknown|неизвестно|компонент|component|product)$/i.test(t)) return null;
+  return t;
+}
+
+function extractProduct(title: string, description: string): string {
+  const fromTitle = cleanProductLabel(title);
+  if (fromTitle) return fromTitle;
+  const cleanDesc = sanitizeTelegramText(description);
   const m =
-    cleanDesc.match(/\b(?:in|в)\s+([A-Za-z0-9_.:+#\-\/ ]{2,80}?)(?:[.,;:]| allows| is affected| has| library| component)/i) ??
-    cleanDesc.match(/\b([A-Za-z0-9_.:+#\-\/]{2,60})\s+(?:library|package|component|client|server)\b/i);
-  return m?.[1]?.trim() || "—";
+    cleanDesc.match(/\b(?:in|в)\s+([A-Za-z][A-Za-z0-9_.:+#\-\/ ]{1,70}?)(?:[.,;:]| allows| is affected| has| library| component)/i) ??
+    cleanDesc.match(/\b([A-Za-z][A-Za-z0-9_.:+#\-\/]{1,50})\s+(?:library|package|component|client|server)\b/i);
+  return cleanProductLabel(m?.[1]) ?? "—";
+}
+
+function maturePostNarrative(raw: string | null | undefined): string {
+  let t = String(raw ?? "").trim();
+  t = t.replace(/^(?:Описание\s+(?:NVD|источника)\s*:\s*)+/i, "");
+  t = t.replace(/^(?:Кратко:\s*)+/i, "");
+  t = t.replace(/^(?:Класс уязвимости:\s*)?(?:CWE-\d+\s*[—–:-]\s*)+/i, "");
+  return t.trim();
+}
+
+function matureVulnType(raw: string | null | undefined): string {
+  let t = sanitizeTelegramText(raw);
+  if (!t || looksLikeIdOrCwe(t) || isGenericEnrichmentTitle(t)) return "—";
+  t = t.replace(/\bCWE-\d+\s*[—–:-]?\s*/gi, "").replace(/\s+/g, " ").trim();
+  if (!t || t.length < 4 || looksLikeIdOrCwe(t) || /^уязв/i.test(t)) return "—";
+  return t.length > 160 ? `${t.slice(0, 157)}…` : t;
 }
 
 function extractCwe(vulnerabilityClass: string | null, description: string): string {
@@ -173,18 +211,18 @@ function bulletize(items: string[], min = 3, fallback?: string[]): string[] {
 /** Текст поста для Telegram-канала по шаблону банка. */
 export function formatVulnTelegramPost(input: VulnTelegramPostInput): string {
   const sev = cvssSeverityLabel(input.cvssScore);
-  const description = sanitizeTelegramText(input.description, { multiline: true, max: 1800 });
+  const description = sanitizeTelegramText(maturePostNarrative(input.description), {
+    multiline: true,
+    max: 1800
+  });
   const title = sanitizeTelegramText(input.title, { max: 220 });
   const ids = extractIds(input.identifier, input.sourceUrls);
   const product = extractProduct(title, description);
   const cwe = extractCwe(input.vulnerabilityClass, description);
   const cvssV3 = input.cvssScore != null && Number.isFinite(input.cvssScore) ? input.cvssScore.toFixed(1) : "—";
   const level = input.cvssScore != null && Number.isFinite(input.cvssScore) ? sev.label : "—";
-  const vulnType = firstNonEmpty(input.vulnerabilityClass, title);
-  const component = firstNonEmpty(
-    splitSentences(description, 1)[0],
-    Array.isArray(input.attackFlow) && input.attackFlow[0] ? input.attackFlow[0] : null
-  );
+  const vulnType = matureVulnType(input.vulnerabilityClass);
+  const component = product !== "—" ? product : "—";
   const exploit = firstNonEmpty(input.exploitation);
   const summaryLines = splitSentences(description, 3);
   const riskLines = bulletize(summaryLines, 2, [
@@ -199,8 +237,13 @@ export function formatVulnTelegramPost(input: VulnTelegramPostInput): string {
   ]);
   const links = input.sourceUrls.map((u) => sanitizeTelegramText(u)).filter(Boolean).slice(0, 5);
 
+  const headline =
+    product !== "—"
+      ? `🚩 Уязвимость в ${product}`
+      : `🚩 Уязвимость ${ids.cveId !== "—" ? ids.cveId : ids.bduId !== "—" ? ids.bduId : sanitizeTelegramText(input.identifier)}`;
+
   const parts = [
-    `🚩 ⁣Уязвимость в ${product}`,
+    headline,
     "",
     `ℹ️ ${firstNonEmpty(description, title)}`,
     "",
