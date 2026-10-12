@@ -41,6 +41,7 @@ type TlsStatus = {
   acmeWebroot?: string;
   letsEncryptReadyHintRu?: string;
   ipHttpsHintRu?: string;
+  letsEncryptEmail?: string | null;
 };
 
 type GenerateResult = TlsStatus & {
@@ -117,6 +118,12 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
       setDomain(statusQ.data.defaultDomain);
     }
   }, [domain, statusQ.data?.defaultDomain]);
+
+  useEffect(() => {
+    const saved = statusQ.data?.letsEncryptEmail?.trim();
+    if (!saved) return;
+    setEmail((prev) => (prev.trim() ? prev : saved));
+  }, [statusQ.data?.letsEncryptEmail]);
 
   const targetIsIp = useMemo(() => looksLikeIp(domain), [domain]);
   const leIpSupported = statusQ.data?.certbotSupportsIpCertificates === true;
@@ -337,7 +344,7 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
                   {leIpSupported ? (
                     <button
                       type="button"
-                      disabled={busy || !domain.trim() || !email.trim()}
+                      disabled={busy || !domain.trim() || (!email.trim() && !st.letsEncryptEmail)}
                       onClick={() => letsencrypt.mutate()}
                       className="inline-flex items-center justify-center rounded-xl border border-border bg-white/70 px-4 py-2.5 text-sm font-medium text-fg/90 disabled:opacity-50 dark:bg-black/30"
                     >
@@ -356,7 +363,7 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
                 {leIpSupported ? (
                   <>
                     <label className="block">
-                      <span className="text-xs font-medium text-fg/85">Email для Let&apos;s Encrypt (опционально для IP)</span>
+                      <span className="text-xs font-medium text-fg/85">Email для Let&apos;s Encrypt (один раз)</span>
                       <input
                         value={email}
                         onChange={(e) => setEmail(e.target.value)}
@@ -371,8 +378,9 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
                       Staging CA (тест, браузеры не доверяют)
                     </label>
                     <p className="text-[11px] leading-relaxed text-muted">
-                      LE для IP: публичный адрес + порт 80, shortlived ~6 дней, DNS не нужен. Основной путь без
-                      предупреждений УЦ — только с доверенным CA; самоподписанный всегда работает локально/в lab.
+                      LE для IP живёт около 6 дней и после первого выпуска обновляется сам (проверка каждые 6 часов,
+                      новый сертификат примерно за 3 дня до конца). Почту заново вводить не нужно. Нужны публичный
+                      адрес и порт 80, DNS не нужен.
                     </p>
                   </>
                 ) : (
@@ -403,7 +411,7 @@ export function WebTlsSettingsPanel({ embedded = false }: { embedded?: boolean }
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    disabled={busy || !domain.trim() || !email.trim() || !leAllowedForTarget}
+                    disabled={busy || !domain.trim() || (!email.trim() && !st.letsEncryptEmail) || !leAllowedForTarget}
                     onClick={() => letsencrypt.mutate()}
                     className={cn(
                       "inline-flex items-center justify-center rounded-xl px-4 py-2.5 text-sm font-medium transition",

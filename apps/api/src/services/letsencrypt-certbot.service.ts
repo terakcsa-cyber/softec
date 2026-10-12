@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, Logger } from "@nestjs/common";
 import { spawn } from "node:child_process";
-import { access, chmod, copyFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { join, resolve } from "node:path";
 
@@ -128,6 +128,8 @@ export class LetsEncryptCertbotService {
     email: string;
     staging?: boolean;
     ipAddress?: boolean;
+    /** Replace a still-valid lineage. Required for IP/shortlived: plain renew follows ARI and skips the window. */
+    forceRenewal?: boolean;
   }): Promise<CertbotIssueResult> {
     const domain = input.domain.trim().toLowerCase();
     const email = this.normalizeEmail(input.email);
@@ -172,7 +174,7 @@ export class LetsEncryptCertbotService {
       email,
       "--agree-tos",
       "--non-interactive",
-      "--keep-until-expiring",
+      input.forceRenewal ? "--force-renewal" : "--keep-until-expiring",
       "--config-dir",
       configDir,
       "--work-dir",
@@ -219,7 +221,7 @@ export class LetsEncryptCertbotService {
     };
   }
 
-  async renew(): Promise<{ renewed: boolean; output: string }> {
+  async renew(opts?: { certName?: string; force?: boolean }): Promise<{ renewed: boolean; output: string }> {
     const available = await this.isCertbotAvailable();
     if (!available) return { renewed: false, output: "certbot missing" };
     // Do not force --staging here: certbot renew uses each lineage's renewal config.
@@ -238,14 +240,105 @@ export class LetsEncryptCertbotService {
       "--preferred-challenges",
       "http"
     ];
+    const certName = opts?.certName?.trim();
+    if (certName) args.push("--cert-name", certName);
+    if (opts?.force) args.push("--force-renewal");
     try {
       const output = await this.run(args, { timeoutMs: 180_000 });
-      const renewed = /Congratulations|successfully renewed|new certificate/i.test(output);
+      const renewed = /Congratulations|successfully renewed|renewal succeeded|Successfully received|new certificate/i.test(output);
       return { renewed, output: output.slice(0, 2000) };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new BadRequestException(`certbot renew не удался: ${msg.slice(0, 800)}`);
     }
+  }
+
+  /**
+   * Renew one lineage. IP/shortlived certs are force-renewed: `certbot renew` otherwise
+   * waits for the ARI window (often the last few hours of a ~6-day cert) and a daily check misses it.
+   * If the lineage is missing or renew still no-ops, reissue with the stored ACME email.
+   */
+  async renewInstalled(opts: {
+    certName?: string;
+    force: boolean;
+    email?: string;
+    staging?: boolean;
+    ipAddress?: boolean;
+  }): Promise<{ renewed: boolean; output: string }> {
+    let renewError: string | null = null;
+    try {
+      const result = await this.renew({ certName: opts.certName, force: opts.force });
+      if (result.renewed || !opts.force) return result;
+      renewError = result.output || "certbot renew did not issue a certificate";
+    } catch (err) {
+      renewError = err instanceof Error ? err.message : String(err);
+      if (!opts.force) throw err;
+    }
+
+    const domain = opts.certName?.trim();
+    if (opts.ipAddress && opts.email && domain) {
+      this.log.warn(
+        `LE IP renew did not issue a new cert for ${domain} (${renewError?.slice(0, 240) ?? "no output"}); reissuing with stored account`
+      );
+      await this.issue({
+        domain,
+        email: opts.email,
+        staging: opts.staging,
+        ipAddress: true,
+        forceRenewal: true
+      });
+      return { renewed: true, output: "reissued via certonly --force-renewal" };
+    }
+
+    const hint =
+      opts.ipAddress && !opts.email
+        ? " Сохранённый email не найден. Один раз укажите почту и нажмите «LE для IP» — дальше обновление пойдёт само."
+        : "";
+    throw new BadRequestException(
+      `certbot renew не выпустил новый сертификат${renewError ? `: ${renewError.slice(0, 700)}` : ""}${hint}`
+    );
+  }
+
+  /** Email from the certbot ACME account (`regr.json`), when issuer.json has none. */
+  async readStoredAccountEmail(): Promise<string | null> {
+    const stack = [join(this.configDir(), "accounts")];
+    while (stack.length) {
+      const dir = stack.pop()!;
+      let entries;
+      try {
+        entries = await readdir(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const path = join(dir, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(path);
+          continue;
+        }
+        if (entry.name !== "regr.json") continue;
+        try {
+          const parsed = JSON.parse(await readFile(path, "utf8")) as {
+            contact?: unknown;
+            body?: { contact?: unknown };
+          };
+          const list = Array.isArray(parsed.body?.contact)
+            ? parsed.body.contact
+            : Array.isArray(parsed.contact)
+              ? parsed.contact
+              : [];
+          for (const contact of list) {
+            if (typeof contact !== "string") continue;
+            const match = /^mailto:(.+)$/i.exec(contact.trim());
+            const email = match?.[1]?.trim().toLowerCase();
+            if (email?.includes("@")) return email;
+          }
+        } catch {
+          // try the next account file
+        }
+      }
+    }
+    return null;
   }
 
   async installIntoCertsDir(opts: {

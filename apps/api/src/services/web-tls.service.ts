@@ -51,6 +51,8 @@ export type WebTlsStatus = {
   acmeWebroot: string;
   letsEncryptReadyHintRu: string;
   ipHttpsHintRu: string;
+  /** ACME account email saved with the current Let's Encrypt cert, if any. */
+  letsEncryptEmail: string | null;
 };
 
 export type WebTlsGenerateResult = WebTlsStatus & {
@@ -66,6 +68,8 @@ const SELF_SIGNED_WARNING_RU =
 @Injectable()
 export class WebTlsService implements OnModuleInit {
   private readonly log = new Logger(WebTlsService.name);
+  private leAutoRenewRunning = false;
+  private leAutoRenewRetryAt = 0;
 
   constructor(
     private readonly localProxy: LocalHttpsProxyService,
@@ -84,39 +88,54 @@ export class WebTlsService implements OnModuleInit {
   }
 
   /**
-   * Periodic check: renew Let's Encrypt when days remaining is below threshold.
-   * Domain certs default &lt; 30 days; IP/shortlived (~6d) default &lt; 2 days.
+   * Periodic check: renew Let's Encrypt when remaining lifetime is below the threshold.
+   * Domain certs default to under 30 days. IP/shortlived (~160h) default to under 3 days,
+   * checked every 6 hours, and force-reissued so certbot's ARI window cannot skip them.
    * Disable with LETSENCRYPT_AUTO_RENEW=false.
    */
   private scheduleLetsEncryptAutoRenew(): void {
-    if (process.env.LETSENCRYPT_AUTO_RENEW === "false") return;
-    const intervalMs = Math.max(
-      60 * 60_000,
-      Number(process.env.LETSENCRYPT_AUTO_RENEW_INTERVAL_MS ?? 24 * 60 * 60_000)
+    if (process.env.LETSENCRYPT_AUTO_RENEW === "false") {
+      this.log.log("LE auto-renew disabled (LETSENCRYPT_AUTO_RENEW=false)");
+      return;
+    }
+    const configuredInterval = Number(process.env.LETSENCRYPT_AUTO_RENEW_INTERVAL_MS ?? 6 * 60 * 60_000);
+    const intervalMs = Math.max(15 * 60_000, Number.isFinite(configuredInterval) ? configuredInterval : 6 * 60 * 60_000);
+    const configuredDelay = Number(process.env.LETSENCRYPT_AUTO_RENEW_INITIAL_MS ?? 120_000);
+    const initialDelayMs = Math.max(30_000, Number.isFinite(configuredDelay) ? configuredDelay : 120_000);
+    this.log.log(
+      `LE auto-renew armed: every ${Math.round(intervalMs / 60_000)} min, IP < ${ipRenewThresholdDays()}d, domain < ${domainRenewThresholdDays()}d`
     );
-    const initialDelayMs = Math.max(30_000, Number(process.env.LETSENCRYPT_AUTO_RENEW_INITIAL_MS ?? 120_000));
 
     const tick = async () => {
+      if (this.leAutoRenewRunning) return;
+      if (Date.now() < this.leAutoRenewRetryAt) return;
+      this.leAutoRenewRunning = true;
       try {
         const status = await this.getStatus();
         if (status.issuer !== "letsencrypt") return;
         const meta = await this.certbot.readIssuerMeta(this.certsDir());
         const shortlived = meta.shortlived || this.certbot.isIpLiteral(meta.domain ?? "");
-        const thresholdDays = Math.max(
-          1,
-          Number(
-            shortlived
-              ? (process.env.LETSENCRYPT_IP_RENEW_DAYS ?? 2)
-              : (process.env.LETSENCRYPT_RENEW_DAYS ?? 30)
-          )
-        );
-        if (status.daysRemaining == null || status.daysRemaining >= thresholdDays) return;
+        const validToMs = status.validTo ? Date.parse(status.validTo) : Number.NaN;
+        const daysExact = Number.isFinite(validToMs) ? (validToMs - Date.now()) / 86_400_000 : null;
+        const thresholdDays = shortlived ? ipRenewThresholdDays() : domainRenewThresholdDays();
+        if (daysExact == null || daysExact >= thresholdDays) return;
         this.log.log(
-          `LE auto-renew: daysRemaining=${status.daysRemaining} < ${thresholdDays} (shortlived=${shortlived}), running certbot renew`
+          `LE auto-renew: daysRemaining=${daysExact.toFixed(2)} < ${thresholdDays} (shortlived=${shortlived})`
         );
-        await this.renewLetsEncrypt();
+        const renewed = await this.renewLetsEncrypt();
+        if (shortlived && !renewed.renewed) {
+          this.leAutoRenewRetryAt = Date.now() + 12 * 60 * 60_000;
+          this.log.warn("LE auto-renew: IP certificate was not replaced; next attempt in 12h");
+          return;
+        }
+        this.leAutoRenewRetryAt = 0;
       } catch (err) {
-        this.log.warn(`LE auto-renew skipped: ${err instanceof Error ? err.message : String(err)}`);
+        this.leAutoRenewRetryAt = Date.now() + 12 * 60 * 60_000;
+        this.log.warn(
+          `LE auto-renew skipped: ${err instanceof Error ? err.message : String(err)} (next attempt in 12h)`
+        );
+      } finally {
+        this.leAutoRenewRunning = false;
       }
     };
 
@@ -199,19 +218,21 @@ export class WebTlsService implements OnModuleInit {
       local: localInfo
     });
 
-    const marker = await this.certbot.readIssuerMarker(dir);
+    const meta = await this.certbot.readIssuerMeta(dir);
     const issuer: "letsencrypt" | "selfsigned" | "unknown" = selfSigned
       ? "selfsigned"
-      : marker === "letsencrypt"
+      : meta.issuer === "letsencrypt"
         ? "letsencrypt"
-        : marker;
+        : meta.issuer;
     const certbotAvailable = await this.certbot.isCertbotAvailable();
     const certbotSupportsIpCertificates = await this.certbot.supportsIpCertificates();
     const defaultDomain = this.defaultDomain();
     const defaultTargetIsIp = this.certbot.isIpLiteral(defaultDomain);
     const warningRu =
       issuer === "letsencrypt"
-        ? "Сертификат Let's Encrypt (доверенный УЦ). Обновление: кнопка «Обновить LE» или авто-renew по сроку."
+        ? meta.shortlived
+          ? `Сертификат Let's Encrypt для IP (~6 дней). Обновляется сам, когда до конца остаётся меньше ${ipRenewThresholdDays()} дн. Почту заново вводить не нужно.`
+          : `Сертификат Let's Encrypt (доверенный УЦ). Обновляется сам, когда до конца остаётся меньше ${domainRenewThresholdDays()} дн.`
         : SELF_SIGNED_WARNING_RU;
 
     return {
@@ -244,10 +265,11 @@ export class WebTlsService implements OnModuleInit {
       certbotSupportsIpCertificates,
       acmeWebroot: this.certbot.webrootDir(),
       letsEncryptReadyHintRu: certbotSupportsIpCertificates
-        ? "Let's Encrypt (certbot HTTP-01): публичный домен (DNS) или публичный IP + порт 80 (tls-proxy отдаёт /.well-known/acme-challenge/). Для IP нужен shortlived-профиль (~6 дней). Email обязателен."
+        ? "Let's Encrypt (certbot HTTP-01): публичный домен (DNS) или публичный IP + порт 80 (tls-proxy отдаёт /.well-known/acme-challenge/). Для IP — shortlived ~6 дней, дальше сертификат обновляется сам. Email нужен один раз."
         : "Let's Encrypt через certbot (HTTP-01): публичный DNS на этот хост + порт 80. Для голого IP в этом образе certbot слишком старый — используйте самоподписанный с IP в SAN.",
       ipHttpsHintRu:
-        "Доступ по IP без DNS: укажите IPv4/IPv6 и нажмите «HTTPS для IP (самоподписанный)». Браузер покажет предупреждение — это ожидаемо. Опционально: LE IP (shortlived ~6 дн.), если certbot ≥ 5.4 и порт 80 доступен с интернета."
+        "Доступ по IP без DNS: укажите IPv4/IPv6 и нажмите «HTTPS для IP (самоподписанный)». Браузер покажет предупреждение — это ожидаемо. LE для IP (~6 дн.) после первого выпуска обновляется сам.",
+      letsEncryptEmail: meta.email
     };
   }
 
@@ -369,7 +391,13 @@ export class WebTlsService implements OnModuleInit {
     staging?: boolean;
   }): Promise<WebTlsGenerateResult & { provider: "letsencrypt" }> {
     const domain = this.normalizeHost(input.domain?.trim() || this.defaultDomain());
-    const email = this.certbot.normalizeEmail(input.email);
+    const stored = await this.certbot.readIssuerMeta(this.certsDir());
+    const emailRaw =
+      input.email?.trim() ||
+      stored.email ||
+      (await this.certbot.readStoredAccountEmail()) ||
+      "";
+    const email = this.certbot.normalizeEmail(emailRaw);
     const isIp = this.certbot.isIpLiteral(domain);
     if (isIp) {
       await this.certbot.assertIpIssuanceSupported();
@@ -399,7 +427,7 @@ export class WebTlsService implements OnModuleInit {
       status.httpsUrl ?? `https://${this.formatUrlHost(domain)}${this.portSuffix(process.env.WEB_TLS_PUBLISHED_PORT)}`;
     const stagingNote = issued.staging ? " (staging CA — браузеры не будут доверять)." : "";
     const shortNote = issued.shortlived
-      ? " Shortlived (~6 дней): авто-renew при сроке < LETSENCRYPT_IP_RENEW_DAYS (по умолчанию 2)."
+      ? ` Shortlived (~6 дней): дальше обновляется сам, когда до конца остаётся меньше ${ipRenewThresholdDays()} дн.`
       : "";
     const messageRu = status.applied
       ? `Let's Encrypt для «${domain}» выпущен через certbot и применён на веб: ${url}${stagingNote}${shortNote}`
@@ -424,7 +452,16 @@ export class WebTlsService implements OnModuleInit {
       );
     }
 
-    const renew = await this.certbot.renew();
+    const domain = meta.domain || this.defaultDomain();
+    const shortlived = meta.shortlived || this.certbot.isIpLiteral(domain);
+    const email = meta.email || (await this.certbot.readStoredAccountEmail()) || undefined;
+    const renew = await this.certbot.renewInstalled({
+      certName: meta.domain ?? undefined,
+      force: shortlived,
+      email,
+      staging: meta.staging,
+      ipAddress: shortlived && this.certbot.isIpLiteral(domain)
+    });
 
     const preferred: string[] = [];
     if (meta.domain) preferred.push(meta.domain);
@@ -453,7 +490,7 @@ export class WebTlsService implements OnModuleInit {
       privkeyPath: live.privkeyPath,
       certsDir: this.certsDir(),
       domain: live.domain,
-      email: meta.email ?? undefined,
+      email: email ?? meta.email ?? undefined,
       staging: meta.staging,
       shortlived: meta.shortlived || this.certbot.isIpLiteral(live.domain)
     });
@@ -809,4 +846,14 @@ export class WebTlsService implements OnModuleInit {
       // ignore
     }
   }
+}
+
+function ipRenewThresholdDays(): number {
+  const n = Number(process.env.LETSENCRYPT_IP_RENEW_DAYS ?? 3);
+  return Number.isFinite(n) ? Math.max(1, n) : 3;
+}
+
+function domainRenewThresholdDays(): number {
+  const n = Number(process.env.LETSENCRYPT_RENEW_DAYS ?? 30);
+  return Number.isFinite(n) ? Math.max(1, n) : 30;
 }
