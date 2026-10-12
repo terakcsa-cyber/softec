@@ -6,7 +6,7 @@ export default function Page() {
   return (
     <RequireAuth>
       <VocTriageProvider>
-        <main className="h-dvh overflow-hidden px-6 py-6">
+        <main className="h-dvh overflow-hidden px-3 py-3 sm:px-4 sm:py-4">
           <Dashboard />
         </main>
       </VocTriageProvider>

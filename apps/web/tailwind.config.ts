@@ -5,6 +5,15 @@ export default {
   content: ["./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ["var(--font-sans)", "IBM Plex Sans", "ui-sans-serif", "system-ui", "sans-serif"],
+        mono: ["var(--font-mono)", "IBM Plex Mono", "ui-monospace", "monospace"]
+      },
+      borderRadius: {
+        lg: "0.5rem",
+        xl: "0.625rem",
+        "2xl": "0.75rem"
+      },
       colors: {
         bg: "hsl(var(--color-bg) / <alpha-value>)",
         fg: "hsl(var(--color-fg) / <alpha-value>)",
@@ -17,7 +26,7 @@ export default {
         ok: "hsl(var(--color-ok) / <alpha-value>)"
       },
       boxShadow: {
-        glass: "0 0 0 1px hsl(0 0% 100% / 0.06), 0 10px 40px hsl(0 0% 0% / 0.35)"
+        glass: "0 0 0 1px hsl(0 0% 100% / 0.04)"
       },
       backdropBlur: {
         glass: "18px"

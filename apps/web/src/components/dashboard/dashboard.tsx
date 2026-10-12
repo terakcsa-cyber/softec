@@ -986,8 +986,8 @@ export function Dashboard() {
   });
 
   return (
-    <div className="mx-auto flex h-full min-h-0 w-[min(80vw,100%)] flex-col">
-      <div className="grid min-h-0 flex-1 grid-cols-[56px_minmax(0,1fr)] gap-6">
+    <div className="mx-auto flex h-full min-h-0 w-full flex-col">
+      <div className="grid min-h-0 flex-1 grid-cols-[56px_minmax(0,1fr)] gap-3">
         <aside className="glass flex h-full min-h-0 flex-col items-center gap-2 rounded-2xl p-2">
           <button
             onClick={() => {
@@ -1046,10 +1046,11 @@ export function Dashboard() {
             <button
               onClick={() => switchModule("tasks")}
               className={cn(
-                "rounded-2xl border p-3 transition",
+                "flex h-11 w-11 items-center justify-center rounded-xl border text-fg/85",
+                "hover:bg-slate-100 dark:hover:bg-black/25",
                 moduleKey === "tasks"
-                  ? "border-accent/40 bg-accent/10"
-                  : "border-border bg-white/60 hover:bg-white dark:bg-black/20 dark:hover:bg-black/30"
+                  ? "border-accent/30 bg-accent/10"
+                  : "border-slate-200 bg-white shadow-sm dark:border-border dark:bg-black/10 dark:shadow-none"
               )}
               title="Задачник"
             >
