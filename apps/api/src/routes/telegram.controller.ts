@@ -13,6 +13,18 @@ export class TelegramController {
     return s;
   }
 
+  @Post("preview/cve/:cveId")
+  @HttpCode(200)
+  previewCve(@Param("cveId") cveId: string, @Body() body: TelegramPostBody) {
+    return this.telegram.previewCve(cveId, this.requireStatus(body));
+  }
+
+  @Post("preview/bdu/:bduId")
+  @HttpCode(200)
+  previewBdu(@Param("bduId") bduId: string, @Body() body: TelegramPostBody) {
+    return this.telegram.previewBdu(bduId, this.requireStatus(body));
+  }
+
   @Post("post/cve/:cveId")
   @HttpCode(200)
   postCve(@Param("cveId") cveId: string, @Body() body: TelegramPostBody) {

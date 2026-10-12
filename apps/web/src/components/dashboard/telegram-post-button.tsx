@@ -3,7 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Loader2, Send, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "../ui/cn";
 
@@ -76,6 +76,7 @@ export function TelegramPostButton({
   const [detail, setDetail] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [statusForPreview, setStatusForPreview] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -90,6 +91,49 @@ export function TelegramPostButton({
   });
 
   const configured = Boolean(cfgQ.data?.telegram?.enabled && cfgQ.data.telegram.hasBotToken);
+
+  const statusPayload = useMemo(() => {
+    try {
+      return buildStatusPayload(preset, detail);
+    } catch {
+      return "";
+    }
+  }, [preset, detail]);
+
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setTimeout(() => {
+      try {
+        setStatusForPreview(buildStatusPayload(preset, detail));
+      } catch {
+        setStatusForPreview("");
+      }
+    }, 350);
+    return () => window.clearTimeout(id);
+  }, [open, preset, detail]);
+
+  const previewQ = useQuery({
+    queryKey: ["telegram", "preview", kind, entityId, statusForPreview],
+    enabled: open && Boolean(statusForPreview.trim()) && Boolean(entityId),
+    queryFn: async () => {
+      const id = String(entityId ?? "").trim();
+      const path =
+        kind === "cve"
+          ? `/api/telegram/preview/cve/${encodeURIComponent(id)}`
+          : `/api/telegram/preview/bdu/${encodeURIComponent(id.replace(/^BDU:/i, ""))}`;
+      const res = await apiFetch(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ status: statusForPreview })
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(() => "");
+        throw new Error(extractApiErrorMessage(res.status, t));
+      }
+      return (await res.json()) as { text?: string; identifier?: string };
+    },
+    staleTime: 0
+  });
 
   const postMut = useMutation({
     mutationFn: async (status: string) => {
@@ -150,8 +194,7 @@ export function TelegramPostButton({
 
   const handleSubmit = () => {
     try {
-      const status = buildStatusPayload(preset, detail);
-      void postMut.mutate(status);
+      void postMut.mutate(statusPayload);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     }
@@ -198,8 +241,8 @@ export function TelegramPostButton({
           <Dialog.Overlay className="fixed inset-0 z-[7000] bg-black/65 backdrop-blur-sm" />
           <Dialog.Content
             className={cn(
-              "fixed left-1/2 top-1/2 z-[7001] w-[min(440px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2",
-              "rounded-xl border border-border bg-panel p-4 shadow-2xl outline-none"
+              "fixed left-1/2 top-1/2 z-[7001] w-[min(560px,calc(100vw-2rem))] max-h-[min(90vh,calc(100vh-2rem))] -translate-x-1/2 -translate-y-1/2",
+              "flex flex-col overflow-hidden rounded-xl border border-border bg-panel p-4 shadow-2xl outline-none"
             )}
             onOpenAutoFocus={(event) => {
               event.preventDefault();
@@ -208,10 +251,9 @@ export function TelegramPostButton({
           >
             <div className="flex items-start justify-between gap-3">
               <div>
-                <Dialog.Title className="text-sm font-semibold text-fg/95">Статус для Telegram</Dialog.Title>
+                <Dialog.Title className="text-sm font-semibold text-fg/95">Пост в Telegram</Dialog.Title>
                 <Dialog.Description className="mt-1 text-[11px] text-muted">
-                  Укажите статус (светофор). Остальной блок «Комплексный анализ» заполнится автоматически из NVD,
-                  БДУ, KEV, EPSS и ИИ-обогащения.
+                  Выберите статус (светофор) и проверьте текст ниже — в канал уйдёт именно он.
                 </Dialog.Description>
               </div>
               <Dialog.Close asChild>
@@ -258,6 +300,32 @@ export function TelegramPostButton({
               className="mt-1 w-full resize-y rounded-lg border border-border bg-black/5 px-2.5 py-2 text-xs text-fg placeholder:text-muted/70 dark:bg-white/5"
             />
 
+            <p className="mt-3 text-[10px] uppercase tracking-wide text-muted">Текст сообщения в Telegram</p>
+            <div
+              className={cn(
+                "mt-1.5 min-h-[120px] max-h-[min(42vh,320px)] overflow-y-auto rounded-lg border border-border bg-black/10 px-3 py-2.5 dark:bg-black/35",
+                previewQ.isFetching && "opacity-70"
+              )}
+              aria-live="polite"
+            >
+              {previewQ.isFetching && !previewQ.data?.text ? (
+                <div className="flex items-center gap-2 text-[11px] text-muted">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Собираем каркас поста…
+                </div>
+              ) : previewQ.isError ? (
+                <p className="text-[11px] leading-relaxed text-danger">
+                  {previewQ.error instanceof Error ? previewQ.error.message : "Не удалось построить превью"}
+                </p>
+              ) : previewQ.data?.text ? (
+                <pre className="whitespace-pre-wrap break-words font-sans text-[11px] leading-relaxed text-fg/90">
+                  {previewQ.data.text}
+                </pre>
+              ) : (
+                <p className="text-[11px] text-muted">Укажите текст статуса — превью обновится автоматически.</p>
+              )}
+            </div>
+
             {msg ? (
               <div className="mt-3 rounded-lg border border-ok/30 bg-ok/10 px-3 py-2 text-xs text-ok">
                 {msg}. Окно закроется автоматически.
@@ -282,7 +350,14 @@ export function TelegramPostButton({
               </Dialog.Close>
               <button
                 type="button"
-                disabled={postMut.isPending || Boolean(msg) || !detail.trim()}
+                disabled={
+                  postMut.isPending ||
+                  Boolean(msg) ||
+                  !detail.trim() ||
+                  previewQ.isFetching ||
+                  previewQ.isError ||
+                  !previewQ.data?.text
+                }
                 onClick={handleSubmit}
                 className="inline-flex items-center gap-2 rounded-lg border border-sky-400/60 bg-sky-500/20 px-3 py-1.5 text-xs text-sky-100 disabled:opacity-50"
               >

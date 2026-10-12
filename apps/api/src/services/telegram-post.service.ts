@@ -146,7 +146,19 @@ export class TelegramPostService {
     return null;
   }
 
-  async postCve(cveId: string, userStatus: string) {
+  async previewCve(cveId: string, userStatus: string) {
+    const input = await this.buildCvePostInput(cveId, userStatus);
+    const text = formatVulnTelegramPost(input);
+    return { identifier: input.identifier, text, previewLength: text.length };
+  }
+
+  async previewBdu(bduId: string, userStatus: string) {
+    const input = await this.buildBduPostInput(bduId, userStatus);
+    const text = formatVulnTelegramPost(input);
+    return { identifier: input.identifier, text, previewLength: text.length };
+  }
+
+  private async buildCvePostInput(cveId: string, userStatus: string) {
     const status = normalizeTelegramUserStatus(userStatus);
     const id = cveId.trim().toUpperCase();
     const cve = await this.db.query<{
@@ -219,7 +231,7 @@ export class TelegramPostService {
       if (s && s.length > 12 && s.length < 400) extraRemediation.push(`${a.title}: ${s}`);
     }
 
-    const input = buildVulnPostFromAiJson(id, ai, {
+    return buildVulnPostFromAiJson(id, ai, {
       userStatus: status,
       cvssScore: row.cvss_base,
       exploitKnown: row.exploit_known,
@@ -232,10 +244,14 @@ export class TelegramPostService {
       extraLinks: links,
       extraRemediation
     });
+  }
+
+  async postCve(cveId: string, userStatus: string) {
+    const input = await this.buildCvePostInput(cveId, userStatus);
     return this.publish(input);
   }
 
-  async postBdu(bduId: string, userStatus: string) {
+  private async buildBduPostInput(bduId: string, userStatus: string) {
     const status = normalizeTelegramUserStatus(userStatus);
     const id = bduId.replace(/^BDU:/i, "").trim();
     const bdu = await this.db.query<{
@@ -302,7 +318,7 @@ export class TelegramPostService {
       }
     }
 
-    const input = buildVulnPostFromAiJson(`BDU:${id}`, ai, {
+    return buildVulnPostFromAiJson(`BDU:${id}`, ai, {
       userStatus: status,
       cvssScore: row.cvss_score,
       exploitKnown: row.has_exploit,
@@ -318,7 +334,10 @@ export class TelegramPostService {
       extraLinks: links,
       extraRemediation
     });
+  }
 
+  async postBdu(bduId: string, userStatus: string) {
+    const input = await this.buildBduPostInput(bduId, userStatus);
     return this.publish(input);
   }
 
