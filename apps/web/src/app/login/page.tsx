@@ -1,5 +1,14 @@
 "use client";
 
+import {
+  AuthError,
+  AuthField,
+  AuthInput,
+  AuthLoading,
+  AuthPrimaryButton,
+  AuthSecondaryButton,
+  AuthShell
+} from "@/components/auth/auth-shell";
 import { useAuth } from "@/contexts/auth-context";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -81,150 +90,118 @@ export default function LoginPage() {
   }
 
   if (loading || (!user && !setupChecked)) {
-    return (
-      <div className="flex min-h-screen flex-col items-center justify-center gap-2 bg-bg text-muted">
-        <span className="text-sm">{loading ? "Проверка сессии…" : "Проверка первичной настройки…"}</span>
-      </div>
-    );
+    return <AuthLoading message={loading ? "Проверка сессии…" : "Проверка первичной настройки…"} />;
   }
   if (user) return null;
 
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-bg px-4">
-      <div className="glass w-full max-w-md rounded-2xl p-8 shadow-2xl">
-        <h1 className="text-lg font-semibold tracking-tight text-fg">
-          {setupRequired ? "Первичная настройка" : "Вход"}
-        </h1>
-        <p className="mt-1 text-sm text-muted">
-          {setupRequired
-            ? "Пользователей ещё нет. Создайте администратора, который будет управлять платформой."
-            : pendingToken
-              ? "Введите код из приложения-аутентификатора (Google Authenticator и совместимые)."
-              : "Пароль и при необходимости второй фактор (TOTP)."}
-        </p>
+  const title = setupRequired ? "Первичная настройка" : pendingToken ? "Подтверждение 2FA" : "Вход в платформу";
+  const subtitle = setupRequired
+    ? "Пользователей ещё нет. Создайте администратора, который будет управлять VulnControl."
+    : pendingToken
+      ? "Введите код из приложения-аутентификатора (Google Authenticator и совместимые)."
+      : "Введите учётные данные. При включённом TOTP потребуется второй фактор.";
 
-        <form onSubmit={(e) => void onSubmit(e)} className="mt-6 space-y-4" autoComplete="off">
-          {setupRequired ? (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-muted">Email администратора</label>
-                <input
-                  type="email"
-                  name="login-email"
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted">Пароль администратора</label>
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  minLength={12}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
-                  required
-                />
-                <div className="mt-1 text-[11px] text-muted">Минимум 12 символов. Сохраните пароль в менеджере секретов.</div>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted">Повторите пароль</label>
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  minLength={12}
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
-                  required
-                />
-              </div>
-            </>
-          ) : !pendingToken ? (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-muted">Email</label>
-                <input
-                  type="email"
-                  name="login-email"
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  autoCorrect="off"
-                  spellCheck={false}
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-muted">Пароль</label>
-                <input
-                  type="password"
-                  name="login-password"
-                  autoComplete="off"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
-                  required
-                />
-              </div>
-            </>
-          ) : (
-            <div>
-              <label className="block text-xs font-medium text-muted">Код 2FA</label>
-              <input
-                type="text"
-                inputMode="numeric"
-                autoComplete="one-time-code"
-                pattern="[0-9]*"
-                maxLength={12}
-                value={totpCode}
-                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ""))}
-                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
-                placeholder="000000"
+  return (
+    <AuthShell title={title} subtitle={subtitle} footer="Доступ только для авторизованных аналитиков">
+      <form onSubmit={(e) => void onSubmit(e)} className="space-y-4" autoComplete="off">
+        {setupRequired ? (
+          <>
+            <AuthField label="Email администратора">
+              <AuthInput
+                type="email"
+                name="login-email"
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 required
               />
-            </div>
-          )}
+            </AuthField>
+            <AuthField label="Пароль администратора" hint="Минимум 12 символов. Сохраните пароль в менеджере секретов.">
+              <AuthInput
+                type="password"
+                autoComplete="new-password"
+                minLength={12}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+            </AuthField>
+            <AuthField label="Повторите пароль">
+              <AuthInput
+                type="password"
+                autoComplete="new-password"
+                minLength={12}
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                required
+              />
+            </AuthField>
+          </>
+        ) : !pendingToken ? (
+          <>
+            <AuthField label="Email">
+              <AuthInput
+                type="email"
+                name="login-email"
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+              />
+            </AuthField>
+            <AuthField label="Пароль">
+              <AuthInput
+                type="password"
+                name="login-password"
+                autoComplete="off"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+            </AuthField>
+          </>
+        ) : (
+          <AuthField label="Код 2FA">
+            <AuthInput
+              type="text"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="[0-9]*"
+              maxLength={12}
+              value={totpCode}
+              onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, ""))}
+              className="font-mono tracking-[0.2em]"
+              placeholder="000000"
+              required
+            />
+          </AuthField>
+        )}
 
-          {error ? (
-            <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-              {error}
-            </div>
-          ) : null}
+        {error ? <AuthError>{error}</AuthError> : null}
 
-          <div className="flex gap-3 pt-2">
-            {pendingToken ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setPendingToken(null);
-                  setTotpCode("");
-                  setError(null);
-                }}
-                className="rounded-lg border border-slate-200 px-4 py-2 text-sm text-fg/90 hover:bg-slate-50 dark:border-border dark:hover:bg-white/[0.06]"
-              >
-                Назад
-              </button>
-            ) : null}
-            <button
-              type="submit"
-              disabled={busy}
-              className="flex-1 rounded-lg border border-accent/30 bg-accent/15 px-4 py-2 text-sm font-medium text-fg hover:bg-accent/25 disabled:opacity-50"
+        <div className="flex gap-2.5 pt-1">
+          {pendingToken ? (
+            <AuthSecondaryButton
+              onClick={() => {
+                setPendingToken(null);
+                setTotpCode("");
+                setError(null);
+              }}
             >
-              {busy ? "…" : setupRequired ? "Создать администратора" : pendingToken ? "Подтвердить" : "Войти"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+              Назад
+            </AuthSecondaryButton>
+          ) : null}
+          <AuthPrimaryButton disabled={busy}>
+            {busy ? "…" : setupRequired ? "Создать администратора" : pendingToken ? "Подтвердить" : "Войти"}
+          </AuthPrimaryButton>
+        </div>
+      </form>
+    </AuthShell>
   );
 }

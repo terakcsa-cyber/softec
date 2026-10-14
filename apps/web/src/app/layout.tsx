@@ -19,8 +19,12 @@ const mono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Vuln Intel",
-  description: "Next-gen vulnerability intelligence platform"
+  title: "VulnControl",
+  description: "Vulnerability Management Platform",
+  applicationName: "VulnControl",
+  icons: {
+    icon: [{ url: "/icon", type: "image/png" }]
+  }
 };
 
 const themeInitScript = `(function(){try{var k='vip:theme';var t=localStorage.getItem(k);var r=document.documentElement;r.classList.remove('light','dark');r.classList.add(t==='light'?'light':'dark');}catch(e){document.documentElement.classList.add('dark');}})();`;

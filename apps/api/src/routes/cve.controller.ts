@@ -139,6 +139,26 @@ function cveIdShape(qRaw: string): string | null {
   return `CVE-${m[1]}-${m[2]}`.toUpperCase();
 }
 
+/** Токены свободного поиска (вендор/продукт/фраза). */
+function searchTokens(qLower: string): string[] {
+  const parts = qLower
+    .split(/[^a-z0-9а-яё._+-]+/i)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
+  return [...new Set(parts)].slice(0, 5);
+}
+
+/** Поля каталога CPE/вендор↔продукт для `LIKE '%'||$n||'%'` (alias `vp`). */
+function vpFieldsLikeSql(paramIdx: number): string {
+  const like = `LIKE '%' || $${paramIdx}::text || '%' ESCAPE E'\\\\'`;
+  return `(
+              lower(vp.vendor) ${like}
+              OR lower(COALESCE(vp.product, '')) ${like}
+              OR lower(vp.vendor_key) ${like}
+              OR lower(vp.product_key_norm) ${like}
+            )`;
+}
+
 function clampWindowDays(raw: string | undefined): number | null {
   const n = Number(raw);
   if (!Number.isFinite(n)) return null;
@@ -643,14 +663,17 @@ export class CveController {
         return { items: rPrefix.rows };
       }
 
+      // Free-text: collect candidate ids from indexed tables (vendor/product, cve_id, …),
+      // then rank — never `FROM cve WHERE EXISTS (vp/enrichment)` (multi-second on large catalogs).
       const needleLiteral = qLowerForNeedle;
-      const needleLike = escapePgLikePattern(qLowerForNeedle);
+      const tokens = searchTokens(qLowerForNeedle);
+      if (!shapedCve && tokens.length === 0 && needleLiteral.replace(/\s+/g, "").length < 2) {
+        return { items: [], total: 0 };
+      }
+
       params.push(needleLiteral);
       const literalIdx = params.length;
-      params.push(needleLike);
-      const needleIdx = params.length;
       const exactCond = `lower(c.cve_id) = $${literalIdx}::text`;
-      const likeSuffix = `LIKE '%' || $${needleIdx}::text || '%' ESCAPE E'\\\\'`;
 
       let cveAnyIdx = 0;
       let bduAnyIdx = 0;
@@ -672,55 +695,75 @@ export class CveController {
       }
       const exactMatchExpr = `(${exactParts.join(" OR ")})`;
 
-      const idTokenSql =
-        (cveAnyIdx > 0 ? ` OR c.cve_id = ANY($${cveAnyIdx}::text[])` : "") +
-        (bduAnyIdx > 0
-          ? ` OR EXISTS (SELECT 1 FROM cve_bdu_link cb_any WHERE cb_any.cve_id = c.cve_id AND cb_any.bdu_id = ANY($${bduAnyIdx}::text[]))`
-          : "");
+      const candidateParts: string[] = [];
+      const tokenIdxs: number[] = [];
+      const tokenSource = tokens.length > 0 ? tokens : [needleLiteral];
+      for (const token of tokenSource) {
+        params.push(escapePgLikePattern(token));
+        tokenIdxs.push(params.length);
+      }
+      const phraseIdx =
+        tokenSource.length > 1 || tokenSource[0] !== needleLiteral
+          ? (() => {
+              params.push(escapePgLikePattern(needleLiteral));
+              return params.length;
+            })()
+          : tokenIdxs[0]!;
 
-      // Skip enrichment_ai.output_json::text and risk_score.factors (huge, low value).
-      // raw::text is expensive; only for longer free-text phrases (trigram idx).
-      // CVE-shaped needles use the prefix path above; short tokens match vendor/product/cve_id.
+      // Vendor/product: AND across tokens (same CPE row), OR full phrase.
+      const vpTokenAnd = tokenIdxs.map((idx) => vpFieldsLikeSql(idx)).join(" AND ");
+      const vpPhrase = vpFieldsLikeSql(phraseIdx);
+      candidateParts.push(
+        `SELECT vp.cve_id FROM cve_vendor_product vp WHERE (${vpTokenAnd}) OR (${vpPhrase})`
+      );
+
+      // cve_id substring for each token (OR) + full phrase.
+      const cveIdTokenOr = tokenIdxs
+        .map((idx) => `lower(c.cve_id) LIKE '%' || $${idx}::text || '%' ESCAPE E'\\\\'`)
+        .join(" OR ");
+      candidateParts.push(
+        `SELECT c.cve_id FROM cve c WHERE (${cveIdTokenOr}) OR lower(c.cve_id) LIKE '%' || $${phraseIdx}::text || '%' ESCAPE E'\\\\'`
+      );
+
+      if (cveAnyIdx > 0) {
+        candidateParts.push(`SELECT unnest($${cveAnyIdx}::text[]) AS cve_id`);
+      }
+      if (bduAnyIdx > 0) {
+        candidateParts.push(
+          `SELECT cb.cve_id FROM cve_bdu_link cb WHERE cb.bdu_id = ANY($${bduAnyIdx}::text[])`
+        );
+      } else if (/\d{4}-\d/.test(needleLiteral) || /\bbdu\b/.test(needleLiteral)) {
+        candidateParts.push(
+          `SELECT cb.cve_id FROM cve_bdu_link cb
+            WHERE lower(cb.bdu_id) LIKE '%' || $${phraseIdx}::text || '%' ESCAPE E'\\\\'
+               OR lower(('bdu:' || cb.bdu_id)::text) LIKE '%' || $${phraseIdx}::text || '%' ESCAPE E'\\\\'`
+        );
+      }
+
+      // Enrichment / raw: only longer phrases (avoid scanning huge text for "cisco"/"windows").
       const compactNeedle = qLowerForNeedle.replace(/\s+/g, "");
+      const allowEnrichmentSearch =
+        !shapedCve && (compactNeedle.length >= 10 || (/\s/.test(qLowerForNeedle) && compactNeedle.length >= 8));
+      if (allowEnrichmentSearch) {
+        candidateParts.push(
+          `SELECT ea.cve_id FROM enrichment_ai ea
+            WHERE lower(COALESCE(ea.output_text, '')) LIKE '%' || $${phraseIdx}::text || '%' ESCAPE E'\\\\'
+               OR lower(COALESCE(ea.output_json->>'summary', '')) LIKE '%' || $${phraseIdx}::text || '%' ESCAPE E'\\\\'
+               OR lower(COALESCE(ea.output_json->>'title', '')) LIKE '%' || $${phraseIdx}::text || '%' ESCAPE E'\\\\'`
+        );
+      }
       const allowRawTextSearch =
-        compactNeedle.length >= 12 && !cveIdShape(qTrim) && /\s/.test(qLowerForNeedle);
-      const contextMatch = `(
-        lower(c.cve_id) ${likeSuffix}
-        ${allowRawTextSearch ? `OR lower(c.raw::text) ${likeSuffix}` : ""}
-        OR EXISTS (
-          SELECT 1 FROM cve_vendor_product vp_q
-          WHERE vp_q.cve_id = c.cve_id
-            AND (
-              lower(vp_q.vendor) ${likeSuffix}
-              OR lower(COALESCE(vp_q.product, '')) ${likeSuffix}
-              OR lower(vp_q.vendor_key) ${likeSuffix}
-              OR lower(vp_q.product_key_norm) ${likeSuffix}
-            )
-        )
-        OR EXISTS (
-          SELECT 1 FROM enrichment_ai ea_q
-          WHERE ea_q.cve_id = c.cve_id
-            AND (
-              lower(COALESCE(ea_q.output_text, '')) ${likeSuffix}
-              OR lower(COALESCE(ea_q.output_json->>'summary', '')) ${likeSuffix}
-              OR lower(COALESCE(ea_q.output_json->>'title', '')) ${likeSuffix}
-            )
-        )
-        OR EXISTS (
-          SELECT 1 FROM cve_bdu_link cb_q
-          WHERE cb_q.cve_id = c.cve_id
-            AND (
-              lower(cb_q.bdu_id) ${likeSuffix}
-              OR lower(('bdu:' || cb_q.bdu_id)::text) ${likeSuffix}
-            )
-        )
-        ${idTokenSql}
-      )`;
-      const whereFiltered = [contextMatch, ...filters].join(" AND ");
+        compactNeedle.length >= 12 && !shapedCve && /\s/.test(qLowerForNeedle);
+      if (allowRawTextSearch) {
+        candidateParts.push(
+          `SELECT c.cve_id FROM cve c WHERE lower(c.raw::text) LIKE '%' || $${phraseIdx}::text || '%' ESCAPE E'\\\\'`
+        );
+      }
+
+      const filterSql = filters.length > 0 ? `AND ${filters.join(" AND ")}` : "";
 
       const searchOrderByRanked =
         `ORDER BY exact_match DESC,\n` +
-        `         cve_sim DESC NULLS LAST,\n` +
         `         exploit_known DESC,\n` +
         `         rank_score DESC,\n` +
         `         published_at DESC NULLS LAST,\n` +
@@ -728,7 +771,6 @@ export class CveController {
 
       const hydrateOrderBy =
         `ORDER BY r.exact_match DESC,\n` +
-        `         r.cve_sim DESC NULLS LAST,\n` +
         `         r.exploit_known DESC,\n` +
         `         r.rank_score DESC,\n` +
         `         r.published_at DESC NULLS LAST,\n` +
@@ -747,11 +789,11 @@ export class CveController {
 
       const rankedSelect = `SELECT c.cve_id,
                 ${exactMatchExpr} AS exact_match,
-                similarity(lower(c.cve_id), $${literalIdx}::text) AS cve_sim,
                 (k.cve_id IS NOT NULL) AS exploit_known,
                 ${rankExpr} AS rank_score,
                 c.published_at
-           FROM cve c
+           FROM candidates cand
+           JOIN cve c ON c.cve_id = cand.cve_id
       ${rankEaJoin}
       LEFT JOIN epss_score es ON es.cve_id = c.cve_id
       LEFT JOIN kev k ON k.cve_id = c.cve_id
@@ -761,26 +803,39 @@ export class CveController {
         isExactCveQuery &&
         (filters.length > 0 || view === "last24h" || view === "last_24h" || view === "last-24h");
 
+      const candidatesCte = `candidates AS (
+            ${candidateParts.join("\n            UNION\n            ")}
+          )`;
+
       const rankedCte = useUnionExact
         ? `ranked AS (
             SELECT * FROM (
-              ${rankedSelect}
-              WHERE ${exactCond}
+              SELECT c.cve_id,
+                     TRUE AS exact_match,
+                     (k.cve_id IS NOT NULL) AS exploit_known,
+                     ${rankExpr} AS rank_score,
+                     c.published_at
+                FROM cve c
+           LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+           LEFT JOIN kev k ON k.cve_id = c.cve_id
+           ${SQL_EXPLOIT_INTEL_JOIN}
+               WHERE ${exactCond} ${filterSql}
               UNION ALL
               ${rankedSelect}
-              WHERE NOT (${exactCond}) AND ${whereFiltered}
+               WHERE NOT (${exactCond}) ${filterSql}
             ) u
             ${searchOrderByRanked}
             LIMIT $${limitIdx} OFFSET $${offsetIdx}
           )`
         : `ranked AS (
             ${rankedSelect}
-            WHERE ${whereFiltered}
+            WHERE TRUE ${filterSql}
             ${searchOrderByRanked}
             LIMIT $${limitIdx} OFFSET $${offsetIdx}
           )`;
 
-      const sql = `WITH ${rankedCte}
+      const sql = `WITH ${candidatesCte},
+          ${rankedCte}
           SELECT ${SQL_CVE_LIST_SELECT},
                 ${vulnClassGuessSql} AS vuln_class,
                 ARRAY_REMOVE(ARRAY[

@@ -1,5 +1,13 @@
 "use client";
 
+import {
+  AuthError,
+  AuthField,
+  AuthInput,
+  AuthPrimaryButton,
+  AuthShell,
+  AuthSuccess
+} from "@/components/auth/auth-shell";
 import { RequireAuth } from "@/components/auth/require-auth";
 import { useAuth } from "@/contexts/auth-context";
 import { useRouter } from "next/navigation";
@@ -44,81 +52,59 @@ function ChangePasswordForm() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-bg px-4">
-      <div className="glass w-full max-w-md rounded-2xl p-8 shadow-2xl">
-        <h1 className="text-lg font-semibold tracking-tight text-fg">Смена пароля</h1>
-        <p className="mt-1 text-sm text-muted">
-          {user?.mustChangePassword
-            ? "Для первого входа задайте новый пароль. После смены потребуется войти заново."
-            : "Обновите пароль аккаунта. Активные refresh-токены будут отозваны."}
-        </p>
-
-        {done ? (
-          <div className="mt-6 space-y-4">
-            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
-              Пароль изменён. Войдите с новым паролем.
-            </div>
-            <button
-              type="button"
-              onClick={() => router.replace("/login")}
-              className="w-full rounded-lg border border-accent/30 bg-accent/15 px-4 py-2 text-sm font-medium text-fg hover:bg-accent/25"
-            >
-              Перейти ко входу
-            </button>
-          </div>
-        ) : (
-          <form onSubmit={(e) => void onSubmit(e)} className="mt-6 space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-muted">Текущий пароль</label>
-              <input
-                type="password"
-                autoComplete="current-password"
-                value={currentPassword}
-                onChange={(e) => setCurrentPassword(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
-                required
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-muted">Новый пароль</label>
-              <input
-                type="password"
-                autoComplete="new-password"
-                minLength={12}
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
-                required
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-muted">Повторите новый пароль</label>
-              <input
-                type="password"
-                autoComplete="new-password"
-                minLength={12}
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-fg outline-none focus:border-accent/40 dark:border-border dark:bg-black/20"
-                required
-              />
-            </div>
-            {error ? (
-              <div className="rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-sm text-danger">
-                {error}
-              </div>
-            ) : null}
-            <button
-              type="submit"
-              disabled={busy}
-              className="w-full rounded-lg border border-accent/30 bg-accent/15 px-4 py-2 text-sm font-medium text-fg hover:bg-accent/25 disabled:opacity-50"
-            >
-              {busy ? "…" : "Сменить пароль"}
-            </button>
-          </form>
-        )}
-      </div>
-    </div>
+    <AuthShell
+      title="Смена пароля"
+      subtitle={
+        user?.mustChangePassword
+          ? "Для первого входа задайте новый пароль. После смены потребуется войти заново."
+          : "Обновите пароль аккаунта. Активные refresh-токены будут отозваны."
+      }
+    >
+      {done ? (
+        <div className="space-y-4">
+          <AuthSuccess>Пароль изменён. Войдите с новым паролем.</AuthSuccess>
+          <AuthPrimaryButton type="button" onClick={() => router.replace("/login")} className="w-full">
+            Перейти ко входу
+          </AuthPrimaryButton>
+        </div>
+      ) : (
+        <form onSubmit={(e) => void onSubmit(e)} className="space-y-4">
+          <AuthField label="Текущий пароль">
+            <AuthInput
+              type="password"
+              autoComplete="current-password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              required
+            />
+          </AuthField>
+          <AuthField label="Новый пароль" hint="Минимум 12 символов.">
+            <AuthInput
+              type="password"
+              autoComplete="new-password"
+              minLength={12}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              required
+            />
+          </AuthField>
+          <AuthField label="Повторите новый пароль">
+            <AuthInput
+              type="password"
+              autoComplete="new-password"
+              minLength={12}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              required
+            />
+          </AuthField>
+          {error ? <AuthError>{error}</AuthError> : null}
+          <AuthPrimaryButton disabled={busy} className="w-full">
+            {busy ? "…" : "Сменить пароль"}
+          </AuthPrimaryButton>
+        </form>
+      )}
+    </AuthShell>
   );
 }
 
@@ -129,4 +115,3 @@ export default function ChangePasswordPage() {
     </RequireAuth>
   );
 }
-

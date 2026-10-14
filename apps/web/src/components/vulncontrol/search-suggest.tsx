@@ -122,13 +122,16 @@ export function SearchSuggest() {
   }, [needle]);
 
   const keyMode = looksLikeIssueKey(debounced);
-  const catalogMode = !keyMode && debounced.length >= 2 && !/^(?:cve[_-]?)?\d{4}[_-]\d*$/i.test(debounced.replace(/\s+/g, ""));
-  const enabled = debounced.length > 0;
+  const compactDraft = debounced.replace(/\s+/g, "");
+  const cveShaped = /^(?:cve[_-]?)?\d{4}[_-]\d*$/i.test(compactDraft);
+  const catalogMode = !keyMode && debounced.length >= 2 && !cveShaped;
+  // CVE-фрагменты — с 1 символа после года; слова каталога — от 2, иначе шум и тяжёлый LIKE.
+  const enabled = debounced.length > 0 && (keyMode || cveShaped || debounced.length >= 2);
 
   const cveQ = cveApiQuery(debounced);
   const cves = useQuery({
     queryKey: ["vc", "suggest", "cves", cveQ],
-    enabled,
+    enabled: enabled && !keyMode,
     queryFn: () => getJson<{ items: LiveCve[] }>(`/api/cves?limit=12&sort=risk&q=${encodeURIComponent(cveQ)}`),
     staleTime: 30_000
   });

@@ -1,5 +1,6 @@
 "use client";
 
+import { AuthLoading } from "@/components/auth/auth-shell";
 import { useAuth } from "@/contexts/auth-context";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect } from "react";
@@ -16,26 +17,10 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
     }
   }, [loading, pathname, user, router]);
 
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-bg text-sm text-muted">
-        Загрузка сессии…
-      </div>
-    );
-  }
-  if (!user) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-bg text-sm text-muted">
-        Переход ко входу…
-      </div>
-    );
-  }
+  if (loading) return <AuthLoading message="Загрузка сессии…" />;
+  if (!user) return <AuthLoading message="Переход ко входу…" />;
   if (user.mustChangePassword && pathname !== "/change-password") {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-bg text-sm text-muted">
-        Нужна смена пароля…
-      </div>
-    );
+    return <AuthLoading message="Нужна смена пароля…" />;
   }
   return <>{children}</>;
 }
