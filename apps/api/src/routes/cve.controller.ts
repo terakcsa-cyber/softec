@@ -23,6 +23,7 @@ import {
 } from "@vuln-intel/shared";
 import { escapePgLikePattern } from "../pg-like.util.js";
 import { CveEnrichRunnerService } from "../services/cve-enrich-runner.service.js";
+import { PointCveAiService } from "../services/point-cve-ai.service.js";
 import { CveNvdImportService } from "../services/cve-nvd-import.service.js";
 import { DbService } from "../services/db.service.js";
 import { IntegrationSettingsService } from "../services/integration-settings.service.js";
@@ -36,6 +37,26 @@ type EnrichmentAiQueryRow = {
 };
 
 const ENRICHMENT_AI_RECENT_LIMIT = 20;
+
+function clipText(value: string | null | undefined, max: number) {
+  const clean = (value ?? "")
+    .replace(/&#13;|&#10;/g, "\n")
+    .replace(/&quot;/g, "\"")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .trim();
+  if (!clean) return null;
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+function dayStamp(value: Date | string | null | undefined) {
+  if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().slice(0, 10);
+  const text = String(value);
+  const match = /^(\d{4}-\d{2}-\d{2})/.exec(text);
+  return match ? match[1] : null;
+}
 
 /**
  * Для GET: не показывать свежую строку ошибки (_enrich_error), если среди последних строк
@@ -96,8 +117,10 @@ function parseVulnListSearch(qRaw: string): { qLowerForNeedle: string; bduIds: s
     const id = m[1];
     if (id) bduIds.add(id);
   }
-  const bare = norm.match(/^\s*(\d{4}-\d+)\s*$/);
-  if (bare?.[1] && !/^\s*cve-/i.test(qTrim)) bduIds.add(bare[1]);
+  // Bare YYYY-N… is ambiguous (CVE serial vs BDU). Prefer CVE prefix path; only treat as BDU when
+  // the query explicitly says bdu:… (handled above) or starts with bdu.
+  const bareBdu = norm.match(/^\s*bdu[:\s-]*(\d{4}-\d+)\s*$/i);
+  if (bareBdu?.[1]) bduIds.add(bareBdu[1]);
 
   const cveIds = [
     ...new Set(
@@ -106,6 +129,22 @@ function parseVulnListSearch(qRaw: string): { qLowerForNeedle: string; bduIds: s
   ];
 
   return { qLowerForNeedle: norm, bduIds: [...bduIds], cveIds };
+}
+
+/** CVE-2025-353 / 2025-353 / cve_2025_353 → CVE-2025-353 (partial or full). */
+function cveIdShape(qRaw: string): string | null {
+  const compact = qRaw.trim().replace(/\s+/g, "");
+  const m = /^(?:cve[_-]?)?(\d{4})[_-](\d{1,})$/i.exec(compact);
+  if (!m?.[1] || !m[2]) return null;
+  return `CVE-${m[1]}-${m[2]}`.toUpperCase();
+}
+
+function clampWindowDays(raw: string | undefined): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const days = Math.trunc(n);
+  if (days < 1 || days > 90) return null;
+  return days;
 }
 
 /** Агрегат номеров БДУ (без префикса «BDU:») для списка CVE. */
@@ -204,6 +243,25 @@ const SQL_CVE_LIST_SELECT = `c.cve_id, c.published_at, c.modified_at,
                     )
                 ) AS perimeter_product,
                 (k.cve_id IS NOT NULL) AS exploit_known,
+                (
+                  SELECT left(COALESCE(
+                    NULLIF(elem->>'versionEndExcluding', ''),
+                    NULLIF(elem->>'versionEndIncluding', ''),
+                    NULLIF(elem->>'versionStartIncluding', '')
+                  ), 48)
+                    FROM jsonb_array_elements(
+                      CASE
+                        WHEN jsonb_typeof(c.raw->'configurations') = 'array' THEN c.raw->'configurations'
+                        WHEN jsonb_typeof(c.raw->'cve'->'configurations') = 'array' THEN c.raw->'cve'->'configurations'
+                        ELSE '[]'::jsonb
+                      END
+                    ) cfg
+                    CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(cfg->'nodes') = 'array' THEN cfg->'nodes' ELSE '[]'::jsonb END) node
+                    CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(node->'cpeMatch') = 'array' THEN node->'cpeMatch' ELSE '[]'::jsonb END) elem
+                   WHERE COALESCE(elem->>'vulnerable', 'true') <> 'false'
+                     AND COALESCE(elem->>'versionEndExcluding', elem->>'versionEndIncluding', elem->>'versionStartIncluding', '') <> ''
+                   LIMIT 1
+                ) AS affected_version,
                 EXISTS (
                   SELECT 1 FROM enrichment_ai ea
                   WHERE ea.cve_id = c.cve_id
@@ -248,7 +306,8 @@ export class CveController {
     private readonly db: DbService,
     private readonly enrichRunner: CveEnrichRunnerService,
     private readonly nvdImport: CveNvdImportService,
-    private readonly integration: IntegrationSettingsService
+    private readonly integration: IntegrationSettingsService,
+    private readonly pointAi: PointCveAiService
   ) {}
 
   private buildCveLinks(cveId: string) {
@@ -275,6 +334,7 @@ export class CveController {
     @Query("view") viewRaw?: string,
     @Query("sort") sortRaw?: string,
     @Query("minCvss") minCvssRaw?: string,
+    @Query("maxCvss") maxCvssRaw?: string,
     @Query("minEpss") minEpssRaw?: string,
     @Query("kevOnly") kevOnlyRaw?: string,
     @Query("vendor") vendorRaw?: string,
@@ -284,7 +344,12 @@ export class CveController {
     @Query("epssSpike") epssSpikeRaw?: string,
     @Query("hasPoc") hasPocRaw?: string,
     @Query("hasPublicExploit") hasPublicExploitRaw?: string,
-    @Query("newVckev7d") newVckev7dRaw?: string
+    @Query("newVckev7d") newVckev7dRaw?: string,
+    @Query("kevAddedDays") kevAddedDaysRaw?: string,
+    @Query("publishedDays") publishedDaysRaw?: string,
+    @Query("offset") offsetRaw?: string,
+    @Query("includeTotal") includeTotalRaw?: string,
+    @Query("hasTask") hasTaskRaw?: string
   ) {
     return this.listFromDb(
       q,
@@ -292,6 +357,7 @@ export class CveController {
       viewRaw,
       sortRaw,
       minCvssRaw,
+      maxCvssRaw,
       minEpssRaw,
       kevOnlyRaw,
       vendorRaw,
@@ -301,7 +367,12 @@ export class CveController {
       epssSpikeRaw,
       hasPocRaw,
       hasPublicExploitRaw,
-      newVckev7dRaw
+      newVckev7dRaw,
+      kevAddedDaysRaw,
+      publishedDaysRaw,
+      offsetRaw,
+      includeTotalRaw,
+      hasTaskRaw
     );
   }
 
@@ -311,6 +382,7 @@ export class CveController {
     viewRaw?: string,
     sortRaw?: string,
     minCvssRaw?: string,
+    maxCvssRaw?: string,
     minEpssRaw?: string,
     kevOnlyRaw?: string,
     vendorRaw?: string,
@@ -320,12 +392,20 @@ export class CveController {
     epssSpikeRaw?: string,
     hasPocRaw?: string,
     hasPublicExploitRaw?: string,
-    newVckev7dRaw?: string
+    newVckev7dRaw?: string,
+    kevAddedDaysRaw?: string,
+    publishedDaysRaw?: string,
+    offsetRaw?: string,
+    includeTotalRaw?: string,
+    hasTaskRaw?: string
   ) {
     const limit = Math.max(1, Math.min(200, Number(limitRaw ?? 50)));
+    const offset = Math.max(0, Math.min(1_000_000, Number(offsetRaw ?? 0) || 0));
+    const includeTotal = includeTotalRaw === "1" || includeTotalRaw === "true";
     const view = (viewRaw ?? "latest").toLowerCase();
     const sort = (sortRaw ?? (view === "critical" ? "rank" : "fresh")).toLowerCase();
     const minCvss = minCvssRaw != null ? Number(minCvssRaw) : undefined;
+    const maxCvss = maxCvssRaw != null ? Number(maxCvssRaw) : undefined;
     const minEpss = minEpssRaw != null ? Number(minEpssRaw) : undefined;
     const kevOnly = kevOnlyRaw === "1" || kevOnlyRaw === "true";
     const vendor = vendorRaw?.trim() ? vendorRaw.trim().toLowerCase() : null;
@@ -336,6 +416,8 @@ export class CveController {
     const hasPocFilter = hasPocRaw === "1" || hasPocRaw === "true";
     const hasPublicExploitFilter = hasPublicExploitRaw === "1" || hasPublicExploitRaw === "true";
     const newVckev7dFilter = newVckev7dRaw === "1" || newVckev7dRaw === "true";
+    const kevAddedDays = clampWindowDays(kevAddedDaysRaw);
+    const publishedDays = clampWindowDays(publishedDaysRaw);
     const vulnClassGuessSql = sqlVulnClassGuessExpr();
     /** Полнотекстовый поиск: не сужать выборку пресетом вкладки (иначе по BDU/CVE не находятся «тихие» записи). */
     const qPresent = Boolean(q?.trim());
@@ -379,7 +461,16 @@ export class CveController {
       filters.push(cond.replace(/\$(\d+)/g, () => `$${params.length}`));
     };
 
-    if (kevOnly) filters.push(`k.cve_id IS NOT NULL`);
+    if (hasTaskRaw === "1" || hasTaskRaw === "true") {
+      filters.push(
+        `EXISTS (SELECT 1 FROM vuln_task_cve l JOIN vuln_task t ON t.id = l.task_id WHERE l.cve_id = c.cve_id AND t.status <> 'closed')`
+      );
+    } else if (hasTaskRaw === "0" || hasTaskRaw === "false") {
+      filters.push(
+        `NOT EXISTS (SELECT 1 FROM vuln_task_cve l JOIN vuln_task t ON t.id = l.task_id WHERE l.cve_id = c.cve_id AND t.status <> 'closed')`
+      );
+    }
+    if (kevOnly || kevAddedDays != null) filters.push(`k.cve_id IS NOT NULL`);
     if (vckevOnlyFilter) filters.push(`COALESCE(ei.vckev_only, false) = true`);
     if (epssSpikeFilter) filters.push(`COALESCE(ei.epss_spike, false) = true`);
     if (hasPocFilter) filters.push(`COALESCE(ei.has_poc, false) = true`);
@@ -389,8 +480,24 @@ export class CveController {
         `EXISTS (SELECT 1 FROM vulncheck_kev vk7 WHERE vk7.cve_id = c.cve_id AND vk7.date_added >= now() - interval '7 days')`
       );
     }
+    if (kevAddedDays != null) {
+      params.push(kevAddedDays - 1);
+      filters.push(
+        `EXISTS (
+           SELECT 1 FROM kev k_new
+            WHERE k_new.cve_id = c.cve_id
+              AND k_new.date_added IS NOT NULL
+              AND k_new.date_added >= (timezone('UTC', now()))::date - $${params.length}::int
+         )`
+      );
+    }
+    if (publishedDays != null) {
+      params.push(publishedDays);
+      filters.push(`c.published_at IS NOT NULL AND c.published_at >= now() - ($${params.length}::text || ' days')::interval`);
+    }
     if (!qPresent) {
       if (Number.isFinite(minCvss)) add(`c.cvss_base >= $1`, minCvss);
+      if (Number.isFinite(maxCvss)) add(`c.cvss_base < $1`, maxCvss);
       if (Number.isFinite(minEpss)) add(`es.score >= $1`, minEpss);
     }
 
@@ -428,16 +535,19 @@ export class CveController {
       }
     }
 
-    const vendorJoin = vendor || product ? `JOIN cve_vendor_product vp ON vp.cve_id = c.cve_id` : ``;
-    if (vendor) {
-      params.push(vendor);
-      const vIdx = params.length;
-      filters.push(`vp.vendor_key = $${vIdx}`);
-    }
-    if (product) {
-      params.push(product);
-      const pIdx = params.length;
-      filters.push(`vp.product_key_norm = $${pIdx}`);
+    if (vendor || product) {
+      const match: string[] = [];
+      if (vendor) {
+        params.push(vendor);
+        const vIdx = params.length;
+        match.push(`(vp.vendor_key = $${vIdx} OR lower(vp.vendor) = $${vIdx})`);
+      }
+      if (product) {
+        params.push(product);
+        const pIdx = params.length;
+        match.push(`(vp.product_key_norm = $${pIdx} OR lower(vp.product) = $${pIdx})`);
+      }
+      filters.push(`EXISTS (SELECT 1 FROM cve_vendor_product vp WHERE vp.cve_id = c.cve_id AND ${match.join(" AND ")})`);
     }
 
     if (vulnClasses.length > 0) {
@@ -449,14 +559,15 @@ export class CveController {
     if (q && q.trim().length > 0) {
       const qTrim = q.trim();
       const { qLowerForNeedle, bduIds, cveIds } = parseVulnListSearch(qTrim);
-      const isExactCveQuery = /^cve-\d{4}-\d{4,}$/i.test(qTrim);
+      const shapedCve = cveIdShape(qTrim);
+      const isExactCveQuery = Boolean(shapedCve && /^CVE-\d{4}-\d{4,}$/.test(shapedCve));
 
-      // Fast path: exact CVE id → primary-key lookup + hydrate (no full-text scan).
-      if (isExactCveQuery && filters.length === 0 && bduIds.length === 0) {
-        const exactId = qTrim.toUpperCase();
-        params.push(exactId);
-        const idIdx = params.length;
-        const sqlExact = `SELECT ${SQL_CVE_LIST_SELECT},
+      // Fast path: CVE-shaped queries (full or partial) → PK / prefix on cve_id only.
+      // Avoids multi-second scans of raw::text / enrichment for "CVE-2025-353".
+      if (shapedCve && filters.length === 0 && bduIds.length === 0) {
+        const exactId = shapedCve;
+        const prefix = exactId;
+        const hydrateSql = (whereSql: string, limitSql: string) => `SELECT ${SQL_CVE_LIST_SELECT},
                 ${vulnClassGuessSql} AS vuln_class,
                 ARRAY_REMOVE(ARRAY[
                   CASE WHEN k.cve_id IS NOT NULL THEN 'KEV' ELSE NULL END,
@@ -471,14 +582,65 @@ export class CveController {
       ${SQL_CVE_LIST_VP_LATERAL}
       ${SQL_CVE_LIST_EA_LATERAL}
       ${SQL_CVE_LIST_SCORE_JOINS}
-          WHERE c.cve_id = $${idIdx}
-          LIMIT 1`;
-        let r = await this.db.query(sqlExact, params);
-        if (r.rows.length === 0) {
-          const imported = await this.nvdImport.importByCveId(qTrim);
-          if (imported) r = await this.db.query(sqlExact, params);
+          WHERE ${whereSql}
+          ${limitSql}`;
+
+        if (isExactCveQuery) {
+          const exactParams = [...params, exactId];
+          let r = await this.db.query(
+            hydrateSql(`c.cve_id = $${exactParams.length}`, "LIMIT 1"),
+            exactParams
+          );
+          if (r.rows.length === 0) {
+            const imported = await this.nvdImport.importByCveId(exactId);
+            if (imported) {
+              r = await this.db.query(
+                hydrateSql(`c.cve_id = $${exactParams.length}`, "LIMIT 1"),
+                exactParams
+              );
+            }
+          }
+          if (r.rows.length > 0) return { items: r.rows };
         }
-        return { items: r.rows };
+
+        const prefixParams = [...params, prefix, limit, offset];
+        const prefixIdx = params.length + 1;
+        const limIdx = params.length + 2;
+        const offIdx = params.length + 3;
+        const rPrefix = await this.db.query(
+          `WITH ranked AS (
+             SELECT c.cve_id,
+                    (c.cve_id = $${prefixIdx}::text) AS exact_match,
+                    length(c.cve_id) AS id_len,
+                    ${rankExpr} AS rank_score,
+                    c.published_at
+               FROM cve c
+          LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+          LEFT JOIN kev k ON k.cve_id = c.cve_id
+              WHERE c.cve_id LIKE $${prefixIdx}::text || '%'
+           ORDER BY exact_match DESC, id_len ASC, rank_score DESC NULLS LAST, published_at DESC NULLS LAST, cve_id ASC
+              LIMIT $${limIdx} OFFSET $${offIdx}
+           )
+           SELECT ${SQL_CVE_LIST_SELECT},
+                ${vulnClassGuessSql} AS vuln_class,
+                ARRAY_REMOVE(ARRAY[
+                  CASE WHEN k.cve_id IS NOT NULL THEN 'KEV' ELSE NULL END,
+                  CASE WHEN es.score IS NOT NULL AND es.score >= 0.5 THEN 'EPSS>=0.50' ELSE NULL END,
+                  CASE WHEN es.score IS NOT NULL AND es.score >= 0.2 AND es.score < 0.5 THEN 'EPSS>=0.20' ELSE NULL END,
+                  CASE WHEN c.cvss_base IS NOT NULL AND c.cvss_base >= 9.0 THEN 'CVSS>=9.0' ELSE NULL END,
+                  CASE WHEN c.cvss_base IS NOT NULL AND c.cvss_base >= 8.0 AND c.cvss_base < 9.0 THEN 'CVSS>=8.0' ELSE NULL END
+                ], NULL) AS critical_reasons,
+                ${SQL_EXPLOIT_INTEL_SELECT},
+                ${SQL_BDU_IDS_FOR_CVE_LIST}
+           FROM ranked r
+           JOIN cve c ON c.cve_id = r.cve_id
+      ${SQL_CVE_LIST_VP_LATERAL}
+      ${SQL_CVE_LIST_EA_LATERAL}
+      ${SQL_CVE_LIST_SCORE_JOINS}
+       ORDER BY r.exact_match DESC, r.id_len ASC, r.rank_score DESC NULLS LAST, r.published_at DESC NULLS LAST, r.cve_id ASC`,
+          prefixParams
+        );
+        return { items: rPrefix.rows };
       }
 
       const needleLiteral = qLowerForNeedle;
@@ -517,8 +679,11 @@ export class CveController {
           : "");
 
       // Skip enrichment_ai.output_json::text and risk_score.factors (huge, low value).
-      // raw::text only for needles >= 3 chars (uses cve_raw_lower_text_trgm_idx).
-      const allowRawTextSearch = qLowerForNeedle.replace(/\s+/g, "").length >= 3;
+      // raw::text is expensive; only for longer free-text phrases (trigram idx).
+      // CVE-shaped needles use the prefix path above; short tokens match vendor/product/cve_id.
+      const compactNeedle = qLowerForNeedle.replace(/\s+/g, "");
+      const allowRawTextSearch =
+        compactNeedle.length >= 12 && !cveIdShape(qTrim) && /\s/.test(qLowerForNeedle);
       const contextMatch = `(
         lower(c.cve_id) ${likeSuffix}
         ${allowRawTextSearch ? `OR lower(c.raw::text) ${likeSuffix}` : ""}
@@ -571,6 +736,8 @@ export class CveController {
 
       params.push(limit);
       const limitIdx = params.length;
+      params.push(offset);
+      const offsetIdx = params.length;
 
       const rankEaJoin =
         vulnClasses.length > 0
@@ -585,7 +752,7 @@ export class CveController {
                 ${rankExpr} AS rank_score,
                 c.published_at
            FROM cve c
-      ${vendorJoin}${rankEaJoin}
+      ${rankEaJoin}
       LEFT JOIN epss_score es ON es.cve_id = c.cve_id
       LEFT JOIN kev k ON k.cve_id = c.cve_id
       ${SQL_EXPLOIT_INTEL_JOIN}`;
@@ -604,13 +771,13 @@ export class CveController {
               WHERE NOT (${exactCond}) AND ${whereFiltered}
             ) u
             ${searchOrderByRanked}
-            LIMIT $${limitIdx}
+            LIMIT $${limitIdx} OFFSET $${offsetIdx}
           )`
         : `ranked AS (
             ${rankedSelect}
             WHERE ${whereFiltered}
             ${searchOrderByRanked}
-            LIMIT $${limitIdx}
+            LIMIT $${limitIdx} OFFSET $${offsetIdx}
           )`;
 
       const sql = `WITH ${rankedCte}
@@ -637,12 +804,10 @@ export class CveController {
         const imported = await this.nvdImport.importByCveId(qTrim);
         if (imported) r = await this.db.query(sql, params);
       }
-      return { items: r.rows };
+      return { items: r.rows, total: null };
     }
 
     const where = filters.length > 0 ? `WHERE ${filters.join(" AND ")}` : `WHERE TRUE`;
-    params.push(limit);
-    const limitIdx = params.length;
     const listOrderBy =
       view === "critical_v2" || view === "critical-v2" || view === "criticalv2"
         ? criticalV2OrderBy
@@ -652,19 +817,35 @@ export class CveController {
         ? `
       ${SQL_CVE_LIST_EA_LATERAL}`
         : "";
+    const fromRanked = `FROM cve c
+       ${rankEaJoin}
+      LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
+      LEFT JOIN epss_score es ON es.cve_id = c.cve_id
+      LEFT JOIN kev k ON k.cve_id = c.cve_id
+      ${SQL_EXPLOIT_INTEL_JOIN}
+         ${where}`;
+    let total: number | null = null;
+    if (includeTotal) {
+      const counted = await this.db.query<{ n: number }>(`SELECT count(DISTINCT c.cve_id)::int AS n ${fromRanked}`, params);
+      total = counted.rows[0]?.n ?? 0;
+    }
+    params.push(limit);
+    const limitIdx = params.length;
+    params.push(offset);
+    const offsetIdx = params.length;
 
     const r = await this.db.query(
       `WITH ranked AS (
           SELECT c.cve_id
             FROM cve c
-       ${vendorJoin}${rankEaJoin}
+       ${rankEaJoin}
       LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
       LEFT JOIN epss_score es ON es.cve_id = c.cve_id
       LEFT JOIN kev k ON k.cve_id = c.cve_id
       ${SQL_EXPLOIT_INTEL_JOIN}
          ${where}
          ${listOrderBy}
-            LIMIT $${limitIdx}
+            LIMIT $${limitIdx} OFFSET $${offsetIdx}
         )
         SELECT ${SQL_CVE_LIST_SELECT},
               ${vulnClassGuessSql} AS vuln_class,
@@ -685,7 +866,7 @@ export class CveController {
          ${listOrderBy}`,
       params
     );
-    return { items: r.rows };
+    return { items: r.rows, total };
   }
 
   /** Пакетная проверка: какие CVE из списка уже есть в `cve` (для ленты ФСТЭК и др.). */
@@ -753,6 +934,13 @@ export class CveController {
       flatParams
     );
     return { ok: true, inserted: ins.rowCount ?? 0 };
+  }
+
+  /** Одна карточка: DeepSeek по открытым материалам этой CVE. Очередь каталога не стартует. */
+  @Post(":cveId/ai")
+  @HttpCode(200)
+  aiOne(@Param("cveId") cveId: string) {
+    return this.pointAi.enrichOne(cveId);
   }
 
   /** Queue AI enrichment for a CVE (intended when user opens the detail modal). Idempotent per CVE revision unless force=1. */
@@ -935,6 +1123,51 @@ export class CveController {
       [cveId]
     );
 
+    const kevRow = await this.db.query<{
+      date_added: Date | string | null;
+      due_date: Date | string | null;
+      required_action: string | null;
+      ransomware_use: string | null;
+      vulnerability_name: string | null;
+    }>(
+      `SELECT date_added, due_date, required_action, ransomware_use, vulnerability_name
+         FROM kev WHERE cve_id = $1 LIMIT 1`,
+      [cveId]
+    );
+
+    const bduRows = await this.db.query<{
+      bdu_id: string;
+      name: string | null;
+      solution: string | null;
+      exploit_status: string | null;
+      fix_status: string | null;
+      has_exploit: boolean;
+      has_fix: boolean;
+    }>(
+      `SELECT b.bdu_id, b.name, b.solution, b.exploit_status, b.fix_status, b.has_exploit, b.has_fix
+         FROM cve_bdu_link l
+         JOIN bdu_vuln b ON b.bdu_id = l.bdu_id
+        WHERE l.cve_id = $1
+        ORDER BY b.bdu_id
+        LIMIT 8`,
+      [cveId]
+    );
+
+    const contextFacts = await this.db.query<{
+      source: string;
+      fact_type: string;
+      title: string | null;
+      detail: string | null;
+      url: string | null;
+      updated_at: Date | null;
+    }>(
+      `SELECT source, fact_type, title, detail, url, updated_at
+         FROM cve_context_fact
+        WHERE cve_id = $1
+        ORDER BY source, fact_type`,
+      [cveId]
+    );
+
     const vulncheckKev = await this.db.query<{
       date_added: Date | null;
       cisa_date_added: Date | null;
@@ -992,6 +1225,32 @@ export class CveController {
         product: r.product,
         source: r.source,
         cveUpdatedAt: r.cve_updated_at ? new Date(r.cve_updated_at).toISOString() : null
+      })),
+      kev: kevRow.rows[0]
+        ? {
+            dateAdded: dayStamp(kevRow.rows[0].date_added),
+            dueDate: dayStamp(kevRow.rows[0].due_date),
+            requiredAction: kevRow.rows[0].required_action,
+            ransomwareUse: kevRow.rows[0].ransomware_use,
+            name: kevRow.rows[0].vulnerability_name
+          }
+        : null,
+      bdu: bduRows.rows.map((row) => ({
+        id: row.bdu_id,
+        name: row.name,
+        solution: clipText(row.solution, 500),
+        exploitStatus: row.exploit_status,
+        fixStatus: row.fix_status,
+        hasExploit: row.has_exploit,
+        hasFix: row.has_fix
+      })),
+      contextFacts: contextFacts.rows.map((row) => ({
+        source: row.source,
+        factType: row.fact_type,
+        title: row.title,
+        detail: clipText(row.detail, 800),
+        url: row.url,
+        updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null
       })),
       vendorAdvisoriesMeta: {
         total: advisoryMeta.rows[0]?.total ?? 0,

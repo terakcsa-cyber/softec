@@ -237,6 +237,98 @@ export function filterDeskRows(rows: DeskRow[], filter: DeskFilter): DeskRow[] {
   return live;
 }
 
+export type DeskFact = { label: string; value: string; tone?: "danger" | "warn" | "ok" };
+
+export function deskFacts(row: DeskRow): DeskFact[] {
+  const cve = row.members.find((item) => item.source === "cve");
+  const bdu = row.members.find((item) => item.source === "bdu");
+  const cveIntel = cve ? vocIntelContext(cve) : null;
+  const cvePayload = cve?.payload ?? {};
+  const bduPayload = bdu?.payload ?? {};
+  const facts: DeskFact[] = [];
+  const push = (label: string, value: string | null | undefined, tone?: DeskFact["tone"]) => {
+    const text = value?.trim();
+    if (text) facts.push({ label, value: text, tone });
+  };
+
+  push("Вендор", cveIntel?.vendor);
+  push("Продукт", cveIntel?.product ?? (row.product !== row.ident ? row.product : null));
+
+  const cvss = numberOf(cvePayload.cvss_base) ?? numberOf(bduPayload.cvss_score);
+  if (cvss != null) push("CVSS", cvss.toFixed(1), cvss >= 9 ? "danger" : cvss >= 7 ? "warn" : undefined);
+  const epss = numberOf(cvePayload.epss);
+  if (epss != null && epss > 0) {
+    const label = epss <= 1 ? `${Math.round(epss * 1000) / 10}%` : String(Math.round(epss));
+    const spike = Boolean(cvePayload.epss_spike);
+    push("EPSS", spike ? `${label} · скачок` : label, spike || epss >= 0.5 || epss >= 50 ? "warn" : undefined);
+  } else if (cvePayload.epss_spike) {
+    push("EPSS", "скачок", "warn");
+  }
+  const risk = numberOf(cvePayload.risk_score);
+  if (risk != null) push("Риск", risk.toFixed(1), risk >= 80 ? "danger" : risk >= 50 ? "warn" : undefined);
+
+  push("Класс", typeof cvePayload.vuln_class === "string" ? cvePayload.vuln_class : null);
+  const level = numberOf(bduPayload.severity_level);
+  if (level != null) push("ФСТЭК", level >= 4 ? "критический" : level >= 3 ? "высокий" : `уровень ${level}`, level >= 4 ? "danger" : level >= 3 ? "warn" : undefined);
+
+  const kev = Boolean(cvePayload.exploit_known || cvePayload.vulncheck_kev || cvePayload.vckev_only);
+  const publicExploit = Boolean(cvePayload.has_public_exploit);
+  const poc = Boolean(cvePayload.has_poc);
+  const bduExploit = bduPayload.has_exploit === true;
+  if (kev || publicExploit || poc || bduExploit) {
+    push(
+      "Эксплуатация",
+      [kev ? "KEV" : null, publicExploit ? "публичный эксплойт" : null, poc ? "PoC" : null, bduExploit && !publicExploit ? "БДУ" : null]
+        .filter(Boolean)
+        .join(" · "),
+      "danger"
+    );
+  }
+
+  const fix =
+    typeof cvePayload.has_fix === "boolean"
+      ? cvePayload.has_fix
+      : typeof bduPayload.has_fix === "boolean"
+        ? bduPayload.has_fix
+        : null;
+  if (fix != null) push("Исправление", fix ? "есть" : "нет", fix ? "ok" : "warn");
+  else if (typeof bduPayload.fix_status === "string" && bduPayload.fix_status.trim()) {
+    push("Исправление", bduPayload.fix_status.trim());
+  }
+
+  push("Приоритет", row.primary.vocPriority?.toUpperCase() ?? null, row.primary.vocPriority === "p1" ? "danger" : row.primary.vocPriority === "p2" ? "warn" : undefined);
+  push("Опубликовано", formatWhen(row.primary.publishedAt));
+  push("Контур", row.ours ? "есть в watchlist" : "не совпало", row.ours ? "warn" : undefined);
+  if (row.primary.caseId) {
+    const breached = row.when === "просрочен";
+    push("SLA", breached ? "просрочен" : row.when || "идёт", breached ? "danger" : undefined);
+  }
+  push("Держит", row.primary.assigneeEmail || row.primary.claimedByEmail);
+  const linked = Array.isArray(bduPayload.cve_ids) ? bduPayload.cve_ids.map(String).filter(Boolean).slice(0, 4) : [];
+  if (!cve && linked.length) push("CVE", linked.join(", "));
+  const tg = row.members.filter((item) => item.source === "tg").length;
+  if (tg > 0) push("Telegram", tg === 1 ? "1 пост" : `${tg} поста`);
+  return facts;
+}
+
+function numberOf(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function formatWhen(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  const bdu = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(raw.trim());
+  if (bdu) return `${bdu[1]}.${bdu[2]}.${bdu[3]}`;
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  return date.toLocaleString("ru-RU", { day: "2-digit", month: "short", year: "numeric" });
+}
+
 export function deskResearch(row: DeskRow): { cveId: string | null; bduId: string | null; tgLink: string | null } {
   const cve = row.members.find((item) => item.source === "cve");
   const bdu = row.members.find((item) => item.source === "bdu");

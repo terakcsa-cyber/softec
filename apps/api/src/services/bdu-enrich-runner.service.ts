@@ -264,6 +264,7 @@ export class BduEnrichRunnerService {
         has_exploit: row.has_exploit
       };
       let res: VulnContextLlmResult;
+      // digestLlm is not read here: a DeepSeek digest key does not enrich this BDU card.
       if (textEngine.textEngine === "llm") {
         res = await runBduContextLlm(bduId, raw, cfg);
       } else if (textEngine.textEngine === "translate") {

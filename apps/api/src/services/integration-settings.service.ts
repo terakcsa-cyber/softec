@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   defaultNvdCatalogDoc,
   fingerprintNvdApiKey,
+  digestLlmConfigFromStored,
   getVulnContextLlmConfigFromEnv,
   getTextEngineSettingsFromEnv,
   mergeVulnContextLlmConfig,
@@ -133,6 +134,15 @@ export class IntegrationSettingsService {
       totalUpserted: doc.totalUpserted ?? null,
       cveCount
     };
+  }
+
+  /**
+   * DeepSeek для выпуска дайджеста. Не читает TEXT_ENGINE, env LLM_* и активный профиль.
+   * Обогащение CVE этот документ не смотрит.
+   */
+  async getDigestLlmConfig(): Promise<VulnContextLlmConfig> {
+    const doc = await this.readJson("digestLlm");
+    return digestLlmConfigFromStored(doc);
   }
 
   async getEffectiveLlmConfig(): Promise<VulnContextLlmConfig> {
@@ -544,9 +554,15 @@ export class IntegrationSettingsService {
     const telegram = await this.getTelegramUiState();
     const vulncheck = await this.getVulncheckUiState();
     const textEngine = await this.getTextEngineSettings();
+    const digestLlm = await this.getDigestLlmConfig();
 
     return {
       textEngine,
+      digestLlm: {
+        endpoint: digestLlm.endpoint,
+        model: digestLlm.model,
+        hasApiKey: Boolean(digestLlm.apiKey.trim())
+      },
       llm: {
         profiles,
         activeId: doc.activeId ? String(doc.activeId) : null,
@@ -791,6 +807,33 @@ export class IntegrationSettingsService {
 
         const doc: LlmDoc = { profiles: nextProfiles, activeId };
         await this.writeJson("llm", doc as object);
+      }
+    }
+
+    if ("digestLlm" in body) {
+      const digestIn = body.digestLlm;
+      if (digestIn != null && !isRecord(digestIn)) throw new BadRequestException("digestLlm must be an object");
+      if (isRecord(digestIn)) {
+        const existing = await this.readJson("digestLlm");
+        const endpoint =
+          typeof digestIn.endpoint === "string" && digestIn.endpoint.trim()
+            ? digestIn.endpoint.trim().slice(0, 300)
+            : typeof existing.endpoint === "string" && existing.endpoint.trim()
+              ? existing.endpoint.trim()
+              : "https://api.deepseek.com";
+        const model =
+          typeof digestIn.model === "string" && digestIn.model.trim()
+            ? digestIn.model.trim().slice(0, 80)
+            : typeof existing.model === "string" && existing.model.trim()
+              ? existing.model.trim()
+              : "deepseek-chat";
+        let apiKey = typeof existing.apiKey === "string" ? existing.apiKey : "";
+        if ("apiKey" in digestIn) {
+          if (digestIn.apiKey === null || digestIn.apiKey === undefined) apiKey = "";
+          else if (typeof digestIn.apiKey === "string") apiKey = digestIn.apiKey.trim().slice(0, 500);
+          else throw new BadRequestException("digestLlm.apiKey must be a string or null");
+        }
+        await this.writeJson("digestLlm", { endpoint, model, apiKey });
       }
     }
 

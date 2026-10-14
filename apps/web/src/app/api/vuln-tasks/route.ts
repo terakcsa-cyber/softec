@@ -2,10 +2,14 @@ import { NextResponse } from "next/server";
 import { forwardAuthHeaders } from "../../../lib/upstream-proxy";
 import { getUpstreamApiBase } from "../../../lib/upstream-api";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const target = new URL(`${getUpstreamApiBase()}/vuln-tasks`);
   url.searchParams.forEach((v, k) => target.searchParams.set(k, v));
+  target.searchParams.set("_", String(Date.now()));
 
   const res = await fetch(target.toString(), {
     headers: { accept: "application/json", ...forwardAuthHeaders(req) },

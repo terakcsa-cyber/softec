@@ -13,6 +13,7 @@ import {
   clearStoredTokens,
   getStoredAccessToken,
   getStoredRefreshToken,
+  readAccessIdentity,
   setStoredTokens
 } from "@/lib/auth-storage";
 import { AUTH_BFF_PREFIX } from "@/lib/auth-bff";
@@ -124,13 +125,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    const known = readAccessIdentity(getStoredAccessToken());
+    if (known) {
+      setUser({ id: known.id, email: known.email, role: known.role, totpEnabled: false });
+      setLoading(false);
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      if (!cancelled) setLoading(false);
+    }, 8_000);
     void (async () => {
       try {
         await refreshMe();
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
+        window.clearTimeout(timer);
       }
     })();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [refreshMe]);
 
   const login = useCallback(async (email: string, password: string) => {

@@ -2,9 +2,9 @@
 
 import { useAuth } from "@/contexts/auth-context";
 import { useEffect, useRef, useState } from "react";
-import { ExternalLink, Loader2, Volume2, X } from "lucide-react";
+import { ExternalLink, X } from "lucide-react";
 import { apiFetch } from "@/lib/api-fetch";
-import { cn } from "@/components/ui/cn";
+import { dropFstecNotices, ingestNotices, markNoticesReady, markNoticesSeeded, noticesSeeded, type VcNotice } from "@/lib/vc-notices";
 
 type Toast = {
   title: string;
@@ -12,40 +12,68 @@ type Toast = {
   href?: string;
 };
 
-function beepWithCtx(ctx: AudioContext, freq = 880) {
-  try {
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.type = "sine";
-    o.frequency.value = freq;
-    g.gain.value = 0.0001;
-    o.connect(g);
-    g.connect(ctx.destination);
-    o.start();
-    const now = ctx.currentTime;
-    g.gain.setValueAtTime(0.0001, now);
-    g.gain.linearRampToValueAtTime(0.12, now + 0.02);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
-    o.stop(now + 0.18);
-  } catch {
-    // ignore
-  }
-}
-
-function safeGet(key: string): string {
-  try {
-    return localStorage.getItem(key) ?? "";
-  } catch {
-    return "";
-  }
-}
-
 function safeSet(key: string, value: string) {
   try {
     localStorage.setItem(key, value);
   } catch {
     // ignore
   }
+}
+
+type FeedItem = { id?: string; title?: string; link?: string; pubDate?: string | null; descriptionText?: string; channel?: { title?: string; slug?: string } };
+
+function noticeBody(title: string, text?: string) {
+  const body = (text ?? "").replace(/\s+/g, " ").trim();
+  const head = title.replace(/\s+/g, " ").replace(/[…\s]+$/, "").trim();
+  const same = head.slice(0, 60);
+  if (!body || !same || body.startsWith(same) || head.startsWith(body.slice(0, 60))) return undefined;
+  return body.length > 180 ? `${body.slice(0, 177)}…` : body;
+}
+type CveItem = {
+  cve_id?: string;
+  published_at?: string | null;
+  short_ru?: string | null;
+  short_description?: string | null;
+  vp_vendor?: string | null;
+  vp_product?: string | null;
+  risk_score?: number | null;
+  exploit_known?: boolean;
+};
+
+function mapPatch(payload: { items?: FeedItem[] } | null): Array<Omit<VcNotice, "read">> {
+  return (payload?.items ?? []).slice(0, 8).flatMap((item) => {
+    if (!item.id || !item.title || !item.link) return [];
+    const slug = (item.channel?.slug || "").toLowerCase();
+    // Каналы ФСТЭК в тосты/колокольчик не пушим.
+    if (slug === "fstecru" || slug === "bdufstecru" || /фстэк|fstec/i.test(item.channel?.title || "")) return [];
+    return [{
+      id: `news:${item.id}`,
+      kind: "news" as const,
+      source: item.channel?.title || "Лента ИБ",
+      title: item.title,
+      body: noticeBody(item.title, item.descriptionText),
+      href: item.link,
+      at: item.pubDate || new Date().toISOString()
+    }];
+  });
+}
+
+function mapCves(payload: { items?: CveItem[] } | null): Array<Omit<VcNotice, "read">> {
+  return (payload?.items ?? []).flatMap((item) => {
+    if (!item.cve_id) return [];
+    const where = [item.vp_product, item.vp_vendor].filter(Boolean).join(" · ");
+    const summary = (item.short_ru || item.short_description || "").trim();
+    const bits = [where || null, item.risk_score != null ? `риск ${Math.round(item.risk_score)}` : null, item.exploit_known ? "KEV" : null].filter(Boolean);
+    return [{
+      id: `cve:${item.cve_id}`,
+      kind: "cve" as const,
+      source: "Новая CVE",
+      title: item.cve_id,
+      body: summary || bits.join(" · ") || undefined,
+      href: `/vulnerabilities/${encodeURIComponent(item.cve_id)}`,
+      at: item.published_at || new Date().toISOString()
+    }];
+  });
 }
 
 async function fetchJson<T>(url: string): Promise<T | null> {
@@ -61,17 +89,13 @@ async function fetchJson<T>(url: string): Promise<T | null> {
 export function LiveFeedNotifier() {
   const { user, loading } = useAuth();
   const [toast, setToast] = useState<Toast | null>(null);
-  const [busy, setBusy] = useState(false);
   const timer = useRef<number | null>(null);
-  const audioCtxRef = useRef<AudioContext | null>(null);
-  const [audioUnlocked, setAudioUnlocked] = useState(false);
 
-  const soundKey = "vip:live:sound";
-  const [soundEnabled, setSoundEnabled] = useState(() => safeGet(soundKey) !== "0");
   const enabled = Boolean(user) && !loading;
 
   useEffect(() => {
     if (!enabled) return;
+    dropFstecNotices();
     safeSet("vip:live:global", "1");
     return () => {
       try {
@@ -81,37 +105,6 @@ export function LiveFeedNotifier() {
       }
     };
   }, [enabled]);
-
-  // Browsers block sound until a user gesture. Unlock once on first interaction.
-  useEffect(() => {
-    if (!enabled) return;
-    const Ctx = (window.AudioContext ||
-      (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) as
-      | typeof AudioContext
-      | undefined;
-    if (!Ctx) return;
-
-    const unlock = async () => {
-      try {
-        if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
-        if (audioCtxRef.current.state === "suspended") await audioCtxRef.current.resume();
-        setAudioUnlocked(true);
-      } catch {
-        // ignore
-      }
-    };
-
-    window.addEventListener("pointerdown", unlock, { once: true, passive: true });
-    window.addEventListener("keydown", unlock, { once: true, passive: true });
-    return () => {
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("keydown", unlock);
-    };
-  }, [enabled]);
-
-  useEffect(() => {
-    safeSet(soundKey, soundEnabled ? "1" : "0");
-  }, [soundEnabled, audioUnlocked]);
 
   const showToast = (t: Toast) => {
     setToast(t);
@@ -129,53 +122,50 @@ export function LiveFeedNotifier() {
     if (!enabled) return;
     let cancelled = false;
 
+    let inFlight = false;
     const poll = async () => {
-      if (cancelled) return;
-      setBusy(true);
+      if (cancelled || inFlight) return;
+      inFlight = true;
+      const seeded = noticesSeeded();
+      const fresh: Array<Omit<VcNotice, "read">> = [];
+      let gotAny = false;
+      let chain = Promise.resolve();
+      const take = (load: () => Promise<Array<Omit<VcNotice, "read">>>) => {
+        const run = load()
+          .catch(() => [] as Array<Omit<VcNotice, "read">>)
+          .then((items) => {
+            chain = chain.then(() => {
+              if (cancelled || !items.length) return;
+              gotAny = true;
+              fresh.push(...ingestNotices(items, seeded ? "live" : "seed"));
+            });
+            return chain;
+          });
+        return run;
+      };
       try {
-        // FSTEC
-        const fstec = await fetchJson<{ items?: Array<{ id: string; title?: string; link?: string }> }>("/api/fstec/feed");
-        const fstecNewest = fstec?.items?.[0];
-        if (fstecNewest?.id) {
-          const key = "vip:fstec:lastSeenId";
-          const last = safeGet(key);
-          if (last) {
-            if (last !== fstecNewest.id) {
-              safeSet(key, fstecNewest.id);
-              showToast({
-                title: "ФСТЭК: новая публикация",
-                body: fstecNewest.title || "Новая запись в ленте",
-                href: fstecNewest.link
-              });
-              if (soundEnabled && audioCtxRef.current && audioUnlocked) beepWithCtx(audioCtxRef.current, 880);
-            }
-          } else {
-            safeSet(key, fstecNewest.id);
-          }
-        }
-
-        // Patch telegram aggregator
-        const patch = await fetchJson<{ items?: Array<{ id: string; title?: string; link?: string; channel?: { slug: string } }> }>("/api/patch/feed");
-        const patchNewest = patch?.items?.[0];
-        if (patchNewest?.id) {
-          const key = "vip:patch:lastSeenId";
-          const last = safeGet(key);
-          if (last) {
-            if (last !== patchNewest.id) {
-              safeSet(key, patchNewest.id);
-              showToast({
-                title: "Patch: новая публикация",
-                body: patchNewest.title || (patchNewest.channel?.slug ? `@${patchNewest.channel.slug}` : "Новая запись"),
-                href: patchNewest.link
-              });
-              if (soundEnabled && audioCtxRef.current && audioUnlocked) beepWithCtx(audioCtxRef.current, 740);
-            }
-          } else {
-            safeSet(key, patchNewest.id);
+        await Promise.all([
+          take(async () => mapPatch(await fetchJson<{ items?: FeedItem[] }>("/api/patch/feed"))),
+          take(async () => mapCves(await fetchJson<{ items?: CveItem[] }>("/api/cves?view=last24h&limit=8")))
+        ]);
+        await chain;
+        if (cancelled) return;
+        if (!seeded && gotAny) markNoticesSeeded();
+        // ФСТЭК в тосты и колокольчик не пушим — лента только в модуле ФСТЭК.
+        const toastable = fresh.filter((item) => item.source !== "ФСТЭК" && !item.id.startsWith("fstec:"));
+        if (seeded && toastable.length) {
+          const newest = [...toastable].sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
+          if (newest) {
+            showToast({
+              title: toastable.length > 1 ? `${newest.source}: ${toastable.length} новых` : `${newest.source}: новое`,
+              body: newest.kind === "cve" ? `${newest.title}${newest.body ? ` — ${newest.body}` : ""}` : newest.title,
+              href: newest.href.startsWith("/") ? undefined : newest.href
+            });
           }
         }
       } finally {
-        setBusy(false);
+        inFlight = false;
+        if (!cancelled) markNoticesReady();
       }
     };
 
@@ -185,80 +175,41 @@ export function LiveFeedNotifier() {
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [enabled, soundEnabled, audioUnlocked]);
+  }, [enabled]);
 
-  if (!enabled) return null;
+  if (!enabled || !toast) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-[70]">
-      <div className="mb-2 flex justify-end gap-2">
-        <button
-          type="button"
-          onClick={() => {
-            if (!audioCtxRef.current) return;
-            if (!audioUnlocked) return;
-            beepWithCtx(audioCtxRef.current, 880);
-          }}
-          disabled={!audioUnlocked}
-          className={cn(
-            "inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white/90 px-2.5 py-1.5 text-[11px] text-fg/85 shadow-sm backdrop-blur",
-            "hover:bg-white disabled:opacity-50 dark:border-white/[0.08] dark:bg-black/50 dark:hover:bg-black/65"
-          )}
-          title={
-            audioUnlocked
-              ? "Тест звука"
-              : "Браузер блокирует звук до первого клика/нажатия клавиши в странице"
-          }
-        >
-          Тест
-        </button>
-        <button
-          type="button"
-          onClick={() => setSoundEnabled((v) => !v)}
-          className={cn(
-            "inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white/90 px-2.5 py-1.5 text-[11px] text-fg/85 shadow-sm backdrop-blur",
-            "hover:bg-white dark:border-white/[0.08] dark:bg-black/50 dark:hover:bg-black/65"
-          )}
-          title={soundEnabled ? "Звук уведомлений: включён" : "Звук уведомлений: выключен"}
-        >
-          {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden /> : null}
-          <Volume2 className={cn("h-3.5 w-3.5", !soundEnabled && "opacity-40")} aria-hidden />
-          {soundEnabled ? "Звук" : "Без звука"}
-        </button>
-      </div>
-
-      {toast ? (
-        <div className="w-[min(420px,calc(100vw-2rem))]">
-          <div className="rounded-2xl border border-slate-200/80 bg-white/95 p-4 shadow-2xl backdrop-blur dark:border-white/[0.08] dark:bg-black/70">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-fg/95">{toast.title}</div>
-                {toast.body ? <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-muted">{toast.body}</div> : null}
-                {toast.href ? (
-                  <a
-                    href={toast.href}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-accent hover:underline"
-                  >
-                    Открыть источник
-                    <ExternalLink className="h-3 w-3" aria-hidden />
-                  </a>
-                ) : null}
-              </div>
-              <button
-                type="button"
-                onClick={() => setToast(null)}
-                className="rounded-lg border border-slate-200 bg-white p-1.5 text-muted hover:bg-slate-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/35"
-                aria-label="Закрыть"
-              >
-                <X className="h-4 w-4" aria-hidden />
-              </button>
+    <div className="vc-shell pointer-events-none fixed inset-x-0 top-16 z-[70] flex justify-end px-4">
+      <div className="vc-notice-in pointer-events-auto w-[min(380px,calc(100vw-2rem))]">
+        <div className="rounded-xl border border-[var(--vc-border)] bg-[var(--vc-surface)] px-3 py-2.5 shadow-lg">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="text-[12px] font-semibold text-[var(--vc-text)]">{toast.title}</div>
+              {toast.body ? <div className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--vc-muted)]">{toast.body}</div> : null}
+              {toast.href ? (
+                <a
+                  href={toast.href}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-medium text-[#2f6bff] hover:underline"
+                >
+                  Открыть источник
+                  <ExternalLink className="h-3 w-3" aria-hidden />
+                </a>
+              ) : null}
             </div>
+            <button
+              type="button"
+              onClick={() => setToast(null)}
+              className="rounded-md border border-[var(--vc-border)] p-1 text-[var(--vc-muted)] hover:bg-[var(--vc-hover)]"
+              aria-label="Закрыть"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden />
+            </button>
           </div>
         </div>
-      ) : null}
+      </div>
     </div>
   );
 }
-

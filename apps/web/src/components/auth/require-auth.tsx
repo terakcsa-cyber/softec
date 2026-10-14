@@ -23,7 +23,19 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
       </div>
     );
   }
-  if (!user) return null;
-  if (user.mustChangePassword && pathname !== "/change-password") return null;
+  if (!user) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-bg text-sm text-muted">
+        Переход ко входу…
+      </div>
+    );
+  }
+  if (user.mustChangePassword && pathname !== "/change-password") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-bg text-sm text-muted">
+        Нужна смена пароля…
+      </div>
+    );
+  }
   return <>{children}</>;
 }

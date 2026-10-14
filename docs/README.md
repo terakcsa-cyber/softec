@@ -4,7 +4,7 @@
 
 | Документ | Аудитория | Содержание |
 |----------|-----------|------------|
-| [USER_GUIDE.md](./USER_GUIDE.md) | Аналитик, инженер ИБ, оператор | Вход, Overview (EPSS по корпусу), CVE, задачи, Threat (Сейчас/Лента/Карта/Watchlist), VOC, Settings, сценарии |
+| [USER_GUIDE.md](./USER_GUIDE.md) | Аналитик, инженер ИБ, оператор | VulnControl (дашборд, аналитика, EPSS spike, патчи/ФСТЭК), ежемесячный дайджест 16:9, CVE, задачи, Threat, VOC, Settings |
 | [ADMIN_GUIDE.md](./ADMIN_GUIDE.md) | DevOps, администратор, владелец продукта | Деплой, tls-proxy/LE, EPSS, TEXT_ENGINE BG, обновления UI, очереди, runbook |
 | [deploy-linux-docker.md](./deploy-linux-docker.md) | Администратор | One-command `./deploy.sh` на Linux-сервер («тачка») |
 | [MATURITY.md](./MATURITY.md) | Руководство / аудит | Текущий уровень зрелости, метрики, пробелы, roadmap |

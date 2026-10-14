@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
@@ -137,16 +137,113 @@ function fmtMs(ms: number) {
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(2)}s`;
 }
 
+function healthUi(vc: boolean) {
+  return {
+    vc,
+    muted: vc ? "text-[var(--vc-muted)]" : "text-muted",
+    danger: vc ? "text-[var(--vc-danger-text)]" : "text-danger",
+    warn: vc ? "text-[var(--vc-high)]" : "text-warn",
+    mono: vc ? "font-mono text-[var(--vc-text)]" : "font-mono text-fg/85",
+    monoSoft: vc ? "truncate font-mono text-[10px] text-[var(--vc-text)]" : "truncate font-mono text-[10px] text-fg/80",
+    card: vc
+      ? "rounded-xl border border-[var(--vc-border)] bg-[var(--vc-inset)] p-4 text-[var(--vc-text)]"
+      : "rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15",
+    probe: vc
+      ? "rounded-xl border border-[var(--vc-border)] bg-[var(--vc-inset)] p-4 text-[11px] text-[var(--vc-text)]"
+      : "rounded-xl border border-slate-200 bg-white p-4 text-[11px] dark:border-border dark:bg-black/15",
+    overview: vc
+      ? "flex flex-wrap items-center gap-3 rounded-xl border border-[var(--vc-border)] bg-[var(--vc-inset)] p-4 text-[var(--vc-text)]"
+      : "flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-white p-4 dark:bg-black/15",
+    refresh: vc
+      ? "inline-flex items-center gap-2 rounded-lg border border-[var(--vc-border)] bg-[var(--vc-surface)] px-3 py-2 text-xs font-medium text-[var(--vc-text)] hover:bg-[var(--vc-hover)]"
+      : "inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium shadow-sm hover:bg-slate-50 dark:border-border dark:bg-black/25 dark:hover:bg-black/35",
+    tabOn: vc
+      ? "border-[var(--vc-primary)] bg-[color-mix(in_srgb,var(--vc-primary)_16%,transparent)] text-[var(--vc-text)]"
+      : "border-accent/40 bg-accent/10 text-fg",
+    tabOff: vc
+      ? "border-[var(--vc-border)] bg-[var(--vc-surface)] text-[var(--vc-muted)] hover:bg-[var(--vc-hover)] hover:text-[var(--vc-text)]"
+      : "border-slate-200 bg-white text-muted hover:text-fg dark:border-border dark:bg-black/20",
+    checkOk: vc
+      ? "border-[var(--vc-border)] bg-[var(--vc-inset)]"
+      : "border-slate-200 bg-slate-50/80 dark:border-white/[0.06] dark:bg-black/20",
+    checkBad: vc
+      ? "border-[color-mix(in_srgb,var(--vc-critical)_40%,transparent)] bg-[color-mix(in_srgb,var(--vc-critical)_12%,transparent)]"
+      : "border-danger/30 bg-danger/10",
+    queueOn: vc
+      ? "border-[var(--vc-border)] bg-[var(--vc-inset)] text-[var(--vc-text)]"
+      : "border-slate-200 bg-white dark:border-border dark:bg-black/15",
+    queueIdle: vc
+      ? "border-dashed border-[var(--vc-border)] bg-[var(--vc-hover-soft)]"
+      : "border-dashed border-slate-200 bg-slate-50/70 dark:border-border dark:bg-black/10",
+    chip: vc
+      ? "rounded-md border border-[var(--vc-border)] px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-[var(--vc-muted)]"
+      : "rounded-md border border-border/70 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted",
+    role: vc
+      ? "ml-2 rounded-md bg-[var(--vc-hover)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--vc-muted)]"
+      : "ml-2 rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-black/30",
+    hint: vc
+      ? "mt-2 rounded-lg border border-[color-mix(in_srgb,var(--vc-high)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-high)_12%,transparent)] px-2 py-1.5 text-[10px] text-[var(--vc-high)]"
+      : "mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn",
+    bannerOk: vc
+      ? "rounded-xl border border-[color-mix(in_srgb,var(--vc-success)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-success)_12%,transparent)] px-4 py-3 text-sm text-[var(--vc-success-text)]"
+      : "rounded-xl border border-ok/30 bg-ok/10 px-4 py-3 text-sm text-ok",
+    bannerBad: vc
+      ? "rounded-xl border border-[color-mix(in_srgb,var(--vc-critical)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-critical)_12%,transparent)] px-4 py-3 text-sm text-[var(--vc-danger-text)]"
+      : "rounded-xl border border-danger/30 bg-danger/10 px-4 py-3 text-sm text-danger",
+    warnBox: vc
+      ? "rounded-xl border border-[color-mix(in_srgb,var(--vc-high)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-high)_12%,transparent)] px-4 py-3 text-xs text-[var(--vc-high)]"
+      : "rounded-xl border border-warn/30 bg-warn/10 px-4 py-3 text-xs text-warn",
+    select: vc
+      ? "rounded-lg border border-[var(--vc-border)] bg-[var(--vc-surface)] px-2 py-1.5 text-xs text-[var(--vc-text)]"
+      : "rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-border dark:bg-black/20",
+    retry: vc
+      ? "inline-flex items-center gap-1 rounded-lg border border-[color-mix(in_srgb,var(--vc-primary)_40%,transparent)] bg-[color-mix(in_srgb,var(--vc-primary)_14%,transparent)] px-3 py-1.5 text-xs text-[var(--vc-text)] hover:bg-[color-mix(in_srgb,var(--vc-primary)_22%,transparent)] disabled:opacity-50"
+      : "inline-flex items-center gap-1 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs hover:bg-accent/15 disabled:opacity-50",
+    clear: vc
+      ? "inline-flex items-center gap-1 rounded-lg border border-[color-mix(in_srgb,var(--vc-critical)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-critical)_12%,transparent)] px-3 py-1.5 text-xs text-[var(--vc-danger-text)] disabled:opacity-50"
+      : "inline-flex items-center gap-1 rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger hover:bg-danger/15 disabled:opacity-50",
+    pre: vc
+      ? "max-h-96 overflow-auto rounded-xl border border-[var(--vc-border)] bg-[var(--vc-well)] p-3 font-mono text-[10px] text-[var(--vc-text)]"
+      : "max-h-96 overflow-auto rounded-xl border border-border bg-black/5 p-3 font-mono text-[10px] dark:bg-black/25",
+    preMini: vc
+      ? "mt-3 max-h-24 overflow-auto font-mono text-[9px] text-[var(--vc-muted)]"
+      : "mt-3 max-h-24 overflow-auto font-mono text-[9px] text-muted",
+    play: vc
+      ? "rounded-lg border border-[color-mix(in_srgb,var(--vc-primary)_40%,transparent)] bg-[color-mix(in_srgb,var(--vc-primary)_14%,transparent)] p-2 text-[var(--vc-primary-ink)] hover:bg-[color-mix(in_srgb,var(--vc-primary)_22%,transparent)] disabled:opacity-50"
+      : "rounded-lg border border-accent/30 bg-accent/10 p-2 hover:bg-accent/15 disabled:opacity-50",
+    track: vc ? "mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--vc-track)]" : "mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-white/10",
+    barOk: vc ? "bg-[var(--vc-success)]" : "bg-ok",
+    barWarn: vc ? "bg-[var(--vc-high)]" : "bg-warn",
+    barBad: vc ? "bg-[var(--vc-critical)]" : "bg-danger",
+    accentIcon: vc ? "h-5 w-5 text-[var(--vc-primary-ink)]" : "h-5 w-5 text-accent",
+    meta: vc
+      ? "rounded-md border border-[var(--vc-border)] px-1.5 py-0.5 font-mono text-[var(--vc-muted)]"
+      : "rounded-md border border-border/70 px-1.5 py-0.5 font-mono",
+    pillOk: vc
+      ? "border-[color-mix(in_srgb,var(--vc-success)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-success)_12%,transparent)] text-[var(--vc-success-text)]"
+      : "border-ok/30 bg-ok/10 text-ok",
+    pillWarn: vc
+      ? "border-[color-mix(in_srgb,var(--vc-high)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-high)_12%,transparent)] text-[var(--vc-high)]"
+      : "border-warn/30 bg-warn/10 text-warn",
+    pillBad: vc
+      ? "border-[color-mix(in_srgb,var(--vc-critical)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-critical)_12%,transparent)] text-[var(--vc-danger-text)]"
+      : "border-danger/30 bg-danger/10 text-danger"
+  };
+}
+
+const HealthUiContext = createContext(healthUi(false));
+
+function useHealthUi() {
+  return useContext(HealthUiContext);
+}
+
 function StatusPill({ ok, warn }: { ok: boolean; warn?: boolean }) {
+  const ui = useHealthUi();
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium",
-        ok && !warn
-          ? "border-ok/30 bg-ok/10 text-ok"
-          : warn
-            ? "border-warn/30 bg-warn/10 text-warn"
-            : "border-danger/30 bg-danger/10 text-danger"
+        ok && !warn ? ui.pillOk : warn ? ui.pillWarn : ui.pillBad
       )}
     >
       {ok && !warn ? <CheckCircle2 className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
@@ -155,7 +252,15 @@ function StatusPill({ ok, warn }: { ok: boolean; warn?: boolean }) {
   );
 }
 
-export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => void }) {
+export function SystemHealthPanel({
+  onOpenSettings,
+  appearance = "legacy",
+  embedded = false
+}: {
+  onOpenSettings?: () => void;
+  appearance?: "legacy" | "vc";
+  embedded?: boolean;
+}) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<Tab>("overview");
@@ -354,23 +459,29 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
     tiRefresh.isPending ||
     Boolean(opsStatusQ.data?.anyRunning);
 
+  const ui = healthUi(appearance === "vc");
+
   return (
+    <HealthUiContext.Provider value={ui}>
     <div className="space-y-5">
       <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
-            <Activity className="h-5 w-5 text-accent" />
-            Здоровье системы
-          </h1>
-          <p className="mt-1 max-w-2xl text-xs text-muted">
-            Готовность данных после простоя, мониторинг очередей и аккуратный ручной ремонт конвейеров.
-            {user?.role ? (
-              <span className="ml-2 rounded-md bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-black/30">
-                role: {user.role}
-              </span>
-            ) : null}
+        {embedded ? (
+          <p className={cn("max-w-2xl text-xs", ui.muted)}>
+            Цифры только с API. Пустой ответ и ошибка остаются как есть, без подставленных счётчиков.
+            {user?.role ? <span className={ui.role}>role: {user.role}</span> : null}
           </p>
-        </div>
+        ) : (
+          <div>
+            <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+              <Activity className={ui.accentIcon} />
+              Здоровье системы
+            </h1>
+            <p className={cn("mt-1 max-w-2xl text-xs", ui.muted)}>
+              Готовность данных после простоя, мониторинг очередей и аккуратный ручной ремонт конвейеров.
+              {user?.role ? <span className={ui.role}>role: {user.role}</span> : null}
+            </p>
+          </div>
+        )}
         <button
           type="button"
           onClick={() => {
@@ -380,24 +491,21 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
             void reconcileQ.refetch();
             void opsStatusQ.refetch();
           }}
-          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-medium shadow-sm hover:bg-slate-50 dark:border-border dark:bg-black/25 dark:hover:bg-black/35"
+          className={ui.refresh}
         >
           <RefreshCw className={cn("h-3.5 w-3.5", healthQ.isFetching && "animate-spin")} />
           Обновить всё
         </button>
       </div>
 
-      <ReadinessBar data={readinessQ.data} loading={readinessQ.isLoading} />
+      {readinessQ.isError ? (
+        <div className={ui.bannerBad}>Readiness недоступен</div>
+      ) : (
+        <ReadinessBar data={readinessQ.data} loading={readinessQ.isLoading} appearance={appearance} />
+      )}
 
       {(actionMsg || actionErr) && (
-        <div
-          className={cn(
-            "rounded-xl border px-4 py-3 text-sm",
-            actionErr ? "border-danger/30 bg-danger/10 text-danger" : "border-ok/30 bg-ok/10 text-ok"
-          )}
-        >
-          {actionErr ?? actionMsg}
-        </div>
+        <div className={actionErr ? ui.bannerBad : ui.bannerOk}>{actionErr ?? actionMsg}</div>
       )}
 
       <div className="flex flex-wrap gap-2">
@@ -407,10 +515,8 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
             type="button"
             onClick={() => setTab(t.id)}
             className={cn(
-              "inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-medium",
-              tab === t.id
-                ? "border-accent/40 bg-accent/10 text-fg"
-                : "border-slate-200 bg-white text-muted hover:text-fg dark:border-border dark:bg-black/20"
+              "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium",
+              tab === t.id ? ui.tabOn : ui.tabOff
             )}
           >
             <t.icon className="h-3.5 w-3.5" />
@@ -421,14 +527,15 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
 
       {tab === "overview" && (
         <div className="space-y-4">
-          <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-white p-4 dark:bg-black/15">
-            <StatusPill ok={Boolean(healthQ.data?.ok)} />
-            <span className="text-xs text-muted">
-              upstream: <span className="font-mono text-fg/85">{healthQ.data?.upstream ?? "—"}</span>
+          <div className={ui.overview}>
+            <StatusPill ok={Boolean(healthQ.data?.ok) && !healthQ.isError} />
+            <span className={cn("text-xs", ui.muted)}>
+              upstream: <span className={ui.mono}>{healthQ.data?.upstream ?? "—"}</span>
             </span>
-            <span className="text-xs text-muted">проверено: {fmtTs(healthQ.data?.checkedAt)}</span>
+            <span className={cn("text-xs", ui.muted)}>проверено: {fmtTs(healthQ.data?.checkedAt)}</span>
+            {healthQ.isError ? <span className={cn("text-xs", ui.danger)}>проверка /api/health не удалась</span> : null}
             {anyOpsPending ? (
-              <span className="inline-flex items-center gap-1 text-xs text-warn">
+              <span className={cn("inline-flex items-center gap-1 text-xs", ui.warn)}>
                 <Loader2 className="h-3 w-3 animate-spin" /> идёт синхронизация
               </span>
             ) : null}
@@ -439,9 +546,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                 key={c.name}
                 className={cn(
                   "rounded-xl border p-3",
-                  c.ok || c.status === 401
-                    ? "border-slate-200 bg-slate-50/80 dark:border-white/[0.06] dark:bg-black/20"
-                    : "border-danger/30 bg-danger/10"
+                  c.ok || c.status === 401 ? ui.checkOk : ui.checkBad
                 )}
               >
                 <div className="flex items-start justify-between gap-2">
@@ -452,7 +557,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                   <span className="font-mono">HTTP {c.status ?? "—"}</span>
                   <span className="font-mono">{fmtMs(c.ms)}</span>
                 </div>
-                {c.error ? <div className="mt-1 text-[10px] text-danger">{c.error}</div> : null}
+                {c.error ? <div className={cn("mt-1 text-[10px]", ui.danger)}>{c.error}</div> : null}
               </div>
             ))}
           </div>
@@ -476,7 +581,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
             </div>
           ) : null}
           {queueQ.isError || qh?.ok === false ? (
-            <div className="text-sm text-danger">{qh?.error ? String(qh.error) : "Очереди недоступны"}</div>
+            <div className={cn("text-sm", ui.danger)}>{qh?.error ? String(qh.error) : "Очереди недоступны"}</div>
           ) : null}
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             {(
@@ -489,17 +594,12 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
             ).map(([name, depth, consumers, active]) => (
               <div
                 key={name}
-                className={cn(
-                  "rounded-xl border p-4",
-                  active
-                    ? "border-slate-200 bg-white dark:border-border dark:bg-black/15"
-                    : "border-dashed border-slate-200 bg-slate-50/70 dark:border-border dark:bg-black/10"
-                )}
+                className={cn("rounded-xl border p-4", active ? ui.queueOn : ui.queueIdle)}
               >
                 <div className="flex items-center justify-between gap-2">
                   <div className="font-mono text-[11px] text-muted">{name}</div>
                   {!active ? (
-                    <span className="rounded-md border border-border/70 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted">
+                    <span className={ui.chip}>
                       idle
                     </span>
                   ) : null}
@@ -581,7 +681,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
           </div>
 
           {qh?.llm ? (
-            <div className="rounded-xl border border-slate-200 bg-white p-4 text-[11px] dark:border-border dark:bg-black/15">
+            <div className={ui.probe}>
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold uppercase tracking-wide">LLM</span>
@@ -595,15 +695,15 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                 </span>
               </div>
               {qh.llm.endpoint ? (
-                <div className="truncate font-mono text-[10px] text-fg/80">{qh.llm.endpoint}</div>
+                <div className={ui.monoSoft}>{qh.llm.endpoint}</div>
               ) : null}
               <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted">
                 {qh.llm.model ? <span>model: {qh.llm.model}</span> : null}
                 {typeof qh.llm.status === "number" ? <span>HTTP {qh.llm.status}</span> : null}
-                {qh.llm.error ? <span className="text-danger">{qh.llm.error}</span> : null}
+                {qh.llm.error ? <span className={ui.danger}>{qh.llm.error}</span> : null}
               </div>
               {qh.llm.authReady === false && qh.llm.authHint ? (
-                <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn">
+                <div className={ui.hint}>
                   {qh.llm.authHint}
                 </div>
               ) : null}
@@ -611,7 +711,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
           ) : null}
 
           {qh?.nvd ? (
-            <div className="rounded-xl border border-slate-200 bg-white p-4 text-[11px] dark:border-border dark:bg-black/15">
+            <div className={ui.probe}>
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold uppercase tracking-wide">NVD</span>
@@ -622,7 +722,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                 </span>
               </div>
               {qh.nvd.endpoint ? (
-                <div className="truncate font-mono text-[10px] text-fg/80">{qh.nvd.endpoint}</div>
+                <div className={ui.monoSoft}>{qh.nvd.endpoint}</div>
               ) : null}
               <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted">
                 <span>{qh.nvd.hasApiKey ? "API key: да" : "API key: нет"}</span>
@@ -639,12 +739,12 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                 {qh.nvd.watermarkTs ? <span>запись: {fmtTs(qh.nvd.watermarkTs)}</span> : null}
               </div>
               {qh.nvd.error ? (
-                <div className={cn("mt-1 text-[10px]", qh.nvd.ok ? "text-warn" : "text-danger")}>
+                <div className={cn("mt-1 text-[10px]", qh.nvd.ok ? ui.warn : ui.danger)}>
                   {qh.nvd.error}
                 </div>
               ) : null}
               {qh.nvd.ingestStale && qh.nvd.ingestStaleHint ? (
-                <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn">
+                <div className={ui.hint}>
                   {qh.nvd.ingestStaleHint}
                 </div>
               ) : null}
@@ -652,7 +752,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
           ) : null}
 
           {qh?.bdu ? (
-            <div className="rounded-xl border border-teal-200/80 bg-teal-50/50 p-4 text-[11px] dark:border-teal-900/40 dark:bg-teal-950/20">
+            <div className={ui.probe}>
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold uppercase tracking-wide">БДУ ФСТЭК</span>
@@ -663,7 +763,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                 </span>
               </div>
               {qh.bdu.endpoint ? (
-                <div className="truncate font-mono text-[10px] text-fg/80">{qh.bdu.endpoint}</div>
+                <div className={ui.monoSoft}>{qh.bdu.endpoint}</div>
               ) : null}
               <div className="mt-1 flex flex-wrap gap-2 text-[10px] text-muted">
                 {typeof qh.bdu.recordCount === "number" ? (
@@ -683,12 +783,12 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                 {qh.bdu.lastIngestUsedFallback ? <span className="text-warn">зеркало</span> : null}
               </div>
               {qh.bdu.error ? (
-                <div className={cn("mt-1 text-[10px]", qh.bdu.ok ? "text-warn" : "text-danger")}>
+                <div className={cn("mt-1 text-[10px]", qh.bdu.ok ? ui.warn : ui.danger)}>
                   {qh.bdu.error}
                 </div>
               ) : null}
               {qh.bdu.ingestStale && qh.bdu.ingestStaleHint ? (
-                <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2 py-1.5 text-[10px] text-warn">
+                <div className={ui.hint}>
                   {qh.bdu.ingestStaleHint}
                 </div>
               ) : null}
@@ -703,7 +803,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
             <select
               value={dlqQueue}
               onChange={(e) => setDlqQueue(e.target.value as "dlq.ai.enrich" | "dlq.ai.score")}
-              className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs dark:border-border dark:bg-black/20"
+              className={ui.select}
             >
               <option value="dlq.ai.enrich">dlq.ai.enrich</option>
               <option value="dlq.ai.score">dlq.ai.score</option>
@@ -714,7 +814,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                   type="button"
                   disabled={dlqRetry.isPending}
                   onClick={() => dlqRetry.mutate()}
-                  className="inline-flex items-center gap-1 rounded-lg border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs hover:bg-accent/15 disabled:opacity-50"
+                  className={ui.retry}
                 >
                   {dlqRetry.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
                   Повторить до 1000
@@ -723,17 +823,17 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
                   type="button"
                   disabled={dlqClear.isPending}
                   onClick={() => dlqClear.mutate()}
-                  className="inline-flex items-center gap-1 rounded-lg border border-danger/30 bg-danger/10 px-3 py-1.5 text-xs text-danger hover:bg-danger/15 disabled:opacity-50"
+                  className={ui.clear}
                 >
                   {dlqClear.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
                   Очистить до 1000
                 </button>
               </>
             ) : (
-              <span className="text-[10px] text-warn">Только admin может управлять DLQ</span>
+              <span className={cn("text-[10px]", ui.warn)}>Только admin может управлять DLQ</span>
             )}
           </div>
-          <pre className="max-h-96 overflow-auto rounded-xl border border-border bg-black/5 p-3 font-mono text-[10px] dark:bg-black/25">
+          <pre className={ui.pre}>
             {dlqSampleQ.isFetching ? "Загрузка…" : JSON.stringify(dlqSampleQ.data ?? {}, null, 2)}
           </pre>
         </div>
@@ -741,15 +841,16 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
 
       {tab === "pipelines" && (
         <div className="space-y-4">
+          {reconcileQ.isError ? <div className={cn("text-sm", ui.danger)}>Сверка источников недоступна</div> : null}
           <div className="flex items-center gap-2">
-            <StatusPill ok={Boolean(reconcileQ.data?.ok)} />
-            <span className="text-xs text-muted">сверка: {fmtTs(reconcileQ.data?.checkedAt)}</span>
+            <StatusPill ok={Boolean(reconcileQ.data?.ok) && !reconcileQ.isError} />
+            <span className={cn("text-xs", ui.muted)}>сверка: {fmtTs(reconcileQ.data?.checkedAt)}</span>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
             {(reconcileQ.data?.sources ?? readinessQ.data?.sources ?? []).map((s) => (
               <div
                 key={s.source}
-                className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15"
+                className={ui.card}
               >
                 <div className="flex items-center justify-between">
                   <div className="text-sm font-semibold uppercase">{s.source}</div>
@@ -778,7 +879,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
       {tab === "actions" && (
         <div className="space-y-4">
           {!isAdmin && (
-            <div className="rounded-xl border border-warn/30 bg-warn/10 px-4 py-3 text-xs text-warn">
+            <div className={ui.warnBox}>
               Для управления нужна роль <strong>admin</strong>. Текущая: {user?.role ?? "unknown"}.
               {onOpenSettings ? (
                 <button type="button" onClick={onOpenSettings} className="ml-2 underline">
@@ -845,6 +946,7 @@ export function SystemHealthPanel({ onOpenSettings }: { onOpenSettings?: () => v
         </div>
       )}
     </div>
+    </HealthUiContext.Provider>
   );
 }
 
@@ -875,9 +977,10 @@ function CoverageStatusCard({
   lastAt?: string | null;
   meta?: string[];
 }) {
+  const ui = useHealthUi();
   const bar = typeof pct === "number" && Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15">
+    <div className={ui.card}>
       <div className="flex items-center justify-between gap-2">
         <div className="text-sm font-semibold">{title}</div>
         <StatusPill ok={ok} warn={warn} />
@@ -892,9 +995,9 @@ function CoverageStatusCard({
             : "—"}
         </div>
       </div>
-      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100 dark:bg-white/10">
+      <div className={ui.track}>
         <div
-          className={cn("h-full rounded-full transition-[width]", ok ? "bg-ok" : warn ? "bg-warn" : "bg-danger")}
+          className={cn("h-full rounded-full transition-[width]", ok ? ui.barOk : warn ? ui.barWarn : ui.barBad)}
           style={{ width: `${Math.max(ok ? 100 : 4, bar)}%` }}
         />
       </div>
@@ -919,7 +1022,7 @@ function CoverageStatusCard({
       {meta?.length ? (
         <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] text-muted">
           {meta.map((m) => (
-            <span key={m} className="rounded-md border border-border/70 px-1.5 py-0.5 font-mono">
+            <span key={m} className={ui.meta}>
               {m}
             </span>
           ))}
@@ -946,8 +1049,9 @@ function ActionCard({
   status?: unknown;
   icon?: typeof Play;
 }) {
+  const ui = useHealthUi();
   return (
-    <div className="rounded-xl border border-slate-200 bg-white p-4 dark:border-border dark:bg-black/15">
+    <div className={ui.card}>
       <div className="flex items-start justify-between gap-2">
         <div>
           <div className="text-sm font-semibold">{title}</div>
@@ -957,13 +1061,14 @@ function ActionCard({
           type="button"
           disabled={disabled}
           onClick={onClick}
-          className="rounded-lg border border-accent/30 bg-accent/10 p-2 hover:bg-accent/15 disabled:opacity-50"
+          aria-label={title}
+          className={ui.play}
         >
           {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Icon className="h-4 w-4" />}
         </button>
       </div>
       {status != null ? (
-        <pre className="mt-3 max-h-24 overflow-auto font-mono text-[9px] text-muted">
+        <pre className={ui.preMini}>
           {JSON.stringify(status, null, 2)}
         </pre>
       ) : null}

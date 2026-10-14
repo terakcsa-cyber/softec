@@ -116,5 +116,6 @@ export function revisionSliceForPath(pathname: string): RevisionSlice | null {
   if (path.includes("/fstec/feed")) return null;
   if (path.includes("/fstec")) return "fstec";
   if (path.includes("/vendor-advisories")) return "patch";
+  if (path.includes("/products")) return "catalog";
   return null;
 }

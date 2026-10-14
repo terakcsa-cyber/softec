@@ -96,12 +96,62 @@ body {
   animation: readiness-shimmer 1.6s ease-in-out infinite;
 }
 
+@keyframes vc-unfold {
+  from {
+    opacity: 0;
+    transform: scaleY(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+
+.vc-unfold {
+  transform-origin: top center;
+  animation: vc-unfold 160ms ease-out;
+}
+
+.vc-notice-in {
+  animation: vc-notice-in 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes vc-notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ti-enter,
   .ti-bump,
-  .animate-readiness-shimmer {
+  .animate-readiness-shimmer,
+  .vc-unfold,
+  .vc-notice-in {
     animation: none !important;
   }
+}
+
+/* Настройки внутри VulnControl: те же чернила, что у оболочки, поверх старых форм. */
+html.dark .vc-shell .vc-settings {
+  --color-fg: 214 59% 94%;
+  --color-muted: 214 22% 64%;
+  --color-border: 210 28% 32%;
+  --color-card: 213 51% 11%;
+  --color-accent: 222 100% 59%;
+}
+
+html.light .vc-shell .vc-settings {
+  --color-fg: 216 41% 14%;
+  --color-muted: 215 18% 43%;
+  --color-border: 214 22% 82%;
+  --color-card: 0 0% 100%;
+  --color-accent: 222 100% 59%;
 }
 
 .glass {
@@ -114,4 +164,161 @@ html.light .glass {
   background-color: hsl(var(--color-card));
   border-color: hsl(var(--color-border));
   box-shadow: 0 1px 2px hsl(220 16% 10% / 0.04);
+}
+
+/* VulnControl: тёмная палитра как была, светлая — отдельные поверхности и чернила. */
+.vc-shell {
+  color-scheme: dark;
+  --vc-bg: #07111e;
+  --vc-surface: #0e1a2b;
+  --vc-sidebar: #0b1524;
+  --vc-header: rgba(11, 21, 36, 0.9);
+  --vc-inset: #0c1828;
+  --vc-inset-2: #0c1726;
+  --vc-well: #0b1626;
+  --vc-bar: #13233a;
+  --vc-table-head: #0b1524;
+  --vc-border: rgba(120, 160, 204, 0.18);
+  --vc-line: rgba(255, 255, 255, 0.04);
+  --vc-line-mid: rgba(255, 255, 255, 0.05);
+  --vc-line-strong: rgba(255, 255, 255, 0.1);
+  --vc-hover: rgba(255, 255, 255, 0.05);
+  --vc-hover-soft: rgba(255, 255, 255, 0.03);
+  --vc-hover-row: rgba(255, 255, 255, 0.035);
+  --vc-hover-border: rgba(255, 255, 255, 0.2);
+  --vc-primary: #2f6bff;
+  --vc-primary-ink: #9ec0ff;
+  --vc-on-soft: #ffffff;
+  --vc-critical: #ff4d5e;
+  --vc-critical-text: #ffb4bc;
+  --vc-high: #ff8a3d;
+  --vc-medium: #f5c451;
+  --vc-low: #3b82f6;
+  --vc-success: #3dd68c;
+  --vc-success-text: #8ef0c0;
+  --vc-kev: #fb7185;
+  --vc-text: #e7eef8;
+  --vc-nav: #c5d2e4;
+  --vc-muted: #8ea0b8;
+  --vc-faint: #7d8da3;
+  --vc-link: #7eb6ff;
+  --vc-link-soft: #9eb6ff;
+  --vc-danger-text: #ff8a9a;
+  --vc-purple: #a78bfa;
+  --vc-epss: #b794f6;
+  --vc-info: #60a5fa;
+  --vc-slate: #64748b;
+  --vc-track: rgba(255, 255, 255, 0.08);
+  --vc-track-strong: rgba(255, 255, 255, 0.15);
+  --vc-meter-end: #0c1726;
+  --vc-selected: #1d4ed8;
+  --vc-grid: rgba(142, 160, 184, 0.16);
+  --vc-crosshair: rgba(255, 255, 255, 0.25);
+  --vc-donut-track: rgba(255, 255, 255, 0.05);
+}
+
+html.light .vc-shell {
+  color-scheme: light;
+  --vc-bg: #e7eef6;
+  --vc-surface: #ffffff;
+  --vc-sidebar: #f5f8fc;
+  --vc-header: #ffffff;
+  --vc-inset: #f0f4fa;
+  --vc-inset-2: #f4f7fb;
+  --vc-well: #eef3f9;
+  --vc-bar: #e6efff;
+  --vc-table-head: #f3f6fb;
+  --vc-border: rgba(28, 51, 84, 0.14);
+  --vc-line: rgba(28, 51, 84, 0.08);
+  --vc-line-mid: rgba(28, 51, 84, 0.1);
+  --vc-line-strong: rgba(28, 51, 84, 0.16);
+  --vc-hover: rgba(47, 107, 255, 0.08);
+  --vc-hover-soft: rgba(28, 51, 84, 0.05);
+  --vc-hover-row: rgba(47, 107, 255, 0.07);
+  --vc-hover-border: rgba(28, 51, 84, 0.28);
+  --vc-primary: #2f6bff;
+  --vc-primary-ink: #1d4ed8;
+  --vc-on-soft: #1e3a8a;
+  --vc-critical: #d12246;
+  --vc-critical-text: #9f1239;
+  --vc-high: #c2410c;
+  --vc-medium: #a16207;
+  --vc-low: #1d4ed8;
+  --vc-success: #047857;
+  --vc-success-text: #047857;
+  --vc-kev: #e11d48;
+  --vc-text: #152033;
+  --vc-nav: #2a3a50;
+  --vc-muted: #5a6b82;
+  --vc-faint: #6a7b92;
+  --vc-link: #1d4ed8;
+  --vc-link-soft: #1e40af;
+  --vc-danger-text: #be123c;
+  --vc-purple: #6d28d9;
+  --vc-epss: #6d28d9;
+  --vc-info: #1d4ed8;
+  --vc-slate: #475569;
+  --vc-track: rgba(21, 32, 51, 0.1);
+  --vc-track-strong: rgba(21, 32, 51, 0.16);
+  --vc-meter-end: #f8fafc;
+  --vc-selected: #2f6bff;
+  --vc-grid: rgba(21, 32, 51, 0.12);
+  --vc-crosshair: rgba(21, 32, 51, 0.35);
+  --vc-donut-track: rgba(21, 32, 51, 0.08);
+}
+
+html.light .vc-shell .rounded-xl.border {
+  box-shadow: 0 1px 2px rgba(21, 32, 51, 0.05);
+}
+
+/* Native <select> popups on Windows paint option text from CSS color onto a light system
+   background unless both color-scheme and option colors are set. macOS ignores option colors. */
+.vc-shell select,
+.vc-shell input[type="date"],
+.vc-shell input[type="datetime-local"],
+.vc-shell input[type="time"] {
+  color-scheme: inherit;
+}
+
+.vc-shell select {
+  padding-inline-end: 1.75rem;
+}
+
+.vc-shell select option,
+.vc-shell select optgroup {
+  background-color: var(--vc-surface);
+  color: var(--vc-text);
+}
+
+.vc-shell select option:checked {
+  background-color: var(--vc-primary);
+  color: #fff;
+}
+
+/* Menus: Firefox needs scrollbar-color/width; WebKit needs an explicit thumb.
+   overscroll-behavior keeps the last row reachable when the page behind also scrolls. */
+.vc-pop {
+  box-sizing: border-box;
+  min-width: 0;
+  color-scheme: inherit;
+  overscroll-behavior: contain;
+  scroll-padding-block: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--vc-muted) 80%, transparent) transparent;
+}
+
+.vc-pop::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.vc-pop::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.vc-pop::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--vc-muted) 75%, transparent);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
 }

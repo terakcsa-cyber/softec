@@ -431,6 +431,12 @@ export class StatsController {
               ) >= now() - interval '24 hours'`
     );
     const kev = await this.db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM kev`);
+    const newCisaKev7d = await this.db.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n
+         FROM kev
+        WHERE date_added IS NOT NULL
+          AND date_added >= (timezone('UTC', now()))::date - 6`
+    );
     const epss = await this.db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM epss_score`);
     const cvss = await this.db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM cve WHERE cvss_base IS NOT NULL`);
     const scored = await this.db.query<{ n: string }>(`SELECT COUNT(*)::text AS n FROM risk_score`);
@@ -524,6 +530,33 @@ export class StatsController {
         WHERE action = 'bdu.ingest'`
     );
 
+    const severity = await this.db.query<{
+      critical: string;
+      high: string;
+      medium: string;
+      low: string;
+      unscored: string;
+    }>(
+      `SELECT
+         COUNT(*) FILTER (WHERE cvss_base >= 9)::text AS critical,
+         COUNT(*) FILTER (WHERE cvss_base >= 7 AND cvss_base < 9)::text AS high,
+         COUNT(*) FILTER (WHERE cvss_base >= 4 AND cvss_base < 7)::text AS medium,
+         COUNT(*) FILTER (WHERE cvss_base IS NOT NULL AND cvss_base < 4)::text AS low,
+         COUNT(*) FILTER (WHERE cvss_base IS NULL)::text AS unscored
+         FROM cve`
+    );
+    const highEpss = await this.db.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM epss_score WHERE score >= 0.7`
+    );
+    const publishedByDay = await this.db.query<{ day: string; n: string }>(
+      `SELECT to_char(date_trunc('day', published_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+              COUNT(*)::text AS n
+         FROM cve
+        WHERE published_at IS NOT NULL
+          AND published_at >= now() - interval '30 days'
+        GROUP BY 1
+        ORDER BY 1`
+    );
     /** По умолчанию включено: обогащение по открытию CVE и POST /enrich. Явно `false` — только фон (ingest/очередь). */
     const allowManualEnrich = process.env.ALLOW_MANUAL_ENRICH !== "false";
 
@@ -533,6 +566,17 @@ export class StatsController {
       cvesLastHourCount: Number(lastHour.rows[0]?.n ?? 0),
       cvesPublishedLast24hCount: Number(lastHour.rows[0]?.n ?? 0),
       kevCount: Number(kev.rows[0]?.n ?? 0),
+      /** CVE, добавленные в CISA KEV за последние 7 календарных дней UTC. */
+      newCisaKev7dCount: Number(newCisaKev7d.rows[0]?.n ?? 0),
+      highEpssCount: Number(highEpss.rows[0]?.n ?? 0),
+      severity: {
+        critical: Number(severity.rows[0]?.critical ?? 0),
+        high: Number(severity.rows[0]?.high ?? 0),
+        medium: Number(severity.rows[0]?.medium ?? 0),
+        low: Number(severity.rows[0]?.low ?? 0),
+        unscored: Number(severity.rows[0]?.unscored ?? 0)
+      },
+      publishedByDay: publishedByDay.rows.map((row) => ({ day: row.day, count: Number(row.n ?? 0) })),
       epssCount: Number(epss.rows[0]?.n ?? 0),
       cvssCount: Number(cvss.rows[0]?.n ?? 0),
       scoredCount: Number(scored.rows[0]?.n ?? 0),
@@ -559,6 +603,150 @@ export class StatsController {
       },
       /** When false, POST /cves/:id/enrich is disabled (pipeline-only AI). */
       manualEnrichAllowed: allowManualEnrich
+    };
+  }
+
+  /** Ряды для модуля аналитики: публикации, KEV и вектор CVSS за 30 дней плюс свежие CVE. */
+  @Get("analytics")
+  async analytics() {
+    const published = await this.db.query<{
+      day: string;
+      published: string;
+      critical: string;
+      network: string;
+      adjacent: string;
+      local: string;
+      physical: string;
+    }>(
+      `SELECT to_char(date_trunc('day', c.published_at AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+              COUNT(*)::text AS published,
+              COUNT(*) FILTER (WHERE c.cvss_base >= 9)::text AS critical,
+              COUNT(*) FILTER (WHERE av.vector = 'NETWORK')::text AS network,
+              COUNT(*) FILTER (WHERE av.vector = 'ADJACENT_NETWORK')::text AS adjacent,
+              COUNT(*) FILTER (WHERE av.vector = 'LOCAL')::text AS local,
+              COUNT(*) FILTER (WHERE av.vector = 'PHYSICAL')::text AS physical
+         FROM cve c
+         CROSS JOIN LATERAL (
+           SELECT COALESCE(
+             c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'attackVector',
+             c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'attackVector',
+             c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'attackVector'
+           ) AS vector
+         ) av
+        WHERE c.published_at IS NOT NULL
+          AND c.published_at >= now() - interval '30 days'
+        GROUP BY 1
+        ORDER BY 1`
+    );
+    const kev = await this.db.query<{ day: string; n: string }>(
+      `SELECT to_char(date_added, 'YYYY-MM-DD') AS day, COUNT(*)::text AS n
+         FROM kev
+        WHERE date_added IS NOT NULL
+          AND date_added >= (timezone('UTC', now()))::date - 29
+        GROUP BY 1`
+    );
+    // Up to 3 strongest CVEs per UTC day over 14 days so the pulse isn't just the latest ingest pack.
+    const pulse = await this.db.query<{
+      cve_id: string;
+      published_at: string | null;
+      cvss_base: number | null;
+      risk_score: number | null;
+      vendor: string | null;
+      product: string | null;
+      attack_vector: string | null;
+      kev: boolean;
+    }>(
+      `WITH windowed AS (
+         SELECT c.cve_id,
+                c.published_at,
+                c.cvss_base,
+                rs.score AS risk_score,
+                vp.vendor,
+                vp.product,
+                av.vector AS attack_vector,
+                (k.cve_id IS NOT NULL) AS kev,
+                ROW_NUMBER() OVER (
+                  PARTITION BY date_trunc('day', c.published_at AT TIME ZONE 'UTC')
+                  ORDER BY COALESCE(rs.score, 0) DESC,
+                           COALESCE(c.cvss_base, 0) DESC,
+                           c.published_at DESC,
+                           c.cve_id ASC
+                ) AS rn
+           FROM cve c
+           LEFT JOIN LATERAL (
+             SELECT vp.vendor, vp.product
+               FROM cve_vendor_product vp
+              WHERE vp.cve_id = c.cve_id
+              ORDER BY vp.vendor_key ASC, vp.product_key_norm ASC
+              LIMIT 1
+           ) vp ON TRUE
+           LEFT JOIN risk_score rs ON rs.cve_id = c.cve_id
+           LEFT JOIN kev k ON k.cve_id = c.cve_id
+           CROSS JOIN LATERAL (
+             SELECT COALESCE(
+               c.raw->'metrics'->'cvssMetricV31'->0->'cvssData'->>'attackVector',
+               c.raw->'metrics'->'cvssMetricV30'->0->'cvssData'->>'attackVector',
+               c.raw->'impact'->'baseMetricV3'->'cvssV3'->>'attackVector'
+             ) AS vector
+           ) av
+          WHERE c.published_at IS NOT NULL
+            AND c.published_at >= now() - interval '14 days'
+       )
+       SELECT cve_id,
+              to_char(published_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS published_at,
+              cvss_base,
+              risk_score,
+              vendor,
+              product,
+              attack_vector,
+              kev
+         FROM windowed
+        WHERE rn <= 3
+        ORDER BY published_at DESC, cve_id ASC
+        LIMIT 42`
+    );
+    const pulseTotal = await this.db.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n
+         FROM cve
+        WHERE published_at IS NOT NULL
+          AND published_at >= now() - interval '14 days'`
+    );
+    const byDay = new Map(published.rows.map((row) => [row.day, row]));
+    const kevByDay = new Map(kev.rows.map((row) => [row.day, Number(row.n ?? 0)]));
+    const days = [];
+    const cursor = new Date();
+    const start = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth(), cursor.getUTCDate()));
+    start.setUTCDate(start.getUTCDate() - 29);
+    for (let i = 0; i < 30; i += 1) {
+      const day = new Date(start);
+      day.setUTCDate(start.getUTCDate() + i);
+      const key = day.toISOString().slice(0, 10);
+      const row = byDay.get(key);
+      days.push({
+        day: key,
+        published: Number(row?.published ?? 0),
+        critical: Number(row?.critical ?? 0),
+        network: Number(row?.network ?? 0),
+        adjacent: Number(row?.adjacent ?? 0),
+        local: Number(row?.local ?? 0),
+        physical: Number(row?.physical ?? 0),
+        kev: kevByDay.get(key) ?? 0
+      });
+    }
+    return {
+      generatedAt: new Date().toISOString(),
+      days,
+      pulseTotal: Number(pulseTotal.rows[0]?.n ?? 0),
+      pulse: pulse.rows.map((row) => ({
+        cveId: row.cve_id,
+        publishedAt: row.published_at,
+        cvss: row.cvss_base == null ? null : Number(row.cvss_base),
+        risk: row.risk_score == null ? null : Number(row.risk_score),
+        vendor: row.vendor,
+        product: row.product,
+        attackVector: row.attack_vector,
+        kev: Boolean(row.kev)
+      }))
     };
   }
 

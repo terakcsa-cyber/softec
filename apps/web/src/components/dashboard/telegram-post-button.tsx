@@ -21,7 +21,7 @@ const STATUS_PRESETS: { id: TrafficPreset; label: string; hint: string }[] = [
   { id: "yellow", label: "🟡 В работе", hint: "В работе — проводится анализ / устранение" },
   { id: "red", label: "🔴 Срочно", hint: "Срочно — требуется немедленное реагирование" },
   { id: "green", label: "🟢 Устранено", hint: "Устранено — патч применён / риск принят" },
-  { id: "white", label: "⚪ Не применимо", hint: "Не применимо — ПО отсутствует в инфраструктуре" }
+  { id: "white", label: "⚪ Не применимо", hint: "Не применимо — продукт не входит в область учёта" }
 ];
 const DEFAULT_STATUS = STATUS_PRESETS[0]!;
 
@@ -249,7 +249,7 @@ export function TelegramPostButton({
             className={cn(
               "inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs shadow-sm",
               configured
-                ? "border-sky-300/60 bg-sky-500/15 text-sky-100 hover:bg-sky-500/25 dark:border-sky-700/50"
+                ? "border-sky-700/30 bg-sky-500/10 text-sky-800 hover:bg-sky-500/15 dark:border-sky-700/50 dark:bg-sky-500/15 dark:text-sky-100 dark:hover:bg-sky-500/25"
                 : "border-slate-200 bg-white text-fg/50 dark:border-border dark:bg-black/25",
               (disabled || postMut.isPending || !configured) && "pointer-events-none opacity-50"
             )}
@@ -325,7 +325,7 @@ export function TelegramPostButton({
                 setPostBodyDirty(false);
               }}
               disabled={postMut.isPending}
-              placeholder="Например: В работе — ожидаем патч от вендора, затронуты 12 хостов"
+              placeholder="Например: в работе, ждём исправление от вендора"
               className="mt-1 w-full resize-y rounded-lg border border-border bg-black/5 px-2.5 py-2 text-xs text-fg placeholder:text-muted/70 dark:bg-white/5"
             />
 

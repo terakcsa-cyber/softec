@@ -1112,7 +1112,7 @@ export function Dashboard() {
           </div>
         </aside>
 
-        <main className="min-h-0 min-w-0 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
+        <main className="h-full min-h-0 min-w-0 overflow-y-auto overscroll-contain [scrollbar-width:thin]">
           {moduleKey === "dashboard" ? (
             <div className="glass rounded-2xl p-5 sm:p-6">
               <OverviewDashboardPanel
@@ -1151,7 +1151,7 @@ export function Dashboard() {
               />
             </div>
           ) : moduleKey === "voc" ? (
-            <div className="glass rounded-2xl p-5 sm:p-6">
+            <div className="glass flex h-full min-h-0 flex-col overflow-hidden rounded-2xl p-4">
               <VocHomePanel
                 variant="page"
                 onOpenCve={openDashboardModal}

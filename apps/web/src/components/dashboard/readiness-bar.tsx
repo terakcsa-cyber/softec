@@ -96,43 +96,73 @@ function fmtLeft(sec: number | null) {
 export function ReadinessBar({
   data,
   loading,
-  compact
+  compact,
+  appearance = "legacy"
 }: {
   data?: ReadinessPayload | null;
   loading?: boolean;
   compact?: boolean;
+  appearance?: "legacy" | "vc";
 }) {
+  const vc = appearance === "vc";
   const status = data?.status ?? (loading ? "syncing" : "stale");
   const targetPct = data?.progressPercent ?? (status === "ready" ? 100 : loading ? 12 : 0);
   const smoothPct = useSmoothPercent(targetPct);
   const leftSec = useCountdown(data?.etaAt, data?.etaSeconds);
   const etaText = status === "ready" ? "готово" : data?.etaLabel ?? fmtLeft(leftSec);
 
-  const tone =
-    status === "ready"
+  const tone = vc
+    ? status === "ready"
+      ? {
+          shell: "border-[color-mix(in_srgb,var(--vc-success)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-success)_10%,var(--vc-inset))]",
+          bar: "bg-[var(--vc-success)]",
+          chip: "text-[var(--vc-success-text)]",
+          track: "bg-[color-mix(in_srgb,var(--vc-success)_18%,transparent)]"
+        }
+      : status === "syncing"
+        ? {
+            shell: "border-[color-mix(in_srgb,var(--vc-primary)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-primary)_10%,var(--vc-inset))]",
+            bar: "bg-[var(--vc-primary)]",
+            chip: "text-[var(--vc-text)]",
+            track: "bg-[color-mix(in_srgb,var(--vc-primary)_18%,transparent)]"
+          }
+        : status === "degraded"
+          ? {
+              shell: "border-[color-mix(in_srgb,var(--vc-high)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-high)_10%,var(--vc-inset))]",
+              bar: "bg-[var(--vc-high)]",
+              chip: "text-[var(--vc-high)]",
+              track: "bg-[color-mix(in_srgb,var(--vc-high)_18%,transparent)]"
+            }
+          : {
+              shell: "border-[color-mix(in_srgb,var(--vc-critical)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-critical)_10%,var(--vc-inset))]",
+              bar: "bg-[var(--vc-critical)]",
+              chip: "text-[var(--vc-danger-text)]",
+              track: "bg-[color-mix(in_srgb,var(--vc-critical)_18%,transparent)]"
+            }
+    : status === "ready"
       ? {
           shell: "border-ok/35 bg-gradient-to-br from-ok/15 via-ok/5 to-transparent",
-          bar: "from-emerald-400 to-ok",
+          bar: "bg-gradient-to-r from-emerald-400 to-ok",
           chip: "text-ok",
           track: "bg-ok/15"
         }
       : status === "syncing"
         ? {
             shell: "border-accent/35 bg-gradient-to-br from-accent/15 via-accent/5 to-transparent",
-            bar: "from-sky-400 to-indigo-500",
+            bar: "bg-gradient-to-r from-sky-400 to-indigo-500",
             chip: "text-fg",
             track: "bg-accent/15"
           }
         : status === "degraded"
           ? {
               shell: "border-warn/35 bg-gradient-to-br from-warn/15 via-warn/5 to-transparent",
-              bar: "from-amber-400 to-orange-500",
+              bar: "bg-gradient-to-r from-amber-400 to-orange-500",
               chip: "text-warn",
               track: "bg-warn/15"
             }
           : {
               shell: "border-danger/35 bg-gradient-to-br from-danger/15 via-danger/5 to-transparent",
-              bar: "from-rose-400 to-red-500",
+              bar: "bg-gradient-to-r from-rose-400 to-red-500",
               chip: "text-danger",
               track: "bg-danger/15"
             };
@@ -168,27 +198,41 @@ export function ReadinessBar({
               <AlertTriangle className="h-4 w-4 shrink-0" />
             )}
             <span>{label}</span>
-            <span className="rounded-full border border-black/5 bg-white/70 px-2 py-0.5 font-mono text-[10px] tabular-nums text-fg/80 dark:border-white/10 dark:bg-black/30">
+            <span
+              className={cn(
+                "rounded-full border px-2 py-0.5 font-mono text-[10px] tabular-nums",
+                vc
+                  ? "border-[var(--vc-border)] bg-[var(--vc-surface)] text-[var(--vc-text)]"
+                  : "border-black/5 bg-white/70 text-fg/80 dark:border-white/10 dark:bg-black/30"
+              )}
+            >
               {Math.round(smoothPct)}%
             </span>
           </div>
-          <p className={cn("mt-1 text-xs text-fg/80", compact && "line-clamp-1")}>
+          <p className={cn("mt-1 text-xs", vc ? "text-[var(--vc-text)]" : "text-fg/80", compact && "line-clamp-1")}>
             {data?.headline ?? (loading ? "Проверяем свежесть источников…" : "Нет данных readiness")}
           </p>
           {!compact ? (
-            <p className="mt-0.5 text-[10px] text-muted">{phaseLabel(data?.phase, status)}</p>
+            <p className={cn("mt-0.5 text-[10px]", vc ? "text-[var(--vc-muted)]" : "text-muted")}>{phaseLabel(data?.phase, status)}</p>
           ) : null}
         </div>
 
         <div className="flex shrink-0 flex-col items-end gap-1 text-right">
-          <div className="inline-flex items-center gap-1.5 rounded-full border border-black/5 bg-white/70 px-2.5 py-1 text-[11px] font-medium text-fg/85 dark:border-white/10 dark:bg-black/30">
-            <Clock3 className="h-3.5 w-3.5 text-muted" />
+          <div
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium",
+              vc
+                ? "border-[var(--vc-border)] bg-[var(--vc-surface)] text-[var(--vc-text)]"
+                : "border-black/5 bg-white/70 text-fg/85 dark:border-white/10 dark:bg-black/30"
+            )}
+          >
+            <Clock3 className={cn("h-3.5 w-3.5", vc ? "text-[var(--vc-muted)]" : "text-muted")} />
             <span className="tabular-nums">{etaText}</span>
           </div>
           {finishLocal ? (
-            <div className="text-[10px] text-muted">ориентир ~{finishLocal}</div>
+            <div className={cn("text-[10px]", vc ? "text-[var(--vc-muted)]" : "text-muted")}>ориентир ~{finishLocal}</div>
           ) : !compact && data?.checkedAt ? (
-            <div className="text-[10px] text-muted">{new Date(data.checkedAt).toLocaleString()}</div>
+            <div className={cn("text-[10px]", vc ? "text-[var(--vc-muted)]" : "text-muted")}>{new Date(data.checkedAt).toLocaleString()}</div>
           ) : null}
         </div>
       </div>
@@ -197,7 +241,7 @@ export function ReadinessBar({
         <div className={cn("relative h-2.5 overflow-hidden rounded-full", tone.track)}>
           <div
             className={cn(
-              "absolute inset-y-0 left-0 rounded-full bg-gradient-to-r transition-[width] duration-500 ease-out",
+              "absolute inset-y-0 left-0 rounded-full transition-[width] duration-500 ease-out",
               tone.bar,
               status === "syncing" && "animate-pulse"
             )}
@@ -209,7 +253,7 @@ export function ReadinessBar({
             </div>
           ) : null}
         </div>
-        <div className="mt-1.5 flex items-center justify-between text-[10px] text-muted">
+        <div className={cn("mt-1.5 flex items-center justify-between text-[10px]", vc ? "text-[var(--vc-muted)]" : "text-muted")}>
           <span>
             {status === "ready"
               ? "Все ключевые источники свежие"
@@ -234,25 +278,40 @@ export function ReadinessBar({
                 className={cn(
                   "rounded-xl border px-2.5 py-2",
                   ok
-                    ? "border-ok/20 bg-white/55 dark:bg-black/20"
-                    : "border-danger/25 bg-danger/5"
+                    ? vc
+                      ? "border-[var(--vc-border)] bg-[var(--vc-surface)]"
+                      : "border-ok/20 bg-white/55 dark:bg-black/20"
+                    : vc
+                      ? "border-[color-mix(in_srgb,var(--vc-critical)_35%,transparent)] bg-[color-mix(in_srgb,var(--vc-critical)_10%,transparent)]"
+                      : "border-danger/25 bg-danger/5"
                 )}
                 title={s.lastActivity ?? undefined}
               >
                 <div className="flex items-center justify-between gap-2 text-[10px] font-medium">
                   <span className="uppercase tracking-wide">{s.source}</span>
-                  <span className="font-mono tabular-nums text-muted">{fmtLag(s.lagHours)}</span>
+                  <span className={cn("font-mono tabular-nums", vc ? "text-[var(--vc-muted)]" : "text-muted")}>{fmtLag(s.lagHours)}</span>
                 </div>
-                <div className={cn("mt-1.5 h-1 overflow-hidden rounded-full", ok ? "bg-ok/15" : "bg-danger/15")}>
+                <div
+                  className={cn(
+                    "mt-1.5 h-1 overflow-hidden rounded-full",
+                    ok
+                      ? vc
+                        ? "bg-[color-mix(in_srgb,var(--vc-success)_18%,transparent)]"
+                        : "bg-ok/15"
+                      : vc
+                        ? "bg-[color-mix(in_srgb,var(--vc-critical)_18%,transparent)]"
+                        : "bg-danger/15"
+                  )}
+                >
                   <div
                     className={cn(
                       "h-full rounded-full transition-[width] duration-500",
-                      ok ? "bg-ok" : "bg-danger/70"
+                      ok ? (vc ? "bg-[var(--vc-success)]" : "bg-ok") : vc ? "bg-[var(--vc-critical)]" : "bg-danger/70"
                     )}
                     style={{ width: `${Math.max(4, Math.min(100, sp))}%` }}
                   />
                 </div>
-                <div className="mt-1 flex justify-between text-[9px] text-muted">
+                <div className={cn("mt-1 flex justify-between text-[9px]", vc ? "text-[var(--vc-muted)]" : "text-muted")}>
                   <span className="tabular-nums">{Math.round(sp)}%</span>
                   <span className="tabular-nums">{s.count.toLocaleString()}</span>
                 </div>
@@ -263,7 +322,7 @@ export function ReadinessBar({
       )}
 
       {!compact && ((data?.blockingIssues?.length ?? 0) > 0 || (data?.warnings?.length ?? 0) > 0) && (
-        <ul className="mt-3 space-y-1 text-[11px] text-fg/75">
+        <ul className={cn("mt-3 space-y-1 text-[11px]", vc ? "text-[var(--vc-text)]" : "text-fg/75")}>
           {(data?.blockingIssues ?? []).slice(0, 4).map((i) => (
             <li key={i}>• {i}</li>
           ))}

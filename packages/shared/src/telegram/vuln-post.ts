@@ -3,8 +3,6 @@ import {
   isGenericEnrichmentTitle,
   stripEnrichmentBoilerplate
 } from "../ai/enrichment-display.js";
-import { defaultAttackFlowSteps } from "../cve/baseline-enrichment.js";
-
 export type VulnTelegramPostInput = {
   identifier: string;
   title: string;
@@ -14,16 +12,19 @@ export type VulnTelegramPostInput = {
   exploitation: string;
   status: string;
   attackFlow?: string[];
+  /** Последствия / ущерб — не пересказ сути. */
+  risks?: string[];
   recommendations: string[];
   sourceUrls: string[];
+  affectedVersions?: string[];
 };
 
 export function cvssSeverityLabel(score: number | null | undefined): { label: string; emoji: string } {
   if (score == null || !Number.isFinite(score)) return { label: "—", emoji: "⚪" };
-  if (score >= 9) return { label: "Critical", emoji: "🔴" };
-  if (score >= 7) return { label: "High", emoji: "🟠" };
-  if (score >= 4) return { label: "Medium", emoji: "🟡" };
-  return { label: "Low", emoji: "🟢" };
+  if (score >= 9) return { label: "Критический", emoji: "🔴" };
+  if (score >= 7) return { label: "Высокий", emoji: "🟠" };
+  if (score >= 4) return { label: "Средний", emoji: "🟡" };
+  return { label: "Низкий", emoji: "🟢" };
 }
 
 const HTML_ENTITY_MAP: Record<string, string> = {
@@ -202,6 +203,38 @@ function splitSentences(text: string, maxItems = 4): string[] {
     .slice(0, maxItems);
 }
 
+function formatAffectedVersions(versions: string[] | undefined): string {
+  const cleaned = (versions ?? []).map((item) => sanitizeTelegramText(item, { max: 80 })).filter(Boolean);
+  if (!cleaned.length) return "—";
+  return cleaned.slice(0, 6).join("; ");
+}
+
+/** Читаемый для руководства ход атаки: цепочка со стрелками + нумерованные шаги. */
+export function formatAttackFlowBlock(steps: string[] | undefined): string[] {
+  const cleaned = (steps ?? [])
+    .map((step) => sanitizeTelegramText(step, { max: 220 }))
+    .map((step) => step.replace(/^(условие|точка входа|слабое место|результат|impact|entry|weakness|condition)\s*:\s*/i, "").trim())
+    .filter((step) => step.length >= 3)
+    .filter((step) => !/инвентаризац|уточняется по инвентар/i.test(step))
+    .slice(0, 5);
+  if (!cleaned.length) {
+    return ["🔸 Ход атаки уточняется по открытым источникам"];
+  }
+  const labels = cleaned.map((step) => attackStepLabel(step));
+  const chain = labels.join(" → ");
+  const numbered = cleaned.map((step, index) => {
+    const mark = ["①", "②", "③", "④", "⑤"][index] ?? `${index + 1}.`;
+    return `${mark} ${step}${index < cleaned.length - 1 ? "\n   ↓" : ""}`;
+  });
+  return [`🔗 ${chain}`, "", ...numbered];
+}
+
+function attackStepLabel(step: string): string {
+  const before = step.split(/[:—–-]/)[0]?.trim() ?? step;
+  const label = before.length <= 48 ? before : `${before.slice(0, 45)}…`;
+  return sanitizeTelegramText(label, { max: 52 });
+}
+
 function bulletize(items: string[], min = 3, fallback?: string[]): string[] {
   const base = items.map((s) => sanitizeTelegramText(s, { max: 280 })).filter(Boolean);
   if (base.length >= min) return base.slice(0, 6);
@@ -225,13 +258,20 @@ export function formatVulnTelegramPost(input: VulnTelegramPostInput): string {
   const component = product !== "—" ? product : "—";
   const exploit = firstNonEmpty(input.exploitation);
   const summaryLines = splitSentences(description, 3);
-  const riskLines = bulletize(summaryLines, 2, [
-    "возможна компрометация затронутого приложения или сервиса",
-    "возможен отказ в обслуживании или нарушение стабильности компонента",
-    "требуется проверка применимости в локальной инфраструктуре"
-  ]);
+  const riskFallback = [
+    "утечка или несанкционированный доступ к данным",
+    "нарушение целостности или доступности затронутого продукта",
+    "эскалация воздействия при публичной эксплуатации"
+  ];
+  const riskSource = (input.risks ?? [])
+    .map((line) => sanitizeTelegramText(line, { max: 280 }))
+    .filter(Boolean)
+    .filter((line) => !summaryLines.some((essence) => sameTelegramLine(essence, line)));
+  const riskLines = bulletize(riskSource, 2, riskFallback).filter(
+    (line) => !summaryLines.some((essence) => sameTelegramLine(essence, line))
+  );
   const recommendationLines = bulletize(input.recommendations, 2, [
-    "проверить наличие затронутой версии в инфраструктуре",
+    "проверить, входит ли используемая версия в затронутый диапазон",
     "установить обновление или патч вендора",
     "проверить связанные продукты и встроенные зависимости"
   ]);
@@ -242,37 +282,39 @@ export function formatVulnTelegramPost(input: VulnTelegramPostInput): string {
       ? `🚩 Уязвимость в ${product}`
       : `🚩 Уязвимость ${ids.cveId !== "—" ? ids.cveId : ids.bduId !== "—" ? ids.bduId : sanitizeTelegramText(input.identifier)}`;
 
+  const essenceLead = summaryLines[0] || firstNonEmpty(description, title);
+  const attackBlock = formatAttackFlowBlock(input.attackFlow);
+
   const parts = [
     headline,
     "",
-    `ℹ️ ${firstNonEmpty(description, title)}`,
+    `ℹ️ ${essenceLead}`,
     "",
-    `🔸 BDU: ${ids.bduId}`,
+    "📋 Карточка:",
+    `🔸 БДУ: ${ids.bduId}`,
     `🔸 CVE: ${ids.cveId}`,
-    `🔸 CVSSv3: ${cvssV3}`,
-    `🔸 CVSSv4: —`,
-    `🔸 Уровень: ${level}`,
+    `🔸 Уровень: ${level} · CVSSv3 ${cvssV3}`,
     `🔸 Продукт: ${product}`,
-    `🔸 Компонент: ${component}`,
     `🔸 Тип: ${vulnType}`,
     `🔸 CWE: ${cwe}`,
-    `🔸 Затронутые версии: —`,
+    `🔸 Затронутые версии: ${formatAffectedVersions(input.affectedVersions)}`,
     `🔸 Эксплуатация: ${exploit}`,
-    `🔸 Привилегии: —`,
-    `🔸 Взаимодействие с пользователем: —`,
     "",
     "🔝 Суть уязвимости:",
     ...summaryLines.map((line) => `🔸 ${line}`),
     "",
+    "🧭 Ход атаки:",
+    ...attackBlock,
+    "",
     "⚠️ Возможные риски:",
     ...riskLines.map((line) => `🔸 ${line}`),
     "",
-    "🛠 Рекомендации:",
+    "🛠 Что сделать:",
     ...recommendationLines.map((line) => `🔸 ${line}`),
     "",
-    `✅ ${sanitizeTelegramText(input.status, { max: 360 }) || "Согласно процессу уязвимость взята в работу."}`,
+    `✅ Статус: ${sanitizeTelegramText(input.status, { max: 360 }) || "Согласно процессу уязвимость взята в работу."}`,
     "",
-    "🌐 Дополнительная информация:",
+    "🌐 Источники:",
     ...(links.length > 0 ? links : ["—"])
   ];
 
@@ -349,6 +391,21 @@ function extractAttackFlow(ai: Record<string, unknown> | null): string[] {
   if (Array.isArray(ai.attackFlow)) {
     return ai.attackFlow.map(String).map((s) => s.trim()).filter(Boolean);
   }
+  const attack = ai.attack;
+  if (attack && typeof attack === "object" && !Array.isArray(attack)) {
+    const stages = Array.isArray((attack as { stages?: unknown }).stages)
+      ? ((attack as { stages: unknown[] }).stages)
+      : [];
+    const fromStages = stages.flatMap((stage) => {
+      if (!stage || typeof stage !== "object") return [];
+      const row = stage as { title?: unknown; detail?: unknown };
+      const title = typeof row.title === "string" ? row.title.trim() : "";
+      const detail = typeof row.detail === "string" ? row.detail.trim() : "";
+      if (!title && !detail) return [];
+      return [title && detail ? `${title}: ${detail}` : title || detail];
+    });
+    if (fromStages.length) return fromStages;
+  }
   const graph = ai.graph;
   if (graph && typeof graph === "object" && !Array.isArray(graph)) {
     const g = graph as Record<string, unknown>;
@@ -411,24 +468,19 @@ export function buildVulnPostFromAiJson(
       ? aiTitle
       : ctx.fallbackTitle?.trim() || `Уязвимость ${identifier}`;
 
-  const descParts: string[] = [];
-  const fromAi = pickPostNarrative(
-    typeof ai?.description === "string" ? ai.description : null,
-    typeof ai?.summary === "string" ? ai.summary : null
-  );
-  if (fromAi) descParts.push(fromAi);
-  else if (ctx.fallbackDescription?.trim()) {
-    const nvd = stripEnrichmentBoilerplate(ctx.fallbackDescription.trim()) || ctx.fallbackDescription.trim();
-    descParts.push(nvd);
-  }
-  if (Array.isArray(ai?.consequences)) {
-    const c = ai.consequences
-      .map(String)
-      .filter(Boolean)
-      .filter((line) => !/^Возможная реализация класса:/i.test(line));
-    if (c.length) descParts.push(c.join(" "));
-  }
-  const description = descParts.join("\n\n") || "Описание уточняется по данным NVD/БДУ.";
+  const pointNote = typeof ai?.pointNote === "string" ? ai.pointNote : "";
+  const isPointFacture = /фактур/i.test(pointNote) || Array.isArray(ai?.facts);
+  const fromAi = isPointFacture
+    ? ""
+    : pickPostNarrative(
+        typeof ai?.description === "string" ? ai.description : null,
+        typeof ai?.summary === "string" ? ai.summary : null
+      );
+  const nvdFallback = ctx.fallbackDescription?.trim()
+    ? stripEnrichmentBoilerplate(ctx.fallbackDescription.trim()) || ctx.fallbackDescription.trim()
+    : "";
+  const description = fromAi || nvdFallback || "Описание уточняется по данным NVD/БДУ.";
+  const risks = collectTelegramRisks(ai);
 
   const aiClass =
     typeof ai?.vulnerabilityClass === "string" && ai.vulnerabilityClass.trim()
@@ -453,7 +505,7 @@ export function buildVulnPostFromAiJson(
   } else if (ctx.fallbackExploitation?.trim()) {
     exploitation = ctx.fallbackExploitation.trim();
   } else {
-    exploitation = "Требуется локальный/сетевой контекст — уточняется по инвентаризации";
+    exploitation = "Статус эксплуатации уточняется";
   }
   if (ctx.epssScore != null && Number.isFinite(ctx.epssScore)) {
     exploitation += ` · EPSS ${(ctx.epssScore * 100).toFixed(2)}%`;
@@ -461,10 +513,13 @@ export function buildVulnPostFromAiJson(
 
   const status = normalizeTelegramUserStatus(ctx.userStatus);
   const attackFlowFromAi = extractAttackFlow(ai);
+  const fallbackFlow = (ctx.fallbackAttackFlow ?? []).map(String).filter(Boolean);
   const attackFlow =
     attackFlowFromAi.length > 0
       ? attackFlowFromAi
-      : (ctx.fallbackAttackFlow ?? defaultAttackFlowSteps()).map(String).filter(Boolean);
+      : fallbackFlow.length > 0
+        ? fallbackFlow
+        : [];
 
   const remediation = [
     ...(Array.isArray(ai?.remediation) ? ai.remediation.map(String) : []),
@@ -504,10 +559,88 @@ export function buildVulnPostFromAiJson(
     exploitation,
     status,
     attackFlow,
+    risks,
     recommendations:
       uniqRem.length > 0
         ? uniqRem
-        : ["уточнить затронутые версии ПО в инвентаризации", "применить обновление / компенсирующие меры по рекомендации вендора"],
+        : [
+            "проверить, входит ли используемая версия продукта в затронутый диапазон",
+            "установить обновление или патч по рекомендации вендора"
+          ],
     sourceUrls
   };
+}
+
+function sameTelegramLine(left: string, right: string): boolean {
+  const norm = (value: string) =>
+    value
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}\s]/gu, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  const a = norm(left);
+  const b = norm(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.length > 40 && b.includes(a.slice(0, 40))) return true;
+  if (b.length > 40 && a.includes(b.slice(0, 40))) return true;
+  return false;
+}
+
+function looksLikeRiskLine(line: string): boolean {
+  return /утечк|компромет|доступ к данн|произвольн|удалённ|удаленн|исполнен|отказ в обслуживан|DoS|RCE|эскалац|захват|подмен|нарушен|чтение файл|запись файл|безопасност/i.test(
+    line
+  );
+}
+
+function looksLikeFactNotRisk(line: string): boolean {
+  return /KEV|EPSS|dateAdded|добавлен|перцентил|процентил|BOD\s*\d|бэкпорт|backport|исправленн|закрывающ|верси/i.test(
+    line
+  );
+}
+
+function collectTelegramRisks(ai: Record<string, unknown> | null): string[] {
+  if (!ai) return [];
+  const out: string[] = [];
+  const push = (value: unknown) => {
+    const line = String(value ?? "").trim();
+    if (!line || line.length < 12 || line.length > 280) return;
+    if (looksLikeFactNotRisk(line) && !looksLikeRiskLine(line)) return;
+    if (!looksLikeRiskLine(line) && !/^Возможн/i.test(line)) return;
+    if (out.some((item) => sameTelegramLine(item, line))) return;
+    out.push(line);
+  };
+
+  const attack = ai.attack;
+  if (attack && typeof attack === "object" && !Array.isArray(attack)) {
+    const stages = Array.isArray((attack as { stages?: unknown }).stages)
+      ? ((attack as { stages: unknown[] }).stages)
+      : [];
+    for (const stage of stages) {
+      if (!stage || typeof stage !== "object") continue;
+      const row = stage as { role?: unknown; title?: unknown; detail?: unknown };
+      if (row.role !== "impact") continue;
+      push([row.title, row.detail].filter(Boolean).join(": "));
+      push(row.detail);
+    }
+  }
+
+  for (const line of extractAttackFlow(ai)) {
+    if (/результат|impact|чтение|запись|исполнен|компромет|доступ/i.test(line)) push(line);
+  }
+
+  if (Array.isArray(ai.consequences)) {
+    for (const item of ai.consequences) push(item);
+  }
+  if (Array.isArray(ai.risks)) {
+    for (const item of ai.risks) push(item);
+  }
+
+  const ex = ai.exploitation;
+  if (ex && typeof ex === "object" && !Array.isArray(ex)) {
+    const notes = (ex as { exploitNotes?: unknown }).exploitNotes;
+    if (typeof notes === "string" && looksLikeRiskLine(notes)) push(notes);
+  }
+
+  return out.slice(0, 6);
 }

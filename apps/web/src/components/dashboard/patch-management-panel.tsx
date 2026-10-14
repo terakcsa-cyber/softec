@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import * as Dialog from "@radix-ui/react-dialog";
-import { Bandage, ExternalLink, Loader2, RefreshCw, Volume2 } from "lucide-react";
+import { Bandage, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { apiFetch } from "@/lib/api-fetch";
 import { cn } from "../ui/cn";
 
@@ -38,33 +38,6 @@ function fmtPubDate(isoOrRfc: string | null): string {
   });
 }
 
-function beepPatch() {
-  try {
-    const Ctx = (window.AudioContext ||
-      (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext) as
-      | typeof AudioContext
-      | undefined;
-    if (!Ctx) return;
-    const ctx = new Ctx();
-    const o = ctx.createOscillator();
-    const g = ctx.createGain();
-    o.type = "sine";
-    o.frequency.value = 740;
-    g.gain.value = 0.0001;
-    o.connect(g);
-    g.connect(ctx.destination);
-    o.start();
-    const now = ctx.currentTime;
-    g.gain.setValueAtTime(0.0001, now);
-    g.gain.linearRampToValueAtTime(0.07, now + 0.02);
-    g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
-    o.stop(now + 0.18);
-    o.onended = () => void ctx.close().catch(() => undefined);
-  } catch {
-    // ignore
-  }
-}
-
 export function PatchManagementPanel({
   onOpenCve
 }: {
@@ -72,12 +45,7 @@ export function PatchManagementPanel({
   onOpenCve?: (cveId: string) => void;
 }) {
   const [channel, setChannel] = useState<string>("");
-  const [toast, setToast] = useState<{ title: string; body?: string } | null>(null);
-  const toastTimer = useRef<number | null>(null);
-  const [soundEnabled, setSoundEnabled] = useState(true);
   const [detailId, setDetailId] = useState<string | null>(null);
-
-  const storageKey = "vip:patch:lastSeenId";
 
   const feedQuery = useQuery({
     queryKey: ["patch", "telegram", "feed"],
@@ -104,55 +72,6 @@ export function PatchManagementPanel({
     return itemsRaw.filter((it) => (channel ? it.channel.slug === channel : true));
   }, [itemsRaw, channel]);
 
-  const newest = itemsRaw.length ? itemsRaw[0] : null;
-
-  useEffect(() => {
-    if (!newest?.id) return;
-    // Global notifier handles notifications across modules.
-    try {
-      if (localStorage.getItem("vip:live:global") === "1") return;
-    } catch {
-      // ignore
-    }
-    let last = "";
-    try {
-      last = localStorage.getItem(storageKey) ?? "";
-    } catch {
-      last = "";
-    }
-    // First load: mark without notifying.
-    if (!last) {
-      try {
-        localStorage.setItem(storageKey, newest.id);
-      } catch {
-        // ignore
-      }
-      return;
-    }
-    if (last === newest.id) return;
-
-    try {
-      localStorage.setItem(storageKey, newest.id);
-    } catch {
-      // ignore
-    }
-
-    setToast({
-      title: "Patch: новая публикация",
-      body: newest.title || `@${newest.channel.slug}`
-    });
-    if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    toastTimer.current = window.setTimeout(() => setToast(null), 7000);
-
-    if (soundEnabled) beepPatch();
-  }, [newest?.id, newest?.title, newest?.channel.slug, soundEnabled]);
-
-  useEffect(() => {
-    return () => {
-      if (toastTimer.current) window.clearTimeout(toastTimer.current);
-    };
-  }, []);
-
   return (
     <div className="space-y-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -163,23 +82,10 @@ export function PatchManagementPanel({
           </div>
           <p className="mt-1 max-w-3xl text-[12px] leading-relaxed text-muted">
             Лента новостей и апдейтов из Telegram‑каналов по ИБ. Парсинг идёт по публичным страницам{" "}
-            <span className="font-mono text-[11px] text-fg/85">t.me/s/…</span> (как в модуле ФСТЭК). При появлении новой записи —
-            уведомление внизу справа.
+            <span className="font-mono text-[11px] text-fg/85">t.me/s/…</span> (как в модуле ФСТЭК). Новые записи приходят в колокольчик сверху.
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <button
-            type="button"
-            title={soundEnabled ? "Звук: включён" : "Звук: выключен"}
-            onClick={() => setSoundEnabled((v) => !v)}
-            className={cn(
-              "inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-fg/90 hover:bg-slate-100",
-              "dark:border-border dark:bg-black/20 dark:hover:bg-black/35"
-            )}
-          >
-            <Volume2 className={cn("h-3.5 w-3.5", !soundEnabled && "opacity-40")} />
-            {soundEnabled ? "Звук" : "Без звука"}
-          </button>
           <button
             type="button"
             onClick={() => void feedQuery.refetch()}
@@ -302,26 +208,6 @@ export function PatchManagementPanel({
           </article>
         ))}
       </div>
-
-      {toast ? (
-        <div className="pointer-events-none fixed bottom-4 right-4 z-[60] w-[min(420px,calc(100vw-2rem))]">
-          <div className="pointer-events-auto rounded-2xl border border-slate-200/80 bg-white/95 p-4 shadow-2xl backdrop-blur dark:border-white/[0.08] dark:bg-black/70">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <div className="text-xs font-semibold text-fg/95">{toast.title}</div>
-                {toast.body ? <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-muted">{toast.body}</div> : null}
-              </div>
-              <button
-                type="button"
-                onClick={() => setToast(null)}
-                className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-fg/80 hover:bg-slate-50 dark:border-border dark:bg-black/20 dark:hover:bg-black/35"
-              >
-                Ок
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       <Dialog.Root
         open={detailId != null}

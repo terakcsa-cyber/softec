@@ -10,11 +10,16 @@ const CHANNELS: PatchChannel[] = [
   { slug: "bizone_channel", title: "BI.ZONE" },
   { slug: "ZerodayAlert", title: "0day Alert" },
   { slug: "SecLabNews", title: "SecurityLab.ru" },
-  { slug: "fstecru", title: "Новости информационной безопасности" },
+  /** Публичный канал ФСТЭК — в Патчах, без тостов в колокольчик. */
+  { slug: "fstecru", title: "ФСТЭК" },
   { slug: "easy_infosec_tg", title: "Easy InfoSec" },
   { slug: "cyberok_news", title: "SyberOK_News" },
   { slug: "security_kz", title: "SecuriXy.kz" }
 ];
+
+/** Сколько свежих постов держим с каждого канала до общего лимита — чтобы ФСТЭК не вытесняли. */
+const PER_CHANNEL_KEEP = 16;
+const FEED_LIMIT = 160;
 
 type FeedItem = {
   id: string;
@@ -88,24 +93,39 @@ async function fetchChannel(channel: PatchChannel): Promise<{ url: string; items
   return { url, items };
 }
 
+function byPubDateDesc(a: FeedItem, b: FeedItem) {
+  const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
+  const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
+  return tb - ta;
+}
+
+function mergeChannelFeeds(batches: FeedItem[][]): FeedItem[] {
+  const reserved: FeedItem[] = [];
+  const overflow: FeedItem[] = [];
+  for (const batch of batches) {
+    const sorted = [...batch].sort(byPubDateDesc);
+    reserved.push(...sorted.slice(0, PER_CHANNEL_KEEP));
+    overflow.push(...sorted.slice(PER_CHANNEL_KEEP));
+  }
+  reserved.sort(byPubDateDesc);
+  if (reserved.length >= FEED_LIMIT) return reserved.slice(0, FEED_LIMIT);
+  overflow.sort(byPubDateDesc);
+  return [...reserved, ...overflow].slice(0, FEED_LIMIT);
+}
+
 export async function GET() {
   try {
     const results = await Promise.all(CHANNELS.map((c) => fetchChannel(c)));
     const errors = results
       .filter((r): r is { url: string; error: string } => "error" in r)
       .map((e) => ({ url: e.url, error: e.error }));
-    const items = results
+    const batches = results
       .filter((r): r is { url: string; items: FeedItem[] } => "items" in r)
-      .flatMap((r) => r.items);
-
-    items.sort((a, b) => {
-      const ta = a.pubDate ? new Date(a.pubDate).getTime() : 0;
-      const tb = b.pubDate ? new Date(b.pubDate).getTime() : 0;
-      return tb - ta;
-    });
+      .map((r) => r.items);
+    const items = mergeChannelFeeds(batches);
 
     return NextResponse.json({
-      items: items.slice(0, 120),
+      items,
       source: {
         fetchedAt: new Date().toISOString(),
         kind: "telegram_multi" as const,

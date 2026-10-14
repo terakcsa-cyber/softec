@@ -63,9 +63,9 @@ export function VocQueueRow({
           : "border-border bg-white hover:border-fg/15 hover:bg-slate-50/80 dark:bg-black/20 dark:hover:bg-white/[0.03]"
       )}
     >
-      <div className="px-3.5 py-3 pl-4">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+      <div className="px-3 py-2 pl-3.5">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
             {research.cveId ? (
               <IdButton label={research.cveId} onClick={() => onOpenCve?.(research.cveId!)} />
             ) : null}
@@ -76,50 +76,48 @@ export function VocQueueRow({
               <span className="font-mono text-[11px] text-fg/70">{row.ident}</span>
             ) : null}
           </div>
-          <span
-            className={cn(
-              "shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
-              row.when === "просрочен"
-                ? "border-danger/30 bg-danger/10 text-danger"
-                : decision
-                  ? "border-accent/30 bg-accent/10 text-fg/80"
-                  : "border-transparent text-muted"
-            )}
-          >
-            {decision || row.when || (row.ours ? "контур" : "очередь")}
-          </span>
+          <div className="flex shrink-0 items-center gap-1">
+            <span
+              className={cn(
+                "rounded border px-1.5 py-0.5 text-[10px] font-medium tabular-nums",
+                row.when === "просрочен"
+                  ? "border-danger/30 bg-danger/10 text-danger"
+                  : decision
+                    ? "border-accent/30 bg-accent/10 text-fg/80"
+                    : "border-transparent text-muted"
+              )}
+            >
+              {decision || row.when || (row.ours ? "контур" : "очередь")}
+            </span>
+            {canOpen ? (
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openPrimary();
+                }}
+                className="inline-flex items-center gap-0.5 rounded border border-border px-1.5 py-0.5 text-[10px] font-medium text-fg/80 hover:border-accent/40 hover:text-fg"
+              >
+                Карточка
+                <ArrowUpRight className="h-3 w-3" />
+              </button>
+            ) : null}
+          </div>
         </div>
 
-        <div className="mt-1.5 text-[13px] font-semibold leading-snug tracking-tight text-fg/95">{row.product}</div>
-        <div className="mt-0.5 text-[11px] font-medium text-fg/70">{row.phrase}</div>
+        <div className="mt-1 truncate text-[13px] font-semibold tracking-tight text-fg/95">{row.product}</div>
         {row.summary ? (
-          <p className="mt-1.5 line-clamp-2 text-[12px] leading-relaxed text-fg/75">{row.summary}</p>
-        ) : (
-          <p className="mt-1.5 text-[12px] leading-relaxed text-muted">Короткого описания в ленте нет. Откройте карточку.</p>
-        )}
-
-        <div className="mt-2 flex items-end justify-between gap-3">
-          <div className="flex min-w-0 flex-wrap gap-1">
-            {row.evidence.map((chip) => (
+          <p className="mt-0.5 line-clamp-2 text-[12px] leading-snug text-fg/70">{row.summary}</p>
+        ) : null}
+        {row.evidence.length ? (
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {row.evidence.slice(0, 4).map((chip) => (
               <span key={chip} className={cn("rounded border px-1.5 py-0.5 text-[10px] font-medium", vocChipClass(chipTone(chip)))}>
                 {chip}
               </span>
             ))}
           </div>
-          {canOpen ? (
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                openPrimary();
-              }}
-              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-white px-2 py-1 text-[11px] font-medium text-fg/85 hover:border-accent/40 hover:text-fg dark:bg-black/30"
-            >
-              Карточка
-              <ArrowUpRight className="h-3 w-3" />
-            </button>
-          ) : null}
-        </div>
+        ) : null}
       </div>
     </div>
   );

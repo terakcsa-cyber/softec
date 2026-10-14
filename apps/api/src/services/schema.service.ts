@@ -198,6 +198,31 @@ export class SchemaService implements OnModuleInit {
     await this.db.query(
       `CREATE INDEX IF NOT EXISTS cve_exploit_signal_last_seen_idx ON cve_exploit_signal (last_seen_at DESC)`
     );
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS cve_context_fact (
+        cve_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        fact_type TEXT NOT NULL,
+        title TEXT,
+        detail TEXT,
+        url TEXT,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (cve_id, source, fact_type)
+      )`
+    );
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS cve_context_scan (
+        cve_id TEXT PRIMARY KEY,
+        scanned_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      )`
+    );
+    await this.db.query(
+      `CREATE TABLE IF NOT EXISTS context_source_state (
+        source TEXT PRIMARY KEY,
+        refreshed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        detail TEXT
+      )`
+    );
 
     await this.db.query(
       `CREATE TABLE IF NOT EXISTS cve_exploit_intel (

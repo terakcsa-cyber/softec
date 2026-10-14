@@ -13,7 +13,8 @@ const BLOCKED_ROOTS = new Set([
   "readiness",
   "reconciliation",
   "updates",
-  "tls"
+  "tls",
+  "vc-patches"
 ]);
 
 type PersistEnvelope = {

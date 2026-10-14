@@ -7,10 +7,12 @@ import {
   extractNvdExploitationHint,
   extractNvdVulnerabilityClass,
   formatVulnTelegramPost,
+  matureTelegramPostWithDeepSeek,
   normalizeTelegramUserStatus,
   parseAiOutputJsonLoose,
   resolveBduCardEnrichment,
-  resolveCveCardEnrichment
+  resolveCveCardEnrichment,
+  type VulnTelegramPostInput
 } from "@vuln-intel/shared";
 import { DbService } from "./db.service.js";
 import { IntegrationSettingsService } from "./integration-settings.service.js";
@@ -147,15 +149,38 @@ export class TelegramPostService {
   }
 
   async previewCve(cveId: string, userStatus: string) {
-    const input = await this.buildCvePostInput(cveId, userStatus);
+    const draft = await this.buildCvePostInput(cveId, userStatus);
+    const input = await this.maturePost(draft.input, draft.extras);
     const text = formatVulnTelegramPost(input);
     return { identifier: input.identifier, text, previewLength: text.length };
   }
 
   async previewBdu(bduId: string, userStatus: string) {
-    const input = await this.buildBduPostInput(bduId, userStatus);
+    const draft = await this.buildBduPostInput(bduId, userStatus);
+    const input = await this.maturePost(draft.input, draft.extras);
     const text = formatVulnTelegramPost(input);
     return { identifier: input.identifier, text, previewLength: text.length };
+  }
+
+  private async maturePost(
+    input: VulnTelegramPostInput,
+    extras?: {
+      productHint?: string | null;
+      facts?: string[];
+      attackFlow?: string[];
+      affectedVersions?: string[];
+    }
+  ) {
+    const llm = await this.integration.getDigestLlmConfig();
+    const matured = await matureTelegramPostWithDeepSeek({ input, llm, extras });
+    if (matured.ok) return matured.input;
+    if (matured.reason === "failed") {
+      this.logger.warn(`telegram.post DeepSeek mature failed for ${input.identifier}`);
+    }
+    return {
+      ...input,
+      affectedVersions: extras?.affectedVersions?.length ? extras.affectedVersions : input.affectedVersions
+    };
   }
 
   private async buildCvePostInput(cveId: string, userStatus: string) {
@@ -231,7 +256,14 @@ export class TelegramPostService {
       if (s && s.length > 12 && s.length < 400) extraRemediation.push(`${a.title}: ${s}`);
     }
 
-    return buildVulnPostFromAiJson(id, ai, {
+    const facts = Array.isArray(ai.facts) ? ai.facts.map(String).filter(Boolean) : [];
+    const attackFlow = Array.isArray(ai.attackFlow) ? ai.attackFlow.map(String) : [];
+    const affectedVersions = Array.isArray(ai.affectedVersions)
+      ? ai.affectedVersions.map(String).filter(Boolean)
+      : Array.isArray(ai.fixedVersions)
+        ? ai.fixedVersions.map(String).filter(Boolean)
+        : [];
+    const input = buildVulnPostFromAiJson(id, ai, {
       userStatus: status,
       cvssScore: row.cvss_base,
       exploitKnown: row.exploit_known,
@@ -239,15 +271,25 @@ export class TelegramPostService {
       fallbackDescription: extractNvdCveDescription(row.raw),
       fallbackTitle: productHint ? `${id} — ${productHint}` : null,
       fallbackVulnerabilityClass: extractNvdVulnerabilityClass(row.raw),
-      fallbackAttackFlow: Array.isArray(ai.attackFlow) ? ai.attackFlow.map(String) : [],
+      fallbackAttackFlow: attackFlow,
       fallbackExploitation: extractNvdExploitationHint(row.raw, row.exploit_known),
       extraLinks: links,
       extraRemediation
     });
+    return {
+      input: { ...input, affectedVersions: affectedVersions.length ? affectedVersions : undefined },
+      extras: {
+        productHint,
+        facts,
+        attackFlow,
+        affectedVersions
+      }
+    };
   }
 
   async postCve(cveId: string, userStatus: string, messageText?: string) {
-    const input = await this.buildCvePostInput(cveId, userStatus);
+    const draft = await this.buildCvePostInput(cveId, userStatus);
+    const input = messageText?.trim() ? draft.input : await this.maturePost(draft.input, draft.extras);
     return this.publish(input, messageText);
   }
 
@@ -318,7 +360,9 @@ export class TelegramPostService {
       }
     }
 
-    return buildVulnPostFromAiJson(`BDU:${id}`, ai, {
+    const attackFlow = Array.isArray(ai.attackFlow) ? ai.attackFlow.map(String) : [];
+    const productHint = row.software_names?.trim() || row.name?.trim() || null;
+    const input = buildVulnPostFromAiJson(`BDU:${id}`, ai, {
       userStatus: status,
       cvssScore: row.cvss_score,
       exploitKnown: row.has_exploit,
@@ -327,22 +371,32 @@ export class TelegramPostService {
       fallbackVulnerabilityClass:
         row.severity?.trim() ||
         (linkedRaw ? extractNvdVulnerabilityClass(linkedRaw) : null),
-      fallbackAttackFlow: Array.isArray(ai.attackFlow) ? ai.attackFlow.map(String) : [],
+      fallbackAttackFlow: attackFlow,
       fallbackExploitation:
         row.exploit_status?.trim() ||
         (linkedRaw ? extractNvdExploitationHint(linkedRaw, row.has_exploit) : null),
       extraLinks: links,
       extraRemediation
     });
+    return {
+      input,
+      extras: {
+        productHint,
+        facts: [],
+        attackFlow,
+        affectedVersions: []
+      }
+    };
   }
 
   async postBdu(bduId: string, userStatus: string, messageText?: string) {
-    const input = await this.buildBduPostInput(bduId, userStatus);
+    const draft = await this.buildBduPostInput(bduId, userStatus);
+    const input = messageText?.trim() ? draft.input : await this.maturePost(draft.input, draft.extras);
     return this.publish(input, messageText);
   }
 
   private resolvePublishText(
-    input: ReturnType<typeof buildVulnPostFromAiJson>,
+    input: VulnTelegramPostInput,
     messageText?: string
   ): string {
     const override = messageText?.trim();
@@ -355,7 +409,7 @@ export class TelegramPostService {
     return formatVulnTelegramPost(input);
   }
 
-  private async publish(input: ReturnType<typeof buildVulnPostFromAiJson>, messageText?: string) {
+  private async publish(input: VulnTelegramPostInput, messageText?: string) {
     const text = this.resolvePublishText(input, messageText);
     const sent = await this.sendTelegramMessage(text);
     try {

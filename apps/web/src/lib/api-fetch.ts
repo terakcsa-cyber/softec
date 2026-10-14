@@ -45,7 +45,8 @@ async function doRefresh(): Promise<boolean> {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify({ refreshToken: refresh }),
-      cache: "no-store"
+      cache: "no-store",
+      signal: AbortSignal.timeout(8_000)
     });
     if (res.status === 401 || res.status === 403) {
       // Definitive auth failure — drop session.

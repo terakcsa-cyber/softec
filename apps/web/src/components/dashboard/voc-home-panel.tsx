@@ -19,14 +19,13 @@ import { buildTgCriticalRows, isWithinLast24h, type TgCveIntel, type TgFeedRespo
 import { scoreTgForVoc } from "@/lib/voc-scoring-client";
 import { applyWatchlistBoostClient } from "@/lib/voc-watchlist-client";
 import { fetchVocWatchlist } from "@/lib/voc-watchlist-api";
-import { buildDeskRows, deskResearch, deskStats, filterDeskRows, type DeskFilter, type DeskRow } from "@/lib/voc-desk";
+import { buildDeskRows, deskFacts, deskResearch, deskStats, filterDeskRows, type DeskFilter, type DeskRow } from "@/lib/voc-desk";
 import { VocQueueRow } from "./voc-queue-row";
 import { VocWatchlistPanel } from "./voc-watchlist-panel";
 import { VocCasesPanel } from "./voc-cases-panel";
 import { VocShiftPanel } from "./voc-shift-panel";
 import { buildCaseRefMap, createVocCaseFromRef, fetchVocCases, type VocCaseRow } from "@/lib/voc-case-api";
 import { isSlaBreached } from "@/lib/voc-case-client";
-import { vocChipClass } from "@/lib/voc-queue-context";
 
 export function VocHomePanel({
   onOpenCve,
@@ -298,49 +297,67 @@ export function VocHomePanel({
     { id: "bdu" as const, label: "БДУ", hint: "на контуре", value: stats.bdu, danger: false }
   ];
 
+  const facts = selected ? deskFacts(selected) : [];
+
   return (
-    <section className="space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-base font-semibold tracking-tight text-fg/95">Стол смены</h2>
-          <p className="mt-1 max-w-2xl text-[12px] leading-relaxed text-muted">
-            Под каждой уязвимостью короткое описание. Идентификатор или «Карточка» открывают исследование.
-            J/K по списку, Enter — карточка, 1–4 — решение.
-          </p>
+    <section className="flex h-full min-h-0 flex-col gap-3">
+      <div className="flex shrink-0 items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold tracking-tight text-fg/95">Стол смены</h2>
+          <p className="truncate text-[11px] text-muted">J/K список, Enter карточка, 1–4 решение</p>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            void queueQuery.refetch();
-            void tgFeedQuery.refetch();
-            void tgTriageQuery.refetch();
-            void casesQuery.refetch();
-          }}
-          disabled={refreshing}
-          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-[11px]"
-        >
-          {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-          Обновить
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setFilter((current) => (current === "history" ? "desk" : "history"))}
+            className={cn(
+              "rounded-md border px-2.5 py-1.5 text-[11px]",
+              filter === "history" ? "border-accent/40 bg-accent/10" : "border-border text-muted"
+            )}
+          >
+            История
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowSetup((value) => !value)}
+            className="rounded-md border border-border px-2.5 py-1.5 text-[11px] text-muted"
+          >
+            {showSetup ? "Скрыть контур" : "Контур"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void queueQuery.refetch();
+              void tgFeedQuery.refetch();
+              void tgTriageQuery.refetch();
+              void casesQuery.refetch();
+            }}
+            disabled={refreshing}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-[11px]"
+          >
+            {refreshing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+            Обновить
+          </button>
+        </div>
       </div>
 
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid shrink-0 grid-cols-3 gap-2">
         {cards.map((card) => (
           <button
             key={card.id}
             type="button"
+            title={card.hint}
             onClick={() => setFilter((current) => (current === card.id ? "desk" : card.id))}
             className={cn(
-              "rounded-lg border px-3 py-2.5 text-left",
+              "flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left",
               filter === card.id ? "border-accent/40 bg-accent/10" : "border-border bg-white dark:bg-black/20",
               card.danger && filter !== card.id && "border-danger/30"
             )}
           >
-            <div className="text-[10px] text-muted">{card.label}</div>
-            <div className={cn("text-xl font-semibold tabular-nums", card.danger && "text-danger")}>
+            <span className="text-[11px] text-muted">{card.label}</span>
+            <span className={cn("text-lg font-semibold tabular-nums leading-none", card.danger && "text-danger")}>
               <LiveNumber value={card.value} />
-            </div>
-            <div className="text-[10px] text-muted">{card.hint}</div>
+            </span>
           </button>
         ))}
       </div>
@@ -354,22 +371,15 @@ export function VocHomePanel({
         />
       ) : null}
 
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-[11px] text-muted">{filter === "history" ? "Закрытые решения" : "На столе"}</div>
-        <button
-          type="button"
-          onClick={() => setFilter((current) => (current === "history" ? "desk" : "history"))}
-          className={cn(
-            "rounded-md border px-2.5 py-1 text-[11px]",
-            filter === "history" ? "border-accent/40 bg-accent/10" : "border-border text-muted"
-          )}
-        >
-          История
-        </button>
-      </div>
+      {showSetup ? (
+        <div className="max-h-56 shrink-0 space-y-4 overflow-y-auto rounded-lg border border-border p-3">
+          <VocWatchlistPanel />
+          <VocShiftPanel />
+        </div>
+      ) : null}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(280px,0.8fr)]">
-        <div className="max-h-[min(44rem,calc(100vh-16rem))] space-y-2 overflow-y-auto pr-1">
+      <div className="grid min-h-0 flex-1 grid-rows-[minmax(0,1.15fr)_minmax(0,0.85fr)] gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)] xl:grid-rows-1">
+        <div className="min-h-0 space-y-1.5 overflow-y-auto rounded-lg border border-border bg-white p-1.5 dark:bg-black/20 [scrollbar-width:thin]">
           {queueQuery.isLoading ? (
             <div className="space-y-2">
               {Array.from({ length: 4 }).map((_, index) => (
@@ -399,84 +409,98 @@ export function VocHomePanel({
           )}
         </div>
 
-        <div className="rounded-lg border border-border bg-white p-4 dark:bg-black/20 xl:sticky xl:top-0 xl:self-start">
+        <aside className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-white dark:bg-black/20">
           {selected && research ? (
-            <div className="space-y-4">
-              <div>
-                <div className="text-[10px] font-medium uppercase tracking-wide text-muted">Исследование</div>
-                <h3 className="mt-1 text-[16px] font-semibold leading-snug tracking-tight">{selected.product}</h3>
-                <p className="mt-1 text-[12px] font-medium text-fg/70">{selected.phrase}</p>
-              </div>
-              <p className="text-[13px] leading-relaxed text-fg/85">
-                {selected.summary || "Короткого описания в ленте нет. Полный разбор — в карточке."}
-              </p>
-              {selected.evidence.length ? (
-                <div className="flex flex-wrap gap-1.5">
-                  {selected.evidence.map((chip) => (
-                    <span key={chip} className={cn("rounded border px-1.5 py-0.5 text-[10px] font-medium", vocChipClass("muted"))}>
-                      {chip}
-                    </span>
-                  ))}
+            <>
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3.5 [scrollbar-width:thin]">
+                <div>
+                  <div className="text-[10px] font-medium uppercase tracking-wide text-muted">Исследование</div>
+                  <h3 className="mt-1 text-[15px] font-semibold leading-snug tracking-tight">{selected.product}</h3>
+                  <p className="mt-1 text-[12px] leading-snug text-fg/70">{selected.phrase}</p>
                 </div>
-              ) : null}
-              <div className="flex flex-wrap gap-2">
-                {research.cveId ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenCve?.(research.cveId!)}
-                    className="inline-flex items-center gap-1 rounded-lg border border-accent/40 bg-accent/12 px-3 py-2 text-[12px] font-semibold"
-                  >
-                    Карточка {research.cveId}
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                ) : null}
-                {research.bduId ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenBdu?.(research.bduId!)}
-                    className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-[12px] font-medium hover:border-accent/30"
-                  >
-                    Карточка {research.bduId.startsWith("BDU") ? research.bduId : `BDU:${research.bduId}`}
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                ) : null}
-                {research.tgLink ? (
-                  <button
-                    type="button"
-                    onClick={() => onOpenTgLink?.(research.tgLink!)}
-                    className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-[12px] font-medium hover:border-accent/30"
-                  >
-                    Пост в Telegram
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                ) : null}
-              </div>
-              <div className="grid grid-cols-2 gap-2 border-t border-border pt-3">
-                <DecisionButton label="Наше, чиним" hint="1" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "fixing")} primary />
-                <DecisionButton label="Ждём патч" hint="2" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "waiting_patch")} />
-                <DecisionButton label="Не наше" hint="3" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "not_ours")} />
-                <DecisionButton label="Принятый риск" hint="4" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "accepted_risk")} />
-              </div>
-              {selected.primary.caseId ? (
-                <button type="button" className="text-left text-[12px] text-accent hover:underline" onClick={() => setOpenCaseId(selected.primary.caseId ?? null)}>
-                  Открыть кейс смены
-                </button>
-              ) : null}
-              {selected.primary.caseId ? (
-                <p className="text-[11px] text-muted">
-                  SLA идёт, пока решение «чиним». {selected.when ? `Осталось ${selected.when}.` : ""}
-                  {selected.primary.assigneeEmail || selected.primary.claimedByEmail
-                    ? ` Держит ${selected.primary.assigneeEmail || selected.primary.claimedByEmail}.`
-                    : ""}
+                <p className="text-[13px] leading-relaxed text-fg/85">
+                  {selected.summary || "Короткого описания в ленте нет. Полный разбор открывается карточкой."}
                 </p>
-              ) : (
-                <p className="text-[11px] text-muted">SLA начнётся только после «Наше, чиним».</p>
-              )}
-            </div>
+                {facts.length ? (
+                  <dl className="grid grid-cols-2 gap-x-3 gap-y-2 border-t border-border pt-3">
+                    {facts.map((fact) => (
+                      <div key={fact.label} className="min-w-0">
+                        <dt className="text-[10px] text-muted">{fact.label}</dt>
+                        <dd
+                          className={cn(
+                            "truncate text-[12px] font-medium",
+                            fact.tone === "danger" && "text-danger",
+                            fact.tone === "warn" && "text-warn",
+                            fact.tone === "ok" && "text-ok"
+                          )}
+                          title={fact.value}
+                        >
+                          {fact.value}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : null}
+                <div className="flex flex-wrap gap-1.5">
+                  {research.cveId ? (
+                    <button
+                      type="button"
+                      onClick={() => onOpenCve?.(research.cveId!)}
+                      className="inline-flex items-center gap-1 rounded-md border border-accent/40 bg-accent/12 px-2.5 py-1.5 text-[12px] font-semibold"
+                    >
+                      {research.cveId}
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </button>
+                  ) : null}
+                  {research.bduId ? (
+                    <button
+                      type="button"
+                      onClick={() => onOpenBdu?.(research.bduId!)}
+                      className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium hover:border-accent/30"
+                    >
+                      {research.bduId.startsWith("BDU") ? research.bduId : `BDU:${research.bduId}`}
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </button>
+                  ) : null}
+                  {research.tgLink ? (
+                    <button
+                      type="button"
+                      onClick={() => onOpenTgLink?.(research.tgLink!)}
+                      className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-[12px] font-medium hover:border-accent/30"
+                    >
+                      Telegram
+                      <ChevronRight className="h-3.5 w-3.5" />
+                    </button>
+                  ) : null}
+                  {selected.primary.caseId ? (
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1.5 text-[12px] text-accent hover:border-accent/30"
+                      onClick={() => setOpenCaseId(selected.primary.caseId ?? null)}
+                    >
+                      Кейс смены
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <div className="shrink-0 border-t border-border p-3">
+                <div className="grid grid-cols-2 gap-1.5">
+                  <DecisionButton label="Наше, чиним" hint="1" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "fixing")} primary />
+                  <DecisionButton label="Ждём патч" hint="2" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "waiting_patch")} />
+                  <DecisionButton label="Не наше" hint="3" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "not_ours")} />
+                  <DecisionButton label="Принятый риск" hint="4" busy={casePending || pendingKey != null} onClick={() => void decide(selected, "accepted_risk")} />
+                </div>
+                <p className="mt-2 text-[11px] text-muted">
+                  {selected.primary.caseId
+                    ? `SLA идёт. ${selected.when ? `Осталось ${selected.when}.` : ""}`
+                    : "SLA начнётся после «Наше, чиним»."}
+                </p>
+              </div>
+            </>
           ) : (
-            <div className="flex min-h-40 items-center justify-center text-sm text-muted">Выберите строку</div>
+            <div className="flex h-full items-center justify-center px-4 text-sm text-muted">Выберите строку</div>
           )}
-        </div>
+        </aside>
       </div>
 
       {openCaseId ? (
@@ -489,18 +513,6 @@ export function VocHomePanel({
           onOpenBdu={onOpenBdu}
         />
       ) : null}
-
-      <div className="border-t border-border pt-3">
-        <button type="button" className="text-[12px] text-muted hover:text-fg" onClick={() => setShowSetup((value) => !value)}>
-          {showSetup ? "Скрыть контур и смену" : "Контур и сдача смены"}
-        </button>
-        {showSetup ? (
-          <div className="mt-3 space-y-4">
-            <VocWatchlistPanel />
-            <VocShiftPanel />
-          </div>
-        ) : null}
-      </div>
     </section>
   );
 }

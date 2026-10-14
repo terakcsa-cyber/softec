@@ -5,94 +5,47 @@ import { SecuritySettings } from "@/components/auth/security-settings";
 import { UsersSettings } from "@/components/auth/users-settings";
 import { IntegrationSettingsPanel } from "@/components/dashboard/integration-settings-panel";
 import { PlatformUpdatePanel } from "@/components/dashboard/platform-update-panel";
+import { SystemHealthPanel } from "@/components/dashboard/system-health-panel";
 import { WebTlsSettingsPanel } from "@/components/dashboard/web-tls-settings-panel";
 import { useAuth } from "@/contexts/auth-context";
 import { cn } from "@/components/ui/cn";
-import {
-  KeyRound,
-  Lock,
-  Palette,
-  Plug,
-  RefreshCw,
-  Sparkles,
-  Users
-} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { visibleSettingsNav, type SettingsSectionId } from "./settings-nav";
 
-export type SettingsSectionId =
-  | "integrations"
-  | "textEngine"
-  | "webTls"
-  | "updates"
-  | "users"
-  | "appearance"
-  | "account";
+export type { SettingsSectionId } from "./settings-nav";
 
-type NavItem = {
-  id: SettingsSectionId;
-  label: string;
-  description: string;
-  adminOnly: boolean;
-  icon: typeof Plug;
-};
+export function SettingsSectionBody({
+  section,
+  appearance = "legacy"
+}: {
+  section: SettingsSectionId;
+  appearance?: "legacy" | "vc";
+}) {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
 
-const NAV: NavItem[] = [
-  {
-    id: "integrations",
-    label: "Интеграции",
-    description: "NVD, VulnCheck, Telegram, MaxPatrol VM и БДУ",
-    adminOnly: true,
-    icon: Plug
-  },
-  {
-    id: "textEngine",
-    label: "Текст и LLM",
-    description: "Движок обогащения, LibreTranslate и профили моделей",
-    adminOnly: true,
-    icon: Sparkles
-  },
-  {
-    id: "webTls",
-    label: "Веб / TLS",
-    description: "HTTPS-сертификат для web и TLS-прокси",
-    adminOnly: true,
-    icon: Lock
-  },
-  {
-    id: "updates",
-    label: "Обновления",
-    description: "Проверка git-репозитория и безопасный apply",
-    adminOnly: true,
-    icon: RefreshCw
-  },
-  {
-    id: "users",
-    label: "Пользователи",
-    description: "Учётные записи, роли RBAC и смена пароля",
-    adminOnly: true,
-    icon: Users
-  },
-  {
-    id: "appearance",
-    label: "Оформление",
-    description: "Тема интерфейса для этого браузера",
-    adminOnly: false,
-    icon: Palette
-  },
-  {
-    id: "account",
-    label: "Аккаунт",
-    description: "Профиль, 2FA и выход из системы",
-    adminOnly: false,
-    icon: KeyRound
+  if (section === "integrations") {
+    return isAdmin ? <IntegrationSettingsPanel section="integrations" appearance={appearance} /> : <AdminOnlyNotice />;
   }
-];
+  if (section === "textEngine") {
+    return isAdmin ? <IntegrationSettingsPanel section="textEngine" appearance={appearance} /> : <AdminOnlyNotice />;
+  }
+  if (section === "webTls") return isAdmin ? <WebTlsSettingsPanel embedded /> : <AdminOnlyNotice />;
+  if (section === "updates") return isAdmin ? <PlatformUpdatePanel embedded /> : <AdminOnlyNotice />;
+  if (section === "systemHealth") {
+    return isAdmin ? <SystemHealthPanel appearance={appearance} embedded /> : <AdminOnlyNotice />;
+  }
+  if (section === "users") return isAdmin ? <UsersSettings embedded /> : <AdminOnlyNotice />;
+  if (section === "appearance") return <AppearanceSettings embedded />;
+  if (section === "account") return <SecuritySettings embedded />;
+  return null;
+}
 
 export function SettingsPanel() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
 
-  const items = useMemo(() => NAV.filter((item) => (item.adminOnly ? isAdmin : true)), [isAdmin]);
+  const items = useMemo(() => visibleSettingsNav(isAdmin), [isAdmin]);
 
   const [section, setSection] = useState<SettingsSectionId>("appearance");
   const [didInit, setDidInit] = useState(false);
@@ -117,8 +70,8 @@ export function SettingsPanel() {
       <div className="border-b border-slate-200 px-5 py-4 dark:border-border sm:px-6">
         <div className="text-sm font-semibold tracking-tight text-fg/95">Настройки</div>
         <p className="mt-1 text-xs text-muted">
-          Разделы разделены по назначению: интеграции, текстовый движок, веб/TLS, обновления, пользователи и
-          личные настройки.
+          Разделы разделены по назначению: интеграции, текстовый движок, веб/TLS, обновления, здоровье системы,
+          пользователи и личные настройки.
         </p>
       </div>
 
@@ -160,7 +113,7 @@ export function SettingsPanel() {
 
           {!isAdmin ? (
             <p className="mt-3 hidden px-1 text-[10px] leading-relaxed text-muted lg:block">
-              Интеграции, LLM, TLS, обновления и пользователи доступны только роли{" "}
+              Интеграции, LLM, TLS, обновления, здоровье системы и пользователи доступны только роли{" "}
               <span className="font-medium text-fg/80">admin</span>.
             </p>
           ) : null}
@@ -172,31 +125,7 @@ export function SettingsPanel() {
             <p className="mt-1 text-xs text-muted">{active.description}</p>
           </div>
 
-          {activeId === "integrations" ? (
-            isAdmin ? (
-              <IntegrationSettingsPanel section="integrations" />
-            ) : (
-              <AdminOnlyNotice />
-            )
-          ) : null}
-
-          {activeId === "textEngine" ? (
-            isAdmin ? (
-              <IntegrationSettingsPanel section="textEngine" />
-            ) : (
-              <AdminOnlyNotice />
-            )
-          ) : null}
-
-          {activeId === "webTls" ? (isAdmin ? <WebTlsSettingsPanel embedded /> : <AdminOnlyNotice />) : null}
-
-          {activeId === "updates" ? (isAdmin ? <PlatformUpdatePanel embedded /> : <AdminOnlyNotice />) : null}
-
-          {activeId === "users" ? (isAdmin ? <UsersSettings embedded /> : <AdminOnlyNotice />) : null}
-
-          {activeId === "appearance" ? <AppearanceSettings embedded /> : null}
-
-          {activeId === "account" ? <SecuritySettings embedded /> : null}
+          <SettingsSectionBody section={activeId} />
         </div>
       </div>
     </div>

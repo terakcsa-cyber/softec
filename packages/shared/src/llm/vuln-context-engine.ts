@@ -43,9 +43,41 @@ export function normalizeTextEngineMode(value: unknown): TextEngineMode {
 
 function defaultModelForEndpoint(endpoint: string): string {
   const u = endpoint.toLowerCase();
+  if (u.includes("deepseek")) return "deepseek-chat";
   if (u.includes("dashscope")) return "qwen-turbo";
   if (u.includes("x.ai")) return "grok-4.20-reasoning";
   return "gpt-4.1-mini";
+}
+
+/**
+ * OpenAI-совместимый POST. Полный путь `/chat/completions` остаётся как есть.
+ * База DeepSeek `https://api.deepseek.com` становится `/chat/completions`.
+ */
+export function resolveOpenAiCompatibleChatUrl(endpoint: string): string {
+  const trimmed = endpoint.trim();
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return trimmed;
+  }
+  const path = url.pathname.replace(/\/+$/, "") || "/";
+  if (path.endsWith("/chat/completions") || path.endsWith("/responses")) return trimmed;
+  const host = url.hostname.toLowerCase();
+  if (path === "/") {
+    url.pathname = host.includes("deepseek") ? "/chat/completions" : "/v1/chat/completions";
+  } else if (path === "/v1") {
+    url.pathname = "/v1/chat/completions";
+  } else {
+    return trimmed;
+  }
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+function llmHttpUrl(endpoint: string): string {
+  return resolveOpenAiCompatibleChatUrl(endpoint);
 }
 
 function trimEnv(s: string | undefined): string {
@@ -1085,11 +1117,11 @@ export async function runVulnContextLlm(
         signal: AbortSignal.timeout(timeoutMs)
       };
       const fetched: Response = useOllamaUndici
-        ? ((await undiciFetch(config.endpoint, {
+        ? ((await undiciFetch(llmHttpUrl(config.endpoint), {
             ...init,
             dispatcher: getOllamaUndiciAgent(timeoutMs)
           })) as unknown as Response)
-        : await fetch(config.endpoint, init);
+        : await fetch(llmHttpUrl(config.endpoint), init);
       res = fetched;
 
       if (fetched.ok) {
@@ -1401,11 +1433,11 @@ export async function runFstecBulletinAnalysisLlm(
         signal: AbortSignal.timeout(timeoutMs)
       };
       const fetched: Response = useOllamaUndici
-        ? ((await undiciFetch(config.endpoint, {
+        ? ((await undiciFetch(llmHttpUrl(config.endpoint), {
             ...init,
             dispatcher: getOllamaUndiciAgent(timeoutMs)
           })) as unknown as Response)
-        : await fetch(config.endpoint, init);
+        : await fetch(llmHttpUrl(config.endpoint), init);
       res = fetched;
       if (fetched.ok) break;
       const text = await fetched.text().catch(() => "");
@@ -1488,7 +1520,7 @@ export async function runVocTaskBriefLlm(
       ...(ollama ? { stream: false as const, max_tokens: 4096 } : {})
     };
     const timeoutMs = Math.max(effectiveLlmTimeoutMs(config.endpoint), 90_000);
-    const res = await fetch(config.endpoint, {
+    const res = await fetch(llmHttpUrl(config.endpoint), {
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
@@ -1496,7 +1528,7 @@ export async function runVocTaskBriefLlm(
     });
     if (!res.ok) return fallback;
     const data = (await res.json()) as unknown;
-    const content = extractModelText(data, config.endpoint);
+    const content = extractModelText(data, llmHttpUrl(config.endpoint));
     if (!content?.trim()) return fallback;
     const parsed = tryParseLlmJson(content) as Record<string, unknown> | null;
     if (!parsed) return fallback;
@@ -1585,7 +1617,7 @@ export async function runVocPlaybookLlm(
       ...(ollama ? { stream: false as const, max_tokens: 4096 } : {})
     };
     const timeoutMs = Math.max(effectiveLlmTimeoutMs(config.endpoint), 90_000);
-    const res = await fetch(config.endpoint, {
+    const res = await fetch(llmHttpUrl(config.endpoint), {
       method: "POST",
       headers,
       body: JSON.stringify(requestBody),
@@ -1593,7 +1625,7 @@ export async function runVocPlaybookLlm(
     });
     if (!res.ok) return fallback;
     const data = (await res.json()) as unknown;
-    const content = extractModelText(data, config.endpoint);
+    const content = extractModelText(data, llmHttpUrl(config.endpoint));
     if (!content?.trim()) return fallback;
     const parsed = tryParseLlmJson(content) as Record<string, unknown> | null;
     if (!parsed) return fallback;
@@ -1609,5 +1641,60 @@ export async function runVocPlaybookLlm(
     return playbookFromStepLabels(rawSteps, { aiGenerated: true, contextSummary });
   } catch {
     return fallback;
+  }
+}
+
+/** Короткий OpenAI-совместимый ответ. Без ключа на публичный endpoint запрос не уходит. */
+export async function completeOpenAiChatText(
+  config: VulnContextLlmConfig,
+  userContent: string,
+  opts?: { temperature?: number; timeoutMs?: number; maxTokens?: number; maxChars?: number; system?: string }
+): Promise<{ ok: true; text: string } | { ok: false; reason: "not_configured" | "failed" }> {
+  if (!config.apiKey && requiresApiKey(config.endpoint)) {
+    return { ok: false, reason: "not_configured" };
+  }
+  const endpoint = llmHttpUrl(config.endpoint);
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (config.apiKey.length > 0) headers.authorization = `Bearer ${config.apiKey}`;
+  const ollama = isLikelyOllamaOpenAiEndpoint(config.endpoint);
+  const useXai = isXaiResponsesEndpoint(endpoint);
+  const maxTokens = Math.max(128, Math.min(8192, opts?.maxTokens ?? 900));
+  const system = opts?.system?.trim() || DEFAULT_SYSTEM_POLICY;
+  const requestBody = useXai
+    ? {
+        model: config.model,
+        temperature: opts?.temperature ?? 0,
+        max_output_tokens: maxTokens,
+        store: false,
+        input: [
+          { role: "system" as const, content: system },
+          { role: "user" as const, content: userContent }
+        ]
+      }
+    : {
+        model: config.model,
+        temperature: opts?.temperature ?? 0,
+        max_tokens: maxTokens,
+        messages: [
+          { role: "system" as const, content: system },
+          { role: "user" as const, content: userContent }
+        ],
+        ...(ollama ? { stream: false as const } : {})
+      };
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
+      signal: AbortSignal.timeout(opts?.timeoutMs ?? effectiveLlmTimeoutMs(config.endpoint))
+    });
+    if (!res.ok) return { ok: false, reason: "failed" };
+    const data = (await res.json()) as unknown;
+    const text = extractModelText(data, endpoint);
+    if (!text?.trim()) return { ok: false, reason: "failed" };
+    const maxChars = Math.max(500, Math.min(20_000, opts?.maxChars ?? 4000));
+    return { ok: true, text: text.trim().slice(0, maxChars) };
+  } catch {
+    return { ok: false, reason: "failed" };
   }
 }

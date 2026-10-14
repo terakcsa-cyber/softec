@@ -37,12 +37,19 @@ import { VocShiftService } from "../services/voc-shift.service.js";
 import { VocService } from "../services/voc.service.js";
 import { ThreatFeedService } from "../services/threat-feed.service.js";
 import { ThreatDigestPdfService } from "../services/threat-digest-pdf.service.js";
+import { PeriodDigestPdfService } from "../services/period-digest-pdf.service.js";
+import { MonthlyDigestService } from "../services/monthly-digest.service.js";
+import { OpenMonthDigestService } from "../services/open-month-digest.service.js";
+import { MonthlyDigestHistoryService } from "../services/monthly-digest-history.service.js";
+import { PointCveAiService } from "../services/point-cve-ai.service.js";
 import { ThreatIntelRefreshService } from "../services/threat-intel-refresh.service.js";
 import { ReconciliationService } from "../services/reconciliation.service.js";
 import { OpsRepairService } from "../services/ops-repair.service.js";
 import { TextEngineBgSweepService } from "../services/text-engine-bg-sweep.service.js";
 import { PgMaintenanceService } from "../services/pg-maintenance.service.js";
 import { DiskHousekeepingService } from "../services/disk-housekeeping.service.js";
+import { ProductsController } from "../routes/products.controller.js";
+import { PeriodDigestController } from "../routes/period-digest.controller.js";
 import { VocController } from "../routes/voc.controller.js";
 import { IntegrationSettingsService } from "../services/integration-settings.service.js";
 import { WebTlsService } from "../services/web-tls.service.js";
@@ -78,7 +85,9 @@ import { MetricsPollerService } from "../services/metrics-poller.service.js";
     BduController,
     FstecBulletinController,
     TelegramController,
-    VocController
+    VocController,
+    ProductsController,
+    PeriodDigestController
   ],
   providers: [
     SchemaService,
@@ -110,6 +119,11 @@ import { MetricsPollerService } from "../services/metrics-poller.service.js";
     VocService,
     ThreatFeedService,
     ThreatDigestPdfService,
+    MonthlyDigestService,
+    OpenMonthDigestService,
+    MonthlyDigestHistoryService,
+    PointCveAiService,
+    PeriodDigestPdfService,
     ThreatIntelRefreshService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: ThrottlerGuard },

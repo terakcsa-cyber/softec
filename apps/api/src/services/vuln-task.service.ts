@@ -409,7 +409,7 @@ export class VulnTaskService {
     const r = await this.db.query(
       `SELECT id, title, status, priority_local, owner, due_date, review_date,
               vendor_key, vendor_display, product_key_norm, product_display,
-              score_raw, score_final, score_reasons, stats,
+              score_raw, score_final, score_reasons, stats, notes_md, evidence,
               created_at, updated_at, closed_at
          FROM vuln_task
          ${where}
@@ -693,7 +693,7 @@ export class VulnTaskService {
     if ((before.rowCount ?? 0) === 0) throw new NotFoundException("Task not found");
     const prev = before.rows[0]!;
     const prevStatus = normalizeTaskStatus(prev.status, "new");
-    const nextStatus = patch.status !== undefined ? patch.status : prevStatus;
+    let nextStatus = patch.status !== undefined ? patch.status : prevStatus;
     const actorEmail = typeof actor?.email === "string" ? actor.email.trim() : "";
 
     const upd: Record<string, any> = {};
@@ -704,12 +704,18 @@ export class VulnTaskService {
     set("title", patch.title?.trim());
     set("status", patch.status);
     set("priority_local", patch.priorityLocal);
-    set("owner", patch.owner === undefined ? undefined : patch.owner?.trim() || null);
+    const ownerValue = patch.owner === undefined ? undefined : patch.owner?.trim() || null;
+    set("owner", ownerValue);
     // Taking a task into work → current user becomes исполнитель (unless owner explicitly set).
     if (patch.status !== undefined && nextStatus === "in_progress" && prevStatus !== "in_progress") {
       if (patch.owner === undefined && actorEmail) {
         upd.owner = actorEmail;
       }
+    }
+    // A new task with an assignee is already in progress. Applies to «назначить на меня».
+    if (ownerValue && nextStatus === "new") {
+      nextStatus = "in_progress";
+      upd.status = "in_progress";
     }
     // Back to backlog → clear assignee unless owner explicitly provided.
     if (patch.status !== undefined && nextStatus === "new" && prevStatus !== "new") {
@@ -735,20 +741,18 @@ export class VulnTaskService {
     }
     sets.push(`updated_at = now()`);
 
-    // auto closed_at
-    if (patch.status === "closed") {
+    if (upd.status === "closed") {
       sets.push(`closed_at = COALESCE(closed_at, now())`);
-    }
-    if (patch.status && patch.status !== "closed") {
+    } else if (typeof upd.status === "string") {
       sets.push(`closed_at = NULL`);
     }
 
     await this.db.query(`UPDATE vuln_task SET ${sets.join(", ")} WHERE id = $1`, params);
 
     await this.db.query(
-      `INSERT INTO vuln_task_event (task_id, action, before, after)
-       VALUES ($1, 'task.updated', $2::jsonb, $3::jsonb)`,
-      [taskId, JSON.stringify(before.rows[0]), JSON.stringify({ ...before.rows[0], ...upd })]
+      `INSERT INTO vuln_task_event (task_id, actor, action, before, after)
+       VALUES ($1, $2, 'task.updated', $3::jsonb, $4::jsonb)`,
+      [taskId, actorEmail || null, JSON.stringify(before.rows[0]), JSON.stringify({ ...before.rows[0], ...upd })]
     );
 
     await this.recomputeTask(taskId);
@@ -819,8 +823,8 @@ export class VulnTaskService {
     const id = String(cveId ?? "").trim().toUpperCase();
     if (!/^CVE-\d{4}-\d{4,}$/.test(id)) throw new BadRequestException("Bad CVE id");
     const r = await this.db.query(
-      `SELECT t.id, t.title, t.status, t.priority_local, t.vendor_display, t.product_display,
-              t.score_final, t.created_at, t.updated_at, l.added_at
+      `SELECT t.id, t.title, t.status, t.priority_local, t.owner, t.due_date, t.notes_md,
+              t.vendor_display, t.product_display, t.score_final, t.created_at, t.updated_at, l.added_at
          FROM vuln_task_cve l
          JOIN vuln_task t ON t.id = l.task_id
         WHERE l.cve_id = $1

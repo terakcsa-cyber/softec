@@ -11,6 +11,7 @@ import { VulncheckKevIngestJob } from "../jobs/vulncheck-kev-ingest.job.js";
 import { ExploitIntelRefreshJob } from "../jobs/exploit-intel-refresh.job.js";
 import { ThreatIntelBootJob } from "../jobs/threat-intel-boot.job.js";
 import { IntegrationsBootJob } from "../jobs/integrations-boot.job.js";
+import { ContextSourcesJob } from "../jobs/context-sources.job.js";
 
 @Module({
   imports: [DbModule, QueueModule],
@@ -24,7 +25,8 @@ import { IntegrationsBootJob } from "../jobs/integrations-boot.job.js";
     VulncheckKevIngestJob,
     ExploitIntelRefreshJob,
     ThreatIntelBootJob,
-    IntegrationsBootJob
+    IntegrationsBootJob,
+    ContextSourcesJob
   ]
 })
 export class AppModule {}

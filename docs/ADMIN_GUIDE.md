@@ -450,6 +450,17 @@ GET /api/stats/queue
 
 Manual enrich и `threat-digest/prepare` работают без LLM в режимах `baseline` и `translate`: API синхронно готовит обогащение через текущий text engine и не ждёт очередь LLM.
 
+### Ежемесячный дайджест VulnControl (DeepSeek)
+
+Отчёты → **Ежемесячный дайджест** строит презентацию **16:9** для руководства:
+
+- Платформа снимает открытые фиды (CISA KEV JSON, NVD, FIRST EPSS, выдержки бюллетеней / CISA advisories / bdu.fstec.ru).
+- DeepSeek вызывается с **web_search** (ключ дайджеста в UI: Настройки → Текст и LLM; не смешивается с очередью каталога).
+- PDF — слайды с фактурой и графиками по фидам (сравнение месяцев, недели KEV, вендоры, CVSS sample, EPSS bands).
+- История: до 5 последних PDF на аккаунт (`data/monthly-digest-history`).
+
+Без ключа DeepSeek предпросмотр не генерируется. Цифры каталога VulnControl в этот отчёт не подмешиваются.
+
 ### Ollama на LAN
 
 ```env
