@@ -118,7 +118,10 @@ export function ReportsView() {
     tab: kevOnly ? ("kev" as const) : ("all" as const),
     vendor: "all" as const,
     product: "all" as const,
-    status: "all" as const
+    status: "all" as const,
+    kevAddedDays: null,
+    publishedDays: null,
+    exploitSignal: "all" as const
   };
   const cves = useCveList(cveQuery, { limit: CVE_LIMIT });
   const tasks = useVulnTasks();

@@ -261,7 +261,7 @@ function parseCharts(value: unknown): OpenDigestChart[] {
     const id = String(row.id ?? "").slice(0, 40);
     const slide = String(row.slide ?? "").slice(0, 80);
     const title = String(row.title ?? "").slice(0, 120);
-    const kind = row.kind === "compare" ? "compare" : "bars";
+    const kind: OpenDigestChart["kind"] = row.kind === "compare" ? "compare" : "bars";
     const bars = Array.isArray(row.bars)
       ? row.bars.flatMap((bar) => {
           if (!bar || typeof bar !== "object") return [];
@@ -273,7 +273,8 @@ function parseCharts(value: unknown): OpenDigestChart[] {
         }).slice(0, 12)
       : [];
     if (!id || !slide || !title || bars.length < 1) return [];
-    return [{ id, slide, title, kind, bars }];
+    const chart: OpenDigestChart = { id, slide, title, kind, bars };
+    return [chart];
   }).slice(0, 8);
 }
 
