@@ -1,10 +1,11 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { DetailDrawer } from "./detail-drawer";
 import { LiveCveTable } from "./live-table";
-import { VcSelect } from "./vc-pop";
+import { VcSearchSelect, VcSelect } from "./vc-pop";
 import { useVc } from "./vc-context";
-import { formatInt, useCatalogSummary, useExploitRadar, useVendorWindow } from "@/lib/vulncontrol/live";
+import { formatInt, useCatalogFacets, useCatalogSummary, useExploitRadar } from "@/lib/vulncontrol/live";
 import type { ExploitSignal, Severity, VulnStatus } from "@/lib/vulncontrol/types";
 
 const TABS: Array<{
@@ -42,7 +43,24 @@ export function VulnsView() {
   const { query, setQuery } = useVc();
   const summary = useCatalogSummary();
   const radar = useExploitRadar();
-  const vendors = useVendorWindow(query.range);
+  const [vendorQ, setVendorQ] = useState("");
+  const [productQ, setProductQ] = useState("");
+  const [vendorNeedle, setVendorNeedle] = useState("");
+  const [productNeedle, setProductNeedle] = useState("");
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setVendorNeedle(vendorQ.trim()), 160);
+    return () => window.clearTimeout(t);
+  }, [vendorQ]);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setProductNeedle(productQ.trim()), 160);
+    return () => window.clearTimeout(t);
+  }, [productQ]);
+
+  const vendors = useCatalogFacets("vendors", vendorNeedle);
+  const products = useCatalogFacets("products", productNeedle, query.vendor);
+
   const severity = summary.data?.severity;
   const counts: Record<string, number | undefined> = {
     all: summary.data?.totalCves,
@@ -67,13 +85,26 @@ export function VulnsView() {
     query.publishedDays != null ? `публикации за ${query.publishedDays} дн.` : null,
     query.exploitSignal !== "all" ? SIGNAL_HINT[query.exploitSignal] : null
   ].filter(Boolean).join(" · ");
-  const vendorNames = unique([query.vendor !== "all" ? query.vendor : "", ...(vendors.data?.vendors.map((row) => row.vendor) ?? [])]);
-  const productNames = unique([
-    query.product !== "all" ? query.product : "",
-    ...(vendors.data?.products ?? [])
-      .filter((row) => query.vendor === "all" || row.vendor === query.vendor)
-      .map((row) => row.product)
-  ]);
+
+  const vendorOptions = useMemo(() => {
+    const rows = (vendors.data?.items ?? []).map((item) => [item.id, item.label] as [string, string]);
+    if (query.vendor !== "all" && !rows.some(([id]) => id === query.vendor)) {
+      rows.unshift([query.vendor, query.vendor]);
+    }
+    return rows;
+  }, [query.vendor, vendors.data?.items]);
+
+  const productOptions = useMemo(() => {
+    const rows = (products.data?.items ?? []).map((item) => {
+      const id = item.product ?? item.id;
+      return [id, item.label] as [string, string];
+    });
+    if (query.product !== "all" && !rows.some(([id]) => id === query.product)) {
+      rows.unshift([query.product, query.product]);
+    }
+    return rows;
+  }, [products.data?.items, query.product]);
+
   const statusValue: VulnStatus | "all" =
     query.status === "open" || query.status === "in_progress" ? "open" : query.status === "resolved" || query.status === "accepted_risk" ? "resolved" : "all";
 
@@ -133,15 +164,45 @@ export function VulnsView() {
           onChange={(value) => setQuery({ status: value === "open" ? "open" : value === "resolved" ? "resolved" : "all" })}
           options={[["all", "Все статусы"], ["open", "Есть задача"], ["resolved", "Без задачи"]]}
         />
-        <FilterSelect
-          value={vendorNames.includes(query.vendor) ? query.vendor : "all"}
-          onChange={(value) => setQuery({ vendor: value, product: "all" })}
-          options={[["all", "Все вендоры"], ...vendorNames.map((name) => [name, name] as [string, string])]}
+        <VcSearchSelect
+          value={query.vendor}
+          onChange={(value) => {
+            setQuery({ vendor: value, product: "all" });
+            setProductQ("");
+            setProductNeedle("");
+          }}
+          options={vendorOptions}
+          allLabel="Все вендоры"
+          placeholder="Поиск по всему каталогу вендоров…"
+          hint={vendorNeedle ? "Поиск по всему каталогу вендоров" : "Топ по числу продуктов · введите название, чтобы найти любого вендора"}
+          loading={vendors.isFetching}
+          query={vendorQ}
+          onQueryChange={setVendorQ}
+          ariaLabel="Вендор"
+          className="bg-[var(--vc-inset-2)]"
+          minWidth={280}
         />
-        <FilterSelect
-          value={productNames.includes(query.product) ? query.product : "all"}
+        <VcSearchSelect
+          value={query.product}
           onChange={(value) => setQuery({ product: value })}
-          options={[["all", "Все продукты"], ...productNames.map((name) => [name, name] as [string, string])]}
+          options={productOptions}
+          allLabel="Все продукты"
+          placeholder={query.vendor === "all" ? "Поиск продукта в каталоге…" : `Продукты ${query.vendor}…`}
+          hint={
+            query.vendor === "all"
+              ? productNeedle
+                ? "Поиск по всему каталогу продуктов"
+                : "Топ продуктов · выберите вендора или введите название"
+              : productNeedle
+                ? `Поиск среди продуктов ${query.vendor}`
+                : `Продукты ${query.vendor} · введите название для полного поиска`
+          }
+          loading={products.isFetching}
+          query={productQ}
+          onQueryChange={setProductQ}
+          ariaLabel="Продукт"
+          className="bg-[var(--vc-inset-2)]"
+          minWidth={300}
         />
       </div>
       <LiveCveTable registry />
@@ -152,8 +213,4 @@ export function VulnsView() {
 
 function FilterSelect({ value, onChange, options }: { value: string; onChange: (value: string) => void; options: Array<[string, string]> }) {
   return <VcSelect value={value} onChange={onChange} options={options} className="bg-[var(--vc-inset-2)]" />;
-}
-
-function unique(values: string[]) {
-  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }

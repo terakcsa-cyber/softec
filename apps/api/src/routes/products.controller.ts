@@ -168,6 +168,100 @@ function mapVendors(rows: VendorFacet[]) {
 export class ProductsController {
   constructor(private readonly db: DbService) {}
 
+  /**
+   * Facets for VulnControl filters: full catalog (not top-N window).
+   * `kind=vendors` — distinct vendors; `kind=products` — products (optionally scoped by vendor).
+   * Empty `q` returns an alphabetical page; with `q` searches the whole catalog.
+   */
+  @Get("facets")
+  async facets(
+    @Query("kind") kindRaw?: string,
+    @Query("q") qRaw?: string,
+    @Query("vendor") vendorRaw?: string,
+    @Query("limit") limitRaw?: string
+  ) {
+    const kind = kindRaw === "products" ? "products" : "vendors";
+    const limit = clampInt(limitRaw, 200, 20, 500);
+    const vendor = cleanToken(vendorRaw);
+    const needle = qRaw?.trim().toLowerCase() ?? "";
+    const q = needle.length >= 1 ? `%${needle.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%` : null;
+
+    if (kind === "vendors") {
+      const values: unknown[] = [];
+      let where = PRODUCT_OK;
+      if (q) {
+        values.push(q);
+        where += ` AND (
+          lower(vp.vendor) LIKE $1 ESCAPE '\\'
+          OR lower(vp.vendor_key) LIKE $1 ESCAPE '\\'
+        )`;
+      }
+      values.push(limit);
+      const limIdx = values.length;
+      const r = await this.db.query<{ vendor: string; count: number }>(
+        `SELECT max(vp.vendor) AS vendor,
+                count(DISTINCT vp.product_key_norm)::int AS count
+           FROM cve_vendor_product vp
+          WHERE ${where}
+          GROUP BY vp.vendor_key
+          ORDER BY count DESC, lower(max(vp.vendor)) ASC
+          LIMIT $${limIdx}`,
+        values
+      );
+      return {
+        kind: "vendors" as const,
+        totalHint: q ? r.rows.length : null,
+        items: r.rows.map((row) => ({
+          id: row.vendor,
+          label: row.vendor,
+          count: int(row.count)
+        }))
+      };
+    }
+
+    const values: unknown[] = [];
+    let where = PRODUCT_OK;
+    if (vendor) {
+      values.push(vendor);
+      where += ` AND (vp.vendor_key = $${values.length} OR lower(vp.vendor) = $${values.length})`;
+    }
+    if (q) {
+      values.push(q);
+      const i = values.length;
+      where += ` AND (
+        lower(vp.product) LIKE $${i} ESCAPE '\\'
+        OR lower(vp.product_key_norm) LIKE $${i} ESCAPE '\\'
+        OR lower(replace(vp.product, '_', ' ')) LIKE $${i} ESCAPE '\\'
+        ${vendor ? "" : `OR lower(vp.vendor) LIKE $${i} ESCAPE '\\'`}
+      )`;
+    }
+    values.push(limit);
+    const limIdx = values.length;
+    const r = await this.db.query<{ product: string; vendor: string; count: number }>(
+      `SELECT max(vp.product) AS product,
+              max(vp.vendor) AS vendor,
+              count(DISTINCT vp.cve_id)::int AS count
+         FROM cve_vendor_product vp
+        WHERE ${where}
+        GROUP BY vp.vendor_key, vp.product_key_norm
+        ORDER BY count DESC, lower(max(vp.product)) ASC
+        LIMIT $${limIdx}`,
+      values
+    );
+    return {
+      kind: "products" as const,
+      vendor: vendorRaw?.trim() || null,
+      totalHint: q ? r.rows.length : null,
+      items: r.rows.map((row) => ({
+        id: row.product,
+        label: vendor ? row.product : `${row.product} · ${row.vendor}`,
+        product: row.product,
+        vendor: row.vendor,
+        count: int(row.count)
+      }))
+    };
+  }
+
   @Get()
   async list(
     @Query("q") qRaw?: string,

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useVc } from "./vc-context";
-import { cvssBand, formatInt, knownCatalogTotal, useCatalogSummary, useCveList } from "@/lib/vulncontrol/live";
+import { cvssBand, formatDate, formatInt, knownCatalogTotal, useCatalogSummary, useCveList } from "@/lib/vulncontrol/live";
 
 const PAGE = 25;
 
@@ -59,10 +59,10 @@ export function LiveCveTable({ caption, registry = false }: { caption?: string; 
         ) : null}
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[980px] border-separate border-spacing-0 text-left text-[12px]">
+        <table className="w-full min-w-[1080px] border-separate border-spacing-0 text-left text-[12px]">
           <thead className="text-[10px] uppercase tracking-wide text-[var(--vc-muted)]">
             <tr>
-              {["CVE / ID", "Риск", "Уровень", "Название уязвимости", "БДУ", "Продукт", "Версия", "Вендор"].map((label) => (
+              {["CVE / ID", "Риск", "Уровень", "Название уязвимости", "БДУ", "Продукт", "Версия", "Вендор", "Публикация"].map((label) => (
                 <th key={label} className="bg-[var(--vc-table-head)] px-3 py-2.5 font-medium">{label}</th>
               ))}
             </tr>
@@ -143,12 +143,15 @@ export function LiveCveTable({ caption, registry = false }: { caption?: string; 
                       </button>
                     ) : "—"}
                   </td>
+                  <td className={`whitespace-nowrap border-b ${line} px-3 py-2 tabular-nums ${selected ? "text-white/90" : "text-[var(--vc-muted)]"}`}>
+                    {formatDate(row.published_at)}
+                  </td>
                 </tr>
               );
             })}
             {!list.isLoading && !rows.length ? (
               <tr>
-                <td colSpan={8} className="px-3 py-8 text-center text-[var(--vc-muted)]">Нет записей по этому фильтру</td>
+                <td colSpan={9} className="px-3 py-8 text-center text-[var(--vc-muted)]">Нет записей по этому фильтру</td>
               </tr>
             ) : null}
           </tbody>

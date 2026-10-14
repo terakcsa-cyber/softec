@@ -279,6 +279,34 @@ export function useVendorWindow(range: VcRange) {
   });
 }
 
+export type CatalogFacetItem = {
+  id: string;
+  label: string;
+  count?: number;
+  product?: string;
+  vendor?: string;
+};
+
+/** Full-catalog vendor/product facets for vulns filters (not the top-N window stats). */
+export function useCatalogFacets(kind: "vendors" | "products", q: string, vendor?: string) {
+  const needle = q.trim();
+  const scoped = kind === "products" && vendor && vendor !== "all";
+  const params = new URLSearchParams({
+    kind,
+    // Vendor-scoped product lists can be large; pull a wider page before requiring search.
+    limit: scoped ? "500" : "250"
+  });
+  if (needle) params.set("q", needle);
+  if (scoped) params.set("vendor", vendor);
+  return useQuery({
+    queryKey: ["vc", "catalog-facets", kind, needle, vendor ?? ""],
+    queryFn: () =>
+      getJson<{ items: CatalogFacetItem[] }>(`/api/products/facets?${params.toString()}`),
+    staleTime: 60_000,
+    placeholderData: keepPreviousData
+  });
+}
+
 export function useExploitRadar() {
   return useQuery({
     queryKey: ["vc", "exploit-radar"],

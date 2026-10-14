@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/components/ui/cn";
@@ -211,6 +211,174 @@ export function VcDrop({
 
 export const vcMenuItem =
   "block w-full min-w-0 truncate rounded px-2 py-1.5 text-left text-[12px] leading-snug text-[var(--vc-text)] hover:bg-[var(--vc-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-[var(--vc-primary)]";
+
+/** Searchable catalog select: options come from the parent (API facets), with a live filter field. */
+export function VcSearchSelect({
+  value,
+  onChange,
+  options,
+  allValue = "all",
+  allLabel,
+  placeholder = "Поиск…",
+  emptyText = "Ничего не найдено",
+  hint,
+  loading,
+  query,
+  onQueryChange,
+  ariaLabel,
+  className,
+  align = "start",
+  minWidth = 240
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  options: Array<[string, string]>;
+  allValue?: string;
+  allLabel: string;
+  placeholder?: string;
+  emptyText?: string;
+  hint?: string;
+  loading?: boolean;
+  query: string;
+  onQueryChange: (value: string) => void;
+  ariaLabel?: string;
+  className?: string;
+  align?: Align;
+  minWidth?: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const anchorRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listId = useId();
+  const rows = useMemo<Array<[string, string]>>(
+    () => [[allValue, allLabel], ...options.filter(([id]) => id !== allValue && id !== "")],
+    [allLabel, allValue, options]
+  );
+  const style = useAnchoredStyle(open, anchorRef, menuRef, align, Math.max(minWidth, 240), 360, `${rows.length}:${query}`);
+  useOutsideClose(open, [anchorRef, menuRef], () => setOpen(false));
+  const selectedLabel =
+    value === allValue ? allLabel : options.find(([id]) => id === value)?.[1] ?? (value && value !== allValue ? value : allLabel);
+
+  useEffect(() => {
+    if (!open) return;
+    const t = window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => window.clearTimeout(t);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    setActive(Math.max(0, rows.findIndex(([id]) => id === value)));
+  }, [open, query, value, rows]);
+
+  useEffect(() => {
+    if (!open) return;
+    const node = menuRef.current?.querySelector<HTMLElement>("[data-active='true']");
+    node?.scrollIntoView({ block: "nearest" });
+  }, [open, active]);
+
+  function pick(id: string) {
+    onChange(id);
+    onQueryChange("");
+    setOpen(false);
+    anchorRef.current?.focus();
+  }
+
+  function onTriggerKey(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key === "ArrowDown" || event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      setOpen(true);
+    }
+  }
+
+  function onInputKey(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActive((index) => Math.min(rows.length - 1, index + 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActive((index) => Math.max(0, index - 1));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const next = rows[active];
+      if (next) pick(next[0]);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setOpen(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        ref={anchorRef}
+        type="button"
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-controls={listId}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={onTriggerKey}
+        className={cn(
+          "inline-flex h-8 min-w-[9rem] max-w-[16rem] items-center justify-between gap-2 rounded-lg border border-[var(--vc-border)] bg-[var(--vc-inset-2)] px-2.5 text-left text-[12px] leading-none text-[var(--vc-text)] outline-none hover:border-[var(--vc-hover-border)]",
+          className
+        )}
+      >
+        <span className="min-w-0 flex-1 truncate">{selectedLabel}</span>
+        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--vc-muted)]" aria-hidden />
+      </button>
+      {open ? (
+        <div
+          ref={menuRef}
+          id={listId}
+          className="vc-pop flex flex-col overflow-hidden rounded-lg border border-[var(--vc-border)] bg-[var(--vc-surface)] shadow-xl"
+          style={style}
+        >
+          <div className="border-b border-[var(--vc-border)] p-1.5">
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(event) => {
+                onQueryChange(event.target.value);
+                setActive(0);
+              }}
+              onKeyDown={onInputKey}
+              placeholder={placeholder}
+              className="h-8 w-full rounded-md border border-[var(--vc-border)] bg-[var(--vc-well)] px-2 text-[12px] text-[var(--vc-text)] outline-none placeholder:text-[var(--vc-muted)] focus:border-[color-mix(in_srgb,var(--vc-primary)_50%,transparent)]"
+            />
+          </div>
+          <div role="listbox" aria-label={ariaLabel} className="min-h-0 flex-1 overflow-y-auto py-1">
+            {rows.map(([id, text], index) => {
+              const on = index === active;
+              const chosen = id === value;
+              return (
+                <button
+                  key={`${id}:${text}`}
+                  type="button"
+                  role="option"
+                  aria-selected={chosen}
+                  data-active={on ? "true" : "false"}
+                  title={text}
+                  onMouseEnter={() => setActive(index)}
+                  onClick={() => pick(id)}
+                  className={cn(vcMenuItem, "mx-1 w-[calc(100%-0.5rem)]", on && "bg-[var(--vc-hover)]", chosen && "font-medium")}
+                >
+                  {text}
+                </button>
+              );
+            })}
+            {!loading && rows.length <= 1 ? (
+              <div className="px-3 py-3 text-[12px] text-[var(--vc-muted)]">{emptyText}</div>
+            ) : null}
+            {loading ? <div className="px-3 py-2 text-[11px] text-[var(--vc-muted)]">Загрузка…</div> : null}
+          </div>
+          {hint ? <div className="border-t border-[var(--vc-border)] px-2.5 py-1.5 text-[10px] text-[var(--vc-muted)]">{hint}</div> : null}
+        </div>
+      ) : null}
+    </>
+  );
+}
 
 export function VcSelect({
   value,
